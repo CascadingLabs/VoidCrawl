@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write  # for GitHub Release creation
+  id-token: write  # for PyPI trusted publishing
+
+jobs:
+  # ── Build wheels for all platforms ──────────────────────────────────────
+  build-wheels:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64 (manylinux)
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: auto
+
+          # Linux aarch64 (cross-compile)
+          - runner: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            manylinux: auto
+
+          # macOS x86_64
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            manylinux: ""
+
+          # macOS Apple Silicon
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            manylinux: ""
+
+          # Windows x86_64
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            manylinux: ""
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@e10f6c464b90acceb5f640d31beda6d586ba7b4a # v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: >-
+            --release
+            --manifest-path crates/pyo3_bindings/Cargo.toml
+            --out dist
+            --interpreter python3.10 python3.11 python3.12 python3.13
+          sccache: "true"
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wheels-${{ matrix.target }}
+          path: dist/*.whl
+
+  # ── Build source distribution ────────────────────────────────────────────
+  build-sdist:
+    name: Build sdist
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@e10f6c464b90acceb5f640d31beda6d586ba7b4a # v1
+        with:
+          command: sdist
+          args: --manifest-path crates/pyo3_bindings/Cargo.toml --out dist
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  # ── Publish to PyPI ──────────────────────────────────────────────────────
+  publish-pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: [build-wheels, build-sdist]
+    environment:
+      name: pypi
+      url: https://pypi.org/p/void-crawl
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          merge-multiple: true
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@76f52bc884231f62b9a034ebfe128415bbaabdfc # v1
+        # Uses OIDC trusted publishing — no token needed if configured on PyPI
+
+  # ── Create GitHub Release ────────────────────────────────────────────────
+  github-release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-wheels, build-sdist]
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          merge-multiple: true
+          path: dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a9b853dfda7 # v2
+        with:
+          files: dist/*
+          generate_release_notes: true

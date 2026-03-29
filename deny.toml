@@ -1,0 +1,36 @@
+# cargo-deny configuration
+# https://embarkstudios.github.io/cargo-deny/
+
+[licenses]
+# Licenses we explicitly allow
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "MIT OR Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "OpenSSL",
+  "Zlib",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+]
+
+# Confidence threshold — licenses detected below this are treated as unlicensed
+confidence-threshold = 0.8
+
+[bans]
+# Deny crates with multiple conflicting versions
+multiple-versions = "warn"
+# Deny crates marked as wildcards in Cargo.toml
+wildcards = "deny"
+
+[advisories]
+# Warn on crates with known security vulnerabilities (requires cargo-deny 0.14+)
+ignore = []
+
+[sources]
+# Only allow crates from crates.io (no unpublished git deps)
+unknown-registry = "deny"
+unknown-git = "deny"

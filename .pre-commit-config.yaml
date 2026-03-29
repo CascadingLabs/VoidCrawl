@@ -1,0 +1,69 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.0
+    hooks:
+      # LOCAL: Automatically fixes linting errors in Python examples
+      - id: ruff-check
+        name: ruff-local-fix
+        args: [--fix]
+        stages: [pre-commit]
+
+      # CI: Strictly reports errors, does not modify files
+      - id: ruff-check
+        name: ruff-ci-check
+        args: [--no-fix, --exit-non-zero-on-fix]
+        stages: [manual]
+
+      # Formatter
+      - id: ruff-format
+        stages: [pre-commit, manual]
+
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all --
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-commit, manual]
+
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --workspace --all-targets -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [manual]
+
+      - id: cargo-deny
+        name: cargo deny (license check)
+        entry: cargo deny check licenses
+        language: system
+        types: [toml]
+        pass_filenames: false
+        stages: [manual]
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      - id: gitleaks
+        stages: [pre-commit, manual]
+
+  - repo: https://github.com/commitizen-tools/commitizen
+    rev: v4.13.6
+    hooks:
+      - id: commitizen
+        stages: [commit-msg]

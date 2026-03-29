@@ -1,0 +1,9 @@
+/target/
+Cargo.lock
+*.so
+*.dylib
+*.dll
+
+.env
+.venv
+.ropeproject
