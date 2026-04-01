@@ -9,12 +9,12 @@
 </p>
 
 <p align="center">
-  <a href="https://discord.gg/ftykDhmAQN"><img src="https://img.shields.io/badge/Discord-Join-7c4dbd?labelColor=120a24&logo=discord&logoColor=white" alt="Discord"></a>
-  <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache_2.0-7c4dbd?labelColor=120a24" alt="License"></a>
-  <a href="https://github.com/CascadingLabs/VoidCrawl/actions"><img src="https://img.shields.io/github/actions/workflow/status/CascadingLabs/VoidCrawl/CI.yaml?label=CI&labelColor=120a24&color=7c4dbd" alt="CI"></a>
-  <a href="https://pypi.python.org/pypi/void-crawl"><img src="https://img.shields.io/pypi/v/void-crawl?labelColor=120a24&color=7c4dbd" alt="PyPI"></a>
-  <a href="https://pypi.python.org/pypi/void-crawl"><img src="https://img.shields.io/pypi/pyversions/void-crawl?labelColor=120a24&color=7c4dbd" alt="Python versions"></a>
-  <a href="https://cascadinglabs.com/voidcrawl/"><img src="https://img.shields.io/badge/docs-cascadinglabs.com%2Fvoidcrawl-7c4dbd?labelColor=120a24" alt="docs"></a>
+  <a href="https://discord.gg/ftykDhmAQN"><img src="https://img.shields.io/badge/Discord-Join-b07adf?labelColor=120a24&logo=discord&logoColor=white" alt="Discord"></a>
+  <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache_2.0-b07adf?labelColor=120a24" alt="License"></a>
+  <a href="https://github.com/CascadingLabs/VoidCrawl/actions"><img src="https://img.shields.io/github/actions/workflow/status/CascadingLabs/VoidCrawl/CI.yaml?label=CI&labelColor=120a24&color=b07adf" alt="CI"></a>
+  <a href="https://pypi.python.org/pypi/void-crawl"><img src="https://img.shields.io/pypi/v/void-crawl?labelColor=120a24&color=b07adf" alt="PyPI"></a>
+  <a href="https://pypi.python.org/pypi/void-crawl"><img src="https://img.shields.io/pypi/pyversions/void-crawl?labelColor=120a24&color=b07adf" alt="Python versions"></a>
+  <a href="https://cascadinglabs.com/voidcrawl/"><img src="https://img.shields.io/badge/docs-cascadinglabs.com%2Fvoidcrawl-b07adf?labelColor=120a24" alt="docs"></a>
 </p>
 
 > [!WARNING]
