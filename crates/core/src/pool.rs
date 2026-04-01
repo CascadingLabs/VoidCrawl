@@ -161,7 +161,7 @@ impl BrowserPool {
         let tab_max_idle_secs: u64 =
             env::var("TAB_MAX_IDLE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
         let no_sandbox = env::var("CHROME_NO_SANDBOX").ok().is_some_and(|v| v == "1");
-        let headless = env::var("CHROME_HEADLESS").ok().map_or(true, |v| v != "0");
+        let headless = env::var("CHROME_HEADLESS").ok().is_none_or(|v| v != "0");
         let viewport_width: Option<u32> =
             env::var("VIEWPORT_WIDTH").ok().and_then(|v| v.parse().ok());
         let viewport_height: Option<u32> =
