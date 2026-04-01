@@ -74,6 +74,7 @@ impl fmt::Debug for PooledTab {
         f.debug_struct("PooledTab")
             .field("page", &self.page)
             .field("use_count", &self.use_count)
+            .field("last_used", &self.last_used)
             .field("browser_idx", &self.browser_idx)
             .finish()
     }
