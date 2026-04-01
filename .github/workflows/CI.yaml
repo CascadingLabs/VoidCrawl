@@ -8,20 +8,8 @@ on:
       - main
 
 jobs:
-  licenses:
-    name: License Check
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-
-      - name: Check Rust crate licenses
-        uses: EmbarkStudios/cargo-deny-action@34899fc7ba81ca6268d5947c7c8b47b012652ddd # v2
-        with:
-          command: check licenses
-
-  rust:
-    name: Rust
+  test:
+    name: Test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -29,8 +17,6 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
 
       - name: Cache Cargo registry & build
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
@@ -41,12 +27,6 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: ${{ runner.os }}-cargo-
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Check (compile)
         run: cargo check --workspace

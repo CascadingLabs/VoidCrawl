@@ -1,0 +1,24 @@
+# Cascading Labs — rustfmt.toml (2024 Style Edition)
+# Requires: cargo +nightly fmt (unstable features)
+
+# Use the 2024 formatting logic for modern generic/comment handling
+style_edition = "2024"
+edition = "2024"
+
+# High-density formatting
+max_width = 100
+use_small_heuristics = "Max"
+newline_style = "Unix"
+
+# Import management — groups: std -> external -> crate -> super -> self
+imports_granularity = "Crate"
+group_imports = "StdExternalCrate"
+
+# Structural clarity (requires unstable_features)
+unstable_features = true
+format_code_in_doc_comments = true
+wrap_comments = true
+
+# Align struct fields and enum discriminants for scannability
+struct_field_align_threshold = 20
+enum_discrim_align_threshold = 20

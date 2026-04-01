@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 description = "CDP browser automation core for Yosoi"
 
+[lints]
+workspace = true
+
 [dependencies]
 chromiumoxide = { version = "0.9", default-features = false }
 tokio = { version = "1", features = ["full"] }

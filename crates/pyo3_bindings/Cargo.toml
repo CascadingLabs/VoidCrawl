@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 description = "PyO3 bindings for void_crawl_core"
 
+[lints]
+workspace = true
+
 [lib]
 name = "void_crawl"
 crate-type = ["cdylib"]

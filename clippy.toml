@@ -1,0 +1,26 @@
+# Cascading Labs — clippy.toml (2024 Edition)
+
+# Lint thresholds (these configure lint behavior, not lint levels)
+cognitive-complexity-threshold = 20
+absolute-paths-max-segments = 2
+
+# Enforce module item ordering:
+# mod -> use -> const/static -> types/traits -> functions
+module-item-order-groupings = [
+    ["modules", ["extern_crate", "mod", "foreign_mod"]],
+    ["use", ["use"]],
+    ["UPPER_SNAKE_CASE", ["static", "const"]],
+    ["PascalCase", ["ty_alias", "enum", "struct", "union", "trait", "trait_alias", "impl"]],
+    ["lower_snake_case", ["fn"]],
+]
+
+# MSRV — prevent accidental use of features beyond your target
+msrv = "1.86.0"
+
+# Disallow print macros — use tracing instead
+disallowed-macros = [
+    { path = "std::print", reason = "Use tracing instead of print macros." },
+    { path = "std::println", reason = "Use tracing instead of print macros." },
+    { path = "std::eprint", reason = "Use tracing instead of print macros." },
+    { path = "std::eprintln", reason = "Use tracing instead of print macros." },
+]
