@@ -5,6 +5,7 @@
 
 use std::{collections::HashMap, time::Duration};
 
+use tokio::time;
 use void_crawl_core::{BrowserPool, BrowserSession, PoolConfig, StealthConfig};
 
 /// Helper: launch headless with no-sandbox (required for CI / containers).
@@ -302,7 +303,7 @@ async fn test_pool_idle_eviction() {
     pool.release(tab).await.expect("release");
 
     // Wait for idle timeout
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    time::sleep(Duration::from_secs(2)).await;
 
     // Evict idle tabs — should replace with fresh ones
     pool.evict_idle().await.expect("evict_idle failed");

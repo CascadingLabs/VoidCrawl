@@ -1,21 +1,26 @@
-//! PyO3 bindings for `void_crawl_core`.
+//! `PyO3` bindings for `void_crawl_core`.
 //!
 //! Exposes `PyBrowserSession` and `PyPage` as Python classes with async methods
 //! that bridge to Python's asyncio via `pyo3-async-runtimes`.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, convert::Infallible, fmt, sync::Arc, time::Duration};
 
 use pyo3::{
     exceptions::PyRuntimeError,
     prelude::*,
-    types::{PyBytes, PyDict, PyList},
+    types::{PyBytes, PyDict, PyList, PyType},
 };
+use pyo3_async_runtimes::tokio::future_into_py;
+use serde_json::Value;
 use tokio::sync::Mutex;
-use void_crawl_core::{BrowserMode, BrowserPool, BrowserSession, Page, PooledTab, StealthConfig};
+use void_crawl_core::{
+    BrowserMode, BrowserPool, BrowserSession, Page, PooledTab, StealthConfig, YosoiError,
+};
 
 // ── Error conversion ────────────────────────────────────────────────────
 
-fn to_py_err(e: void_crawl_core::YosoiError) -> PyErr {
+#[allow(clippy::needless_pass_by_value)] // used as fn pointer in map_err(to_py_err)
+fn to_py_err(e: YosoiError) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
 }
 
@@ -25,14 +30,14 @@ struct PyBytesResult(Vec<u8>);
 /// Wrapper for direct `serde_json::Value` → Python object conversion.
 ///
 /// Avoids the double-serialization of `val.to_string()` → `PyString`.
-struct PyJsonValue(serde_json::Value);
+struct PyJsonValue(Value);
 
 impl<'py> IntoPyObject<'py> for PyBytesResult {
     type Target = PyBytes;
     type Output = Bound<'py, PyBytes>;
-    type Error = std::convert::Infallible;
+    type Error = Infallible;
 
-    fn into_pyobject(self, py: Python<'py>) -> std::result::Result<Self::Output, Self::Error> {
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         Ok(PyBytes::new(py, &self.0))
     }
 }
@@ -47,12 +52,12 @@ impl<'py> IntoPyObject<'py> for PyJsonValue {
     }
 }
 
-/// Convert `serde_json::Value` directly to a Python object.
-fn json_to_py<'py>(py: Python<'py>, val: serde_json::Value) -> PyResult<Bound<'py, PyAny>> {
+/// Convert a [`Value`] directly to a Python object.
+fn json_to_py(py: Python<'_>, val: Value) -> PyResult<Bound<'_, PyAny>> {
     match val {
-        serde_json::Value::Null => Ok(py.None().into_bound(py)),
-        serde_json::Value::Bool(b) => Ok(b.into_pyobject(py)?.to_owned().into_any()),
-        serde_json::Value::Number(n) => {
+        Value::Null => Ok(py.None().into_bound(py)),
+        Value::Bool(b) => Ok(b.into_pyobject(py)?.to_owned().into_any()),
+        Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Ok(i.into_pyobject(py)?.into_any())
             } else if let Some(f) = n.as_f64() {
@@ -61,15 +66,15 @@ fn json_to_py<'py>(py: Python<'py>, val: serde_json::Value) -> PyResult<Bound<'p
                 Ok(py.None().into_bound(py))
             }
         }
-        serde_json::Value::String(s) => Ok(s.into_pyobject(py)?.into_any()),
-        serde_json::Value::Array(arr) => {
+        Value::String(s) => Ok(s.into_pyobject(py)?.into_any()),
+        Value::Array(arr) => {
             let list = PyList::empty(py);
             for item in arr {
                 list.append(json_to_py(py, item)?)?;
             }
             Ok(list.into_any())
         }
-        serde_json::Value::Object(map) => {
+        Value::Object(map) => {
             let dict = PyDict::new(py);
             for (k, v) in map {
                 dict.set_item(k, json_to_py(py, v)?)?;
@@ -124,6 +129,12 @@ pub struct PyPage {
     inner: Arc<Mutex<Option<Page>>>,
 }
 
+impl fmt::Debug for PyPage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PyPage").finish_non_exhaustive()
+    }
+}
+
 impl PyPage {
     fn new(page: Page) -> Self {
         Self { inner: Arc::new(Mutex::new(Some(page))) }
@@ -143,7 +154,7 @@ impl PyPage {
 macro_rules! with_page {
     ($self:expr, $py:expr, |$page:ident| $body:expr) => {{
         let inner = Arc::clone(&$self.inner);
-        pyo3_async_runtimes::tokio::future_into_py($py, async move {
+        future_into_py($py, async move {
             // Take page out — µs lock hold
             let page = inner
                 .lock()
@@ -171,13 +182,13 @@ impl PyPage {
 
     /// Navigate and wait for network idle in one operation.
     ///
-    /// Faster than calling navigate() then wait_for_network_idle() separately
-    /// because the event listener is set up before navigation starts, so early
-    /// networkIdle events are never missed.
+    /// Faster than calling `navigate()` then `wait_for_network_idle()`
+    /// separately because the event listener is set up before navigation
+    /// starts, so early networkIdle events are never missed.
     #[pyo3(signature = (url, timeout=30.0))]
     fn goto<'py>(&self, py: Python<'py>, url: String, timeout: f64) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py(py, async move {
             let page = inner
                 .lock()
                 .await
@@ -219,7 +230,7 @@ impl PyPage {
     /// etc.
     fn evaluate_js<'py>(&self, py: Python<'py>, expression: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py(py, async move {
             let page = inner
                 .lock()
                 .await
@@ -234,7 +245,7 @@ impl PyPage {
     /// Take a PNG screenshot, returned as Python bytes.
     fn screenshot_png<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py(py, async move {
             let page = inner
                 .lock()
                 .await
@@ -249,7 +260,7 @@ impl PyPage {
     /// Generate a PDF, returned as Python bytes.
     fn pdf_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py(py, async move {
             let page = inner
                 .lock()
                 .await
@@ -316,7 +327,7 @@ impl PyPage {
         stable_checks: u32,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py(py, async move {
             let page = inner
                 .lock()
                 .await
@@ -342,7 +353,7 @@ impl PyPage {
         timeout: f64,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py(py, async move {
             let page = inner
                 .lock()
                 .await
@@ -360,7 +371,7 @@ impl PyPage {
     /// Close this page / tab.
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py(py, async move {
             let mut guard = inner.lock().await;
             if let Some(page) = guard.take() {
                 page.close().await.map_err(to_py_err)?;
@@ -376,7 +387,8 @@ impl PyPage {
 ///
 /// Supports async context manager protocol (`async with`).
 ///
-/// Example::
+/// # Example
+///
 ///
 ///     async with BrowserSession() as browser:
 ///         page = await browser.new_page("https://example.com")
@@ -392,18 +404,24 @@ pub struct PyBrowserSession {
     extra_args:        Vec<String>,
 }
 
+impl fmt::Debug for PyBrowserSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PyBrowserSession").field("mode", &self.mode).finish_non_exhaustive()
+    }
+}
+
 #[pymethods]
 impl PyBrowserSession {
     /// Create a new browser session.
     ///
     /// Args:
     ///     headless: Run in headless mode (default True).
-    ///     ws_url: Connect to existing browser via WebSocket URL.
+    ///     `ws_url`: Connect to existing browser via WebSocket URL.
     ///     stealth: Enable anti-detection (default True).
-    ///     no_sandbox: Disable Chrome sandbox (default False).
+    ///     `no_sandbox`: Disable Chrome sandbox (default False).
     ///     proxy: Proxy server URL.
-    ///     chrome_executable: Path to Chrome/Chromium binary.
-    ///     extra_args: Additional Chrome command-line arguments.
+    ///     `chrome_executable`: Path to Chrome/Chromium binary.
+    ///     `extra_args`: Additional Chrome command-line arguments.
     #[new]
     #[pyo3(signature = (*, headless=true, ws_url=None, stealth=true, no_sandbox=false, proxy=None, chrome_executable=None, extra_args=None))]
     fn new(
@@ -445,7 +463,7 @@ impl PyBrowserSession {
         let chrome_executable = self.chrome_executable.clone();
         let extra_args = self.extra_args.clone();
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py(py, async move {
             do_launch(
                 inner,
                 mode,
@@ -462,7 +480,7 @@ impl PyBrowserSession {
     /// Open a new page and navigate to the URL.
     fn new_page<'py>(&self, py: Python<'py>, url: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py(py, async move {
             let guard = inner.lock().await;
             let session = guard.as_ref().ok_or_else(|| {
                 PyRuntimeError::new_err(
@@ -477,7 +495,7 @@ impl PyBrowserSession {
     /// Get browser version string.
     fn version<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py(py, async move {
             let guard = inner.lock().await;
             let session =
                 guard.as_ref().ok_or_else(|| PyRuntimeError::new_err("browser not launched"))?;
@@ -488,7 +506,7 @@ impl PyBrowserSession {
     /// Close the browser.
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py(py, async move {
             let mut guard = inner.lock().await;
             if let Some(session) = guard.take() {
                 session.close().await.map_err(to_py_err)?;
@@ -514,7 +532,7 @@ impl PyBrowserSession {
         };
         let slf_ref = slf.into_any().unbind();
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py(py, async move {
             do_launch(
                 inner,
                 mode,
@@ -538,7 +556,7 @@ impl PyBrowserSession {
         _exc_tb: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py(py, async move {
             let mut guard = inner.lock().await;
             if let Some(session) = guard.take() {
                 let _ = session.close().await;
@@ -564,7 +582,8 @@ impl PyBrowserSession {
 /// Exposes the same navigation / DOM methods as [`Page`]. When used as an
 /// async context manager the tab is automatically returned to the pool on exit.
 ///
-/// Example::
+/// # Example
+///
 ///
 ///     async with pool.acquire() as tab:
 ///         await tab.navigate("https://example.com")
@@ -573,9 +592,15 @@ impl PyBrowserSession {
 pub struct PyPooledTab {
     inner:     Arc<Mutex<Option<PooledTab>>>,
     pool:      Arc<BrowserPool>,
-    /// Snapshot of use_count at the moment the tab was acquired.
+    /// Snapshot of `use_count` at the moment the tab was acquired.
     #[pyo3(get)]
     use_count: u32,
+}
+
+impl fmt::Debug for PyPooledTab {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PyPooledTab").field("use_count", &self.use_count).finish_non_exhaustive()
+    }
 }
 
 /// Helper macro: run an async op on the page inside the pooled tab.
@@ -583,7 +608,7 @@ pub struct PyPooledTab {
 macro_rules! with_pooled_page {
     ($self:expr, $py:expr, |$page:ident| $body:expr) => {{
         let inner = Arc::clone(&$self.inner);
-        pyo3_async_runtimes::tokio::future_into_py($py, async move {
+        future_into_py($py, async move {
             let tab = inner
                 .lock()
                 .await
@@ -607,12 +632,13 @@ impl PyPooledTab {
 
     /// Navigate and wait for network idle in one shot.
     ///
-    /// Faster than calling navigate() then wait_for_network_idle() separately
-    /// because the event listener is set up before navigation starts.
+    /// Faster than calling `navigate()` then `wait_for_network_idle()`
+    /// separately because the event listener is set up before navigation
+    /// starts.
     #[pyo3(signature = (url, timeout=30.0))]
     fn goto<'py>(&self, py: Python<'py>, url: String, timeout: f64) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py(py, async move {
             let tab = inner
                 .lock()
                 .await
@@ -646,7 +672,7 @@ impl PyPooledTab {
 
     fn evaluate_js<'py>(&self, py: Python<'py>, expression: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py(py, async move {
             let tab = inner
                 .lock()
                 .await
@@ -660,7 +686,7 @@ impl PyPooledTab {
 
     fn screenshot_png<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py(py, async move {
             let tab = inner
                 .lock()
                 .await
@@ -721,7 +747,7 @@ impl PyPooledTab {
         stable_checks: u32,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py(py, async move {
             let tab = inner
                 .lock()
                 .await
@@ -748,7 +774,7 @@ impl PyPooledTab {
         timeout: f64,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py(py, async move {
             let tab = inner
                 .lock()
                 .await
@@ -768,7 +794,7 @@ impl PyPooledTab {
 
     fn __aenter__<'py>(slf: Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let slf_ref = slf.into_any().unbind();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(slf_ref) })
+        future_into_py(py, async move { Ok(slf_ref) })
     }
 
     #[pyo3(signature = (_exc_type=None, _exc_val=None, _exc_tb=None))]
@@ -781,7 +807,7 @@ impl PyPooledTab {
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
         let pool = Arc::clone(&self.pool);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py(py, async move {
             let mut guard = inner.lock().await;
             if let Some(tab) = guard.take() {
                 let _ = pool.release(tab).await;
@@ -801,7 +827,8 @@ impl PyPooledTab {
 ///
 /// Supports async context manager protocol (`async with`).
 ///
-/// Example::
+/// # Example
+///
 ///
 ///     async with await BrowserPool.from_env() as pool:
 ///         async with await pool.acquire() as tab:
@@ -812,15 +839,18 @@ pub struct PyBrowserPool {
     inner: Arc<BrowserPool>,
 }
 
+impl fmt::Debug for PyBrowserPool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PyBrowserPool").field("inner", &self.inner).finish()
+    }
+}
+
 #[pymethods]
 impl PyBrowserPool {
     /// Create a pool from environment variables.
     #[classmethod]
-    fn from_env<'py>(
-        _cls: &Bound<'py, pyo3::types::PyType>,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    fn from_env<'py>(_cls: &Bound<'py, PyType>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        future_into_py(py, async move {
             let pool = BrowserPool::from_env().await.map_err(to_py_err)?;
             Ok(PyBrowserPool { inner: Arc::new(pool) })
         })
@@ -829,15 +859,13 @@ impl PyBrowserPool {
     /// Pre-open tabs across all sessions.
     fn warmup<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let pool = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            pool.warmup().await.map_err(to_py_err)
-        })
+        future_into_py(py, async move { pool.warmup().await.map_err(to_py_err) })
     }
 
     /// Check out a tab from the pool.
     fn acquire<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let pool = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py(py, async move {
             let tab = pool.acquire().await.map_err(to_py_err)?;
             let use_count = tab.use_count;
             Ok(PyPooledTab { inner: Arc::new(Mutex::new(Some(tab))), pool, use_count })
@@ -848,11 +876,11 @@ impl PyBrowserPool {
     fn release<'py>(
         &self,
         py: Python<'py>,
-        tab: Bound<'py, PyPooledTab>,
+        tab: &Bound<'py, PyPooledTab>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let pool = Arc::clone(&self.inner);
         let tab_inner = Arc::clone(&tab.borrow().inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py(py, async move {
             let mut guard = tab_inner.lock().await;
             if let Some(pooled_tab) = guard.take() {
                 pool.release(pooled_tab).await.map_err(to_py_err)?;
@@ -866,7 +894,7 @@ impl PyBrowserPool {
     fn __aenter__<'py>(slf: Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let slf_ref = slf.into_any().unbind();
         // No warmup — tabs are created lazily on first acquire().
-        pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(slf_ref) })
+        future_into_py(py, async move { Ok(slf_ref) })
     }
 
     #[pyo3(signature = (_exc_type=None, _exc_val=None, _exc_tb=None))]
@@ -878,7 +906,7 @@ impl PyBrowserPool {
         _exc_tb: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let pool = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py(py, async move {
             let _ = pool.close().await;
             Ok(false)
         })

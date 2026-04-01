@@ -29,6 +29,7 @@ pub enum BrowserMode {
 
 /// Builder for `BrowserSession`.
 #[derive(Debug, Clone)]
+#[must_use]
 pub struct BrowserSessionBuilder {
     mode:              BrowserMode,
     stealth:           StealthConfig,
