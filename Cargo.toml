@@ -23,7 +23,7 @@ unimplemented = "warn"
 # Clean imports & structure
 absolute_paths = "deny"
 cognitive_complexity = "warn"
-module_item_order = "warn"
+# module_item_order = "warn"  # not available in current clippy
 # Noise lints — disabled
 must_use_candidate = "allow"
 missing_errors_doc = "allow"

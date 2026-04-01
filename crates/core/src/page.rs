@@ -1,22 +1,27 @@
 //! High-level wrapper around a `chromiumoxide::Page`.
 
-use std::collections::HashMap;
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
-use chromiumoxide::Page as CdpPage;
-use chromiumoxide::cdp::browser_protocol::emulation::{
-    SetDeviceMetricsOverrideParams, SetUserAgentOverrideParams,
+use chromiumoxide::{
+    Page as CdpPage,
+    cdp::browser_protocol::{
+        emulation::{SetDeviceMetricsOverrideParams, SetUserAgentOverrideParams},
+        network::{Headers, SetExtraHttpHeadersParams},
+        page::{
+            AddScriptToEvaluateOnNewDocumentParams, CaptureScreenshotFormat, EventLifecycleEvent,
+            PrintToPdfParams, SetBypassCspParams,
+        },
+    },
+    page::ScreenshotParams,
 };
-use chromiumoxide::cdp::browser_protocol::network::{Headers, SetExtraHttpHeadersParams};
-use chromiumoxide::cdp::browser_protocol::page::{
-    AddScriptToEvaluateOnNewDocumentParams, CaptureScreenshotFormat, EventLifecycleEvent,
-    PrintToPdfParams, SetBypassCspParams,
-};
-use chromiumoxide::page::ScreenshotParams;
 use futures::StreamExt;
+use serde_json::Value;
+use tokio::time;
 
-use crate::error::{Result, YosoiError};
-use crate::stealth::StealthConfig;
+use crate::{
+    error::{Result, YosoiError},
+    stealth::StealthConfig,
+};
 
 /// Thin wrapper over `chromiumoxide::Page` exposing a clean async API.
 #[derive(Debug)]
@@ -65,32 +70,23 @@ impl Page {
 
         // 3. Viewport / device metrics
         let metrics = SetDeviceMetricsOverrideParams::new(
-            cfg.viewport_width as i64,
-            cfg.viewport_height as i64,
+            i64::from(cfg.viewport_width),
+            i64::from(cfg.viewport_height),
             1.0,
             false,
         );
-        self.inner
-            .execute(metrics)
-            .await
-            .map_err(|e| YosoiError::PageError(e.to_string()))?;
+        self.inner.execute(metrics).await.map_err(|e| YosoiError::PageError(e.to_string()))?;
 
         // 4. Bypass CSP so our injected JS can run
         if cfg.bypass_csp {
             let csp = SetBypassCspParams::new(true);
-            self.inner
-                .execute(csp)
-                .await
-                .map_err(|e| YosoiError::PageError(e.to_string()))?;
+            self.inner.execute(csp).await.map_err(|e| YosoiError::PageError(e.to_string()))?;
         }
 
         // 5. Inject custom JS before every navigation
         if let Some(js) = &cfg.inject_js {
             let params = AddScriptToEvaluateOnNewDocumentParams::new(js.clone());
-            self.inner
-                .execute(params)
-                .await
-                .map_err(|e| YosoiError::PageError(e.to_string()))?;
+            self.inner.execute(params).await.map_err(|e| YosoiError::PageError(e.to_string()))?;
         }
 
         Ok(())
@@ -100,10 +96,7 @@ impl Page {
 
     /// Navigate to `url` and wait for the CDP response.
     pub async fn navigate(&self, url: &str) -> Result<()> {
-        self.inner
-            .goto(url)
-            .await
-            .map_err(|e| YosoiError::NavigationFailed(e.to_string()))?;
+        self.inner.goto(url).await.map_err(|e| YosoiError::NavigationFailed(e.to_string()))?;
         Ok(())
     }
 
@@ -127,13 +120,10 @@ impl Page {
             .map_err(|e| YosoiError::PageError(e.to_string()))?;
 
         // Start navigation (non-blocking CDP command)
-        self.inner
-            .goto(url)
-            .await
-            .map_err(|e| YosoiError::NavigationFailed(e.to_string()))?;
+        self.inner.goto(url).await.map_err(|e| YosoiError::NavigationFailed(e.to_string()))?;
 
         // Now wait for networkIdle from the event stream
-        let deadline = tokio::time::sleep(timeout);
+        let deadline = time::sleep(timeout);
         tokio::pin!(deadline);
 
         let mut got_almost_idle = false;
@@ -157,11 +147,7 @@ impl Page {
             }
         }
 
-        if got_almost_idle {
-            Ok(Some("networkAlmostIdle".into()))
-        } else {
-            Ok(None)
-        }
+        if got_almost_idle { Ok(Some("networkAlmostIdle".into())) } else { Ok(None) }
     }
 
     /// Wait for the in-flight navigation to finish.
@@ -179,8 +165,8 @@ impl Page {
     /// events (in priority order):
     ///
     /// 1. **`networkIdle`** — 0 in-flight requests for 500 ms (best signal)
-    /// 2. **`networkAlmostIdle`** — ≤ 2 in-flight requests for 500 ms
-    ///    (fallback when analytics / long-polls prevent true idle)
+    /// 2. **`networkAlmostIdle`** — ≤ 2 in-flight requests for 500 ms (fallback
+    ///    when analytics / long-polls prevent true idle)
     ///
     /// Returns the name of the lifecycle event that resolved the wait
     /// (`"networkIdle"` or `"networkAlmostIdle"`), or `None` if the
@@ -194,7 +180,7 @@ impl Page {
             .await
             .map_err(|e| YosoiError::PageError(e.to_string()))?;
 
-        let deadline = tokio::time::sleep(timeout);
+        let deadline = time::sleep(timeout);
         tokio::pin!(deadline);
 
         // Track the best event we've seen so far
@@ -220,11 +206,7 @@ impl Page {
         }
 
         // Timeout reached — return best fallback
-        if got_almost_idle {
-            Ok(Some("networkAlmostIdle".into()))
-        } else {
-            Ok(None)
-        }
+        if got_almost_idle { Ok(Some("networkAlmostIdle".into())) } else { Ok(None) }
     }
 
     /// **Deprecated** — use [`wait_for_network_idle`] instead.
@@ -237,17 +219,19 @@ impl Page {
         min_length: usize,
         stable_checks: u32,
     ) -> Result<bool> {
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = time::Instant::now() + timeout;
         let poll_interval = Duration::from_millis(200);
         let mut previous_size: usize = 0;
         let mut stable_count: u32 = 0;
 
-        while tokio::time::Instant::now() < deadline {
-            let size: usize = self
-                .evaluate_js("document.body ? document.body.innerHTML.length : 0")
-                .await?
-                .as_u64()
-                .unwrap_or(0) as usize;
+        while time::Instant::now() < deadline {
+            let size: usize = usize::try_from(
+                self.evaluate_js("document.body ? document.body.innerHTML.length : 0")
+                    .await?
+                    .as_u64()
+                    .unwrap_or(0),
+            )
+            .unwrap_or(0);
 
             if size >= min_length && size == previous_size {
                 stable_count += 1;
@@ -259,7 +243,7 @@ impl Page {
                 previous_size = size;
             }
 
-            tokio::time::sleep(poll_interval).await;
+            time::sleep(poll_interval).await;
         }
 
         Ok(false)
@@ -269,40 +253,29 @@ impl Page {
 
     /// Return the full HTML of the page (outer HTML of `<html>`).
     pub async fn content(&self) -> Result<String> {
-        self.inner
-            .content()
-            .await
-            .map_err(|e| YosoiError::PageError(e.to_string()))
+        self.inner.content().await.map_err(|e| YosoiError::PageError(e.to_string()))
     }
 
     /// Return the page title.
     pub async fn title(&self) -> Result<Option<String>> {
-        self.inner
-            .get_title()
-            .await
-            .map_err(|e| YosoiError::PageError(e.to_string()))
+        self.inner.get_title().await.map_err(|e| YosoiError::PageError(e.to_string()))
     }
 
     /// Return the current URL.
     pub async fn url(&self) -> Result<Option<String>> {
-        self.inner
-            .url()
-            .await
-            .map_err(|e| YosoiError::PageError(e.to_string()))
+        self.inner.url().await.map_err(|e| YosoiError::PageError(e.to_string()))
     }
 
     // ── JavaScript ──────────────────────────────────────────────────────
 
     /// Evaluate a JS expression and return the result as a JSON value.
-    pub async fn evaluate_js(&self, expression: &str) -> Result<serde_json::Value> {
+    pub async fn evaluate_js(&self, expression: &str) -> Result<Value> {
         let result = self
             .inner
             .evaluate(expression)
             .await
             .map_err(|e| YosoiError::JsEvalError(e.to_string()))?;
-        result
-            .into_value()
-            .map_err(|e| YosoiError::JsEvalError(e.to_string()))
+        result.into_value().map_err(|e| YosoiError::JsEvalError(e.to_string()))
     }
 
     // ── Screenshots & PDF ───────────────────────────────────────────────
@@ -313,19 +286,13 @@ impl Page {
             .format(CaptureScreenshotFormat::Png)
             .full_page(true)
             .build();
-        self.inner
-            .screenshot(params)
-            .await
-            .map_err(|e| YosoiError::ScreenshotError(e.to_string()))
+        self.inner.screenshot(params).await.map_err(|e| YosoiError::ScreenshotError(e.to_string()))
     }
 
     /// Generate a PDF of the page, returned as raw bytes.
     pub async fn pdf_bytes(&self) -> Result<Vec<u8>> {
         let params = PrintToPdfParams::default();
-        self.inner
-            .pdf(params)
-            .await
-            .map_err(|e| YosoiError::PdfError(e.to_string()))
+        self.inner.pdf(params).await.map_err(|e| YosoiError::PdfError(e.to_string()))
     }
 
     // ── DOM Queries ─────────────────────────────────────────────────────
@@ -336,10 +303,8 @@ impl Page {
     pub async fn query_selector(&self, selector: &str) -> Result<Option<String>> {
         match self.inner.find_element(selector).await {
             Ok(el) => {
-                let html = el
-                    .inner_html()
-                    .await
-                    .map_err(|e| YosoiError::PageError(e.to_string()))?;
+                let html =
+                    el.inner_html().await.map_err(|e| YosoiError::PageError(e.to_string()))?;
                 Ok(Some(html.unwrap_or_default()))
             }
             Err(_) => Ok(None),
@@ -351,11 +316,8 @@ impl Page {
     pub async fn query_selector_all(&self, selector: &str) -> Result<Vec<String>> {
         // Single JS eval returns all innerHTML at once — avoids N serial CDP
         // round-trips (one per element) that the old find_elements approach needed.
-        let js = format!(
-            "[...document.querySelectorAll({:?})].map(e => e.innerHTML)",
-            selector
-        );
-        let val: serde_json::Value = self
+        let js = format!("[...document.querySelectorAll({selector:?})].map(e => e.innerHTML)");
+        let val: Value = self
             .inner
             .evaluate_expression(js)
             .await
@@ -364,10 +326,10 @@ impl Page {
             .map_err(|e| YosoiError::PageError(e.to_string()))?;
 
         match val {
-            serde_json::Value::Array(arr) => Ok(arr
+            Value::Array(arr) => Ok(arr
                 .into_iter()
                 .map(|v| match v {
-                    serde_json::Value::String(s) => s,
+                    Value::String(s) => s,
                     other => other.to_string(),
                 })
                 .collect()),
@@ -384,9 +346,7 @@ impl Page {
             .find_element(selector)
             .await
             .map_err(|e| YosoiError::ElementNotFound(e.to_string()))?;
-        el.click()
-            .await
-            .map_err(|e| YosoiError::PageError(e.to_string()))?;
+        el.click().await.map_err(|e| YosoiError::PageError(e.to_string()))?;
         Ok(())
     }
 
@@ -399,12 +359,8 @@ impl Page {
             .find_element(selector)
             .await
             .map_err(|e| YosoiError::ElementNotFound(e.to_string()))?;
-        el.focus()
-            .await
-            .map_err(|e| YosoiError::PageError(e.to_string()))?;
-        el.type_str(text)
-            .await
-            .map_err(|e| YosoiError::PageError(e.to_string()))?;
+        el.focus().await.map_err(|e| YosoiError::PageError(e.to_string()))?;
+        el.type_str(text).await.map_err(|e| YosoiError::PageError(e.to_string()))?;
         Ok(())
     }
 
@@ -415,19 +371,13 @@ impl Page {
         let json_val =
             serde_json::to_value(&headers).map_err(|e| YosoiError::PageError(e.to_string()))?;
         let params = SetExtraHttpHeadersParams::new(Headers::new(json_val));
-        self.inner
-            .execute(params)
-            .await
-            .map_err(|e| YosoiError::PageError(e.to_string()))?;
+        self.inner.execute(params).await.map_err(|e| YosoiError::PageError(e.to_string()))?;
         Ok(())
     }
 
     /// Close this page / tab.
     pub async fn close(self) -> Result<()> {
-        self.inner
-            .close()
-            .await
-            .map_err(|e| YosoiError::PageError(e.to_string()))?;
+        self.inner.close().await.map_err(|e| YosoiError::PageError(e.to_string()))?;
         Ok(())
     }
 

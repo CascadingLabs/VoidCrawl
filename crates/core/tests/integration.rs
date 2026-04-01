@@ -1,8 +1,9 @@
-//! Integration tests for void_crawl_core.
+//! Integration tests for `void_crawl_core`.
 //!
 //! These tests require a real Chromium/Chrome binary to be available.
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use void_crawl_core::{BrowserPool, BrowserSession, PoolConfig, StealthConfig};
 
@@ -30,16 +31,10 @@ async fn test_launch_and_version() {
 #[tokio::test]
 async fn test_new_page_and_content() {
     let session = headless_session().await;
-    let page = session
-        .new_page("https://example.com")
-        .await
-        .expect("new_page failed");
+    let page = session.new_page("https://example.com").await.expect("new_page failed");
 
     let html = page.content().await.expect("content() failed");
-    assert!(
-        html.contains("Example Domain"),
-        "expected example.com content"
-    );
+    assert!(html.contains("Example Domain"), "expected example.com content");
 
     page.close().await.expect("page close failed");
     session.close().await.expect("browser close failed");
@@ -48,10 +43,7 @@ async fn test_new_page_and_content() {
 #[tokio::test]
 async fn test_title_and_url() {
     let session = headless_session().await;
-    let page = session
-        .new_page("https://example.com")
-        .await
-        .expect("new_page failed");
+    let page = session.new_page("https://example.com").await.expect("new_page failed");
 
     let title = page.title().await.expect("title() failed");
     assert_eq!(title, Some("Example Domain".to_string()));
@@ -66,18 +58,12 @@ async fn test_title_and_url() {
 #[tokio::test]
 async fn test_evaluate_js() {
     let session = headless_session().await;
-    let page = session
-        .new_page("https://example.com")
-        .await
-        .expect("new_page failed");
+    let page = session.new_page("https://example.com").await.expect("new_page failed");
 
     let result = page.evaluate_js("1 + 1").await.expect("evaluate_js failed");
     assert_eq!(result, serde_json::json!(2));
 
-    let title_js = page
-        .evaluate_js("document.title")
-        .await
-        .expect("evaluate_js failed");
+    let title_js = page.evaluate_js("document.title").await.expect("evaluate_js failed");
     assert_eq!(title_js, serde_json::json!("Example Domain"));
 
     page.close().await.ok();
@@ -87,20 +73,11 @@ async fn test_evaluate_js() {
 #[tokio::test]
 async fn test_query_selector() {
     let session = headless_session().await;
-    let page = session
-        .new_page("https://example.com")
-        .await
-        .expect("new_page failed");
+    let page = session.new_page("https://example.com").await.expect("new_page failed");
 
-    let h1 = page
-        .query_selector("h1")
-        .await
-        .expect("query_selector failed");
+    let h1 = page.query_selector("h1").await.expect("query_selector failed");
     assert!(h1.is_some(), "expected to find <h1>");
-    assert!(
-        h1.unwrap().contains("Example Domain"),
-        "h1 should contain Example Domain"
-    );
+    assert!(h1.unwrap().contains("Example Domain"), "h1 should contain Example Domain");
 
     let missing = page
         .query_selector(".nonexistent-class")
@@ -115,20 +92,12 @@ async fn test_query_selector() {
 #[tokio::test]
 async fn test_navigate() {
     let session = headless_session().await;
-    let page = session
-        .new_page("https://example.com")
-        .await
-        .expect("new_page failed");
+    let page = session.new_page("https://example.com").await.expect("new_page failed");
 
-    page.navigate("https://www.iana.org/domains/reserved")
-        .await
-        .expect("navigate failed");
+    page.navigate("https://www.iana.org/domains/reserved").await.expect("navigate failed");
 
     let html = page.content().await.expect("content failed");
-    assert!(
-        html.to_lowercase().contains("iana"),
-        "expected IANA content after navigation"
-    );
+    assert!(html.to_lowercase().contains("iana"), "expected IANA content after navigation");
 
     page.close().await.ok();
     session.close().await.ok();
@@ -137,10 +106,7 @@ async fn test_navigate() {
 #[tokio::test]
 async fn test_screenshot_png() {
     let session = headless_session().await;
-    let page = session
-        .new_page("https://example.com")
-        .await
-        .expect("new_page failed");
+    let page = session.new_page("https://example.com").await.expect("new_page failed");
 
     let png = page.screenshot_png().await.expect("screenshot failed");
     // PNG files start with the magic bytes 0x89 0x50 0x4E 0x47
@@ -154,10 +120,7 @@ async fn test_screenshot_png() {
 #[tokio::test]
 async fn test_set_headers() {
     let session = headless_session().await;
-    let page = session
-        .new_page("about:blank")
-        .await
-        .expect("new_page failed");
+    let page = session.new_page("about:blank").await.expect("new_page failed");
 
     let mut headers = HashMap::new();
     headers.insert("X-Custom-Header".to_string(), "test-value".to_string());
@@ -177,10 +140,7 @@ async fn test_no_stealth_mode() {
         .await
         .expect("launch failed");
 
-    let page = session
-        .new_page("https://example.com")
-        .await
-        .expect("new_page failed");
+    let page = session.new_page("https://example.com").await.expect("new_page failed");
 
     let html = page.content().await.expect("content failed");
     assert!(html.contains("Example Domain"));
@@ -192,13 +152,13 @@ async fn test_no_stealth_mode() {
 #[tokio::test]
 async fn test_custom_stealth_config() {
     let stealth = StealthConfig {
-        user_agent: Some("YosoiTestBot/1.0".into()),
-        viewport_width: 1280,
-        viewport_height: 720,
-        locale: "en-GB,en;q=0.9".into(),
-        inject_js: None,
+        user_agent:          Some("YosoiTestBot/1.0".into()),
+        viewport_width:      1280,
+        viewport_height:     720,
+        locale:              "en-GB,en;q=0.9".into(),
+        inject_js:           None,
         use_builtin_stealth: false,
-        bypass_csp: false,
+        bypass_csp:          false,
     };
 
     let session = BrowserSession::builder()
@@ -209,10 +169,7 @@ async fn test_custom_stealth_config() {
         .await
         .expect("launch failed");
 
-    let page = session
-        .new_page("https://example.com")
-        .await
-        .expect("new_page failed");
+    let page = session.new_page("https://example.com").await.expect("new_page failed");
 
     let html = page.content().await.expect("content failed");
     assert!(html.contains("Example Domain"));
@@ -241,9 +198,9 @@ async fn test_pool(config: PoolConfig) -> BrowserPool {
 #[tokio::test]
 async fn test_pool_basic() {
     let config = PoolConfig {
-        browsers: 1,
-        tabs_per_browser: 1,
-        tab_max_uses: 50,
+        browsers:          1,
+        tabs_per_browser:  1,
+        tab_max_uses:      50,
         tab_max_idle_secs: 60,
     };
     let pool = test_pool(config).await;
@@ -252,10 +209,7 @@ async fn test_pool_basic() {
     // First acquire
     let tab = pool.acquire().await.expect("acquire failed");
     assert_eq!(tab.use_count, 0);
-    tab.page
-        .navigate("https://example.com")
-        .await
-        .expect("navigate failed");
+    tab.page.navigate("https://example.com").await.expect("navigate failed");
     let html = tab.page.content().await.expect("content failed");
     assert!(html.contains("Example Domain"));
     pool.release(tab).await.expect("release failed");
@@ -271,21 +225,17 @@ async fn test_pool_basic() {
 #[tokio::test]
 async fn test_pool_parallel() {
     let config = PoolConfig {
-        browsers: 1,
-        tabs_per_browser: 4,
-        tab_max_uses: 50,
+        browsers:          1,
+        tabs_per_browser:  4,
+        tab_max_uses:      50,
         tab_max_idle_secs: 60,
     };
     let pool = test_pool(config).await;
     pool.warmup().await.expect("warmup failed");
 
     // Acquire all 4 tabs concurrently
-    let (t1, t2, t3, t4) = tokio::join!(
-        pool.acquire(),
-        pool.acquire(),
-        pool.acquire(),
-        pool.acquire(),
-    );
+    let (t1, t2, t3, t4) =
+        tokio::join!(pool.acquire(), pool.acquire(), pool.acquire(), pool.acquire(),);
     let t1 = t1.expect("acquire 1");
     let t2 = t2.expect("acquire 2");
     let t3 = t3.expect("acquire 3");
@@ -293,10 +243,7 @@ async fn test_pool_parallel() {
 
     // Navigate all to example.com
     for tab in [&t1, &t2, &t3, &t4] {
-        tab.page
-            .navigate("https://example.com")
-            .await
-            .expect("navigate failed");
+        tab.page.navigate("https://example.com").await.expect("navigate failed");
         let html = tab.page.content().await.expect("content failed");
         assert!(html.contains("Example Domain"));
     }
@@ -313,9 +260,9 @@ async fn test_pool_parallel() {
 #[tokio::test]
 async fn test_pool_hard_recycle() {
     let config = PoolConfig {
-        browsers: 1,
-        tabs_per_browser: 1,
-        tab_max_uses: 2,
+        browsers:          1,
+        tabs_per_browser:  1,
+        tab_max_uses:      2,
         tab_max_idle_secs: 60,
     };
     let pool = test_pool(config).await;
@@ -342,9 +289,9 @@ async fn test_pool_hard_recycle() {
 #[tokio::test]
 async fn test_pool_idle_eviction() {
     let config = PoolConfig {
-        browsers: 1,
-        tabs_per_browser: 1,
-        tab_max_uses: 50,
+        browsers:          1,
+        tabs_per_browser:  1,
+        tab_max_uses:      50,
         tab_max_idle_secs: 1,
     };
     let pool = test_pool(config).await;
@@ -355,7 +302,7 @@ async fn test_pool_idle_eviction() {
     pool.release(tab).await.expect("release");
 
     // Wait for idle timeout
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Evict idle tabs — should replace with fresh ones
     pool.evict_idle().await.expect("evict_idle failed");

@@ -1,4 +1,5 @@
-//! `BrowserPool` — a pool of reusable browser tabs backed by long-lived Chrome sessions.
+//! `BrowserPool` — a pool of reusable browser tabs backed by long-lived Chrome
+//! sessions.
 //!
 //! The pool creates tabs **lazily** on first `acquire()` and recycles them on
 //! `release()`. Tabs are returned to the ready queue with no CDP call — the
@@ -6,30 +7,37 @@
 //! reuse. Hard recycling (close + reopen) kicks in after `tab_max_uses`, and
 //! idle eviction cleans up stale tabs.
 //!
-//! `warmup()` is **optional** — calling it pre-creates tabs for faster first acquires,
-//! but the pool works correctly without it.
+//! `warmup()` is **optional** — calling it pre-creates tabs for faster first
+//! acquires, but the pool works correctly without it.
 
-use std::collections::VecDeque;
-use std::env;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::{
+    collections::VecDeque,
+    env, fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
+use futures::future;
 use tokio::sync::{Mutex, Semaphore};
 
-use crate::error::{Result, YosoiError};
-use crate::page::Page;
-use crate::session::BrowserSession;
+use crate::{
+    error::{Result, YosoiError},
+    page::Page,
+    session::BrowserSession,
+};
 
 /// Configuration for a [`BrowserPool`].
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
     /// Number of Chrome processes (sessions) in the pool.
-    pub browsers: usize,
+    pub browsers:          usize,
     /// Maximum concurrent tabs per browser session.
-    pub tabs_per_browser: usize,
+    pub tabs_per_browser:  usize,
     /// Close and reopen a tab after this many uses.
-    pub tab_max_uses: u32,
+    pub tab_max_uses:      u32,
     /// Evict idle tabs after this many seconds.
     pub tab_max_idle_secs: u64,
 }
@@ -37,9 +45,9 @@ pub struct PoolConfig {
 impl Default for PoolConfig {
     fn default() -> Self {
         Self {
-            browsers: 1,
-            tabs_per_browser: 4,
-            tab_max_uses: 50,
+            browsers:          1,
+            tabs_per_browser:  4,
+            tab_max_uses:      50,
             tab_max_idle_secs: 60,
         }
     }
@@ -51,19 +59,31 @@ impl Default for PoolConfig {
 /// Return it to the pool via [`BrowserPool::release()`].
 pub struct PooledTab {
     /// The CDP page / tab.
-    pub page: Page,
+    pub page:               Page,
     /// How many times this tab has been used (incremented on release).
-    pub use_count: u32,
+    pub use_count:          u32,
     /// When this tab was last returned to the ready queue.
-    pub last_used: Instant,
-    /// Index into `BrowserPool::sessions` identifying which browser owns this tab.
+    pub last_used:          Instant,
+    /// Index into `BrowserPool::sessions` identifying which browser owns this
+    /// tab.
     pub(crate) browser_idx: usize,
+}
+
+impl fmt::Debug for PooledTab {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PooledTab")
+            .field("page", &self.page)
+            .field("use_count", &self.use_count)
+            .field("browser_idx", &self.browser_idx)
+            .finish()
+    }
 }
 
 /// A pool of reusable browser tabs spread across one or more Chrome sessions.
 ///
-/// Tabs are created lazily on first `acquire()`. Call [`warmup()`](Self::warmup)
-/// to optionally pre-create tabs for faster first acquires.
+/// Tabs are created lazily on first `acquire()`. Call
+/// [`warmup()`](Self::warmup) to optionally pre-create tabs for faster first
+/// acquires.
 ///
 /// # Usage
 ///
@@ -84,12 +104,21 @@ pub struct PooledTab {
 /// # }
 /// ```
 pub struct BrowserPool {
-    sessions: Vec<BrowserSession>,
-    ready: Mutex<VecDeque<PooledTab>>,
-    semaphore: Arc<Semaphore>,
-    config: PoolConfig,
+    sessions:     Vec<BrowserSession>,
+    ready:        Mutex<VecDeque<PooledTab>>,
+    semaphore:    Arc<Semaphore>,
+    config:       PoolConfig,
     /// Round-robin counter for distributing new tabs across sessions.
     next_session: AtomicUsize,
+}
+
+impl fmt::Debug for BrowserPool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BrowserPool")
+            .field("config", &self.config)
+            .field("sessions", &self.sessions.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl BrowserPool {
@@ -124,25 +153,18 @@ impl BrowserPool {
     /// | `VIEWPORT_WIDTH` | Stealth viewport width | `1920` |
     /// | `VIEWPORT_HEIGHT` | Stealth viewport height | `1080` |
     pub async fn from_env() -> Result<Self> {
-        let tabs_per_browser: usize = env::var("TABS_PER_BROWSER")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(4);
-        let tab_max_uses: u32 = env::var("TAB_MAX_USES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(50);
-        let tab_max_idle_secs: u64 = env::var("TAB_MAX_IDLE_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(60);
+        let tabs_per_browser: usize =
+            env::var("TABS_PER_BROWSER").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
+        let tab_max_uses: u32 =
+            env::var("TAB_MAX_USES").ok().and_then(|v| v.parse().ok()).unwrap_or(50);
+        let tab_max_idle_secs: u64 =
+            env::var("TAB_MAX_IDLE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
         let no_sandbox = env::var("CHROME_NO_SANDBOX").ok().is_some_and(|v| v == "1");
         let headless = env::var("CHROME_HEADLESS").ok().map_or(true, |v| v != "0");
         let viewport_width: Option<u32> =
             env::var("VIEWPORT_WIDTH").ok().and_then(|v| v.parse().ok());
-        let viewport_height: Option<u32> = env::var("VIEWPORT_HEIGHT")
-            .ok()
-            .and_then(|v| v.parse().ok());
+        let viewport_height: Option<u32> =
+            env::var("VIEWPORT_HEIGHT").ok().and_then(|v| v.parse().ok());
 
         let sessions = if let Ok(urls) = env::var("CHROME_WS_URLS") {
             // Connect mode: attach to pre-existing Chrome instances **in parallel**
@@ -159,14 +181,12 @@ impl BrowserPool {
                 ));
             }
 
-            let results = futures::future::join_all(futs).await;
+            let results = future::join_all(futs).await;
             results.into_iter().collect::<Result<Vec<_>>>()?
         } else {
             // Launch mode: start Chrome processes **in parallel**
-            let browser_count: usize = env::var("BROWSER_COUNT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(1);
+            let browser_count: usize =
+                env::var("BROWSER_COUNT").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
 
             let futs: Vec<_> = (0..browser_count)
                 .map(|_| {
@@ -189,7 +209,7 @@ impl BrowserPool {
                 })
                 .collect();
 
-            let results = futures::future::join_all(futs).await;
+            let results = future::join_all(futs).await;
             results.into_iter().collect::<Result<Vec<_>>>()?
         };
 
@@ -215,12 +235,7 @@ impl BrowserPool {
     async fn create_tab(&self) -> Result<PooledTab> {
         let idx = self.next_browser_idx();
         let page = self.sessions[idx].new_blank_page().await?;
-        Ok(PooledTab {
-            page,
-            use_count: 0,
-            last_used: Instant::now(),
-            browser_idx: idx,
-        })
+        Ok(PooledTab { page, use_count: 0, last_used: Instant::now(), browser_idx: idx })
     }
 
     /// Optionally pre-open tabs across all sessions and fill the ready queue.
@@ -249,7 +264,7 @@ impl BrowserPool {
         }
 
         // Create all tabs in parallel
-        let results = futures::future::join_all(futs).await;
+        let results = future::join_all(futs).await;
 
         // Insert successful tabs one-by-one. Each tab consumes a permit
         // (marking the slot as "occupied") then immediately gets it back
@@ -355,7 +370,8 @@ impl BrowserPool {
     /// Return a tab to the pool after use.
     ///
     /// Instant return — no CDP round-trip. The next caller's `navigate(url)`
-    /// overwrites prior page content; stealth scripts persist across navigations.
+    /// overwrites prior page content; stealth scripts persist across
+    /// navigations.
     pub async fn release(&self, mut tab: PooledTab) -> Result<()> {
         tab.use_count += 1;
         tab.last_used = Instant::now();
@@ -365,7 +381,8 @@ impl BrowserPool {
         Ok(())
     }
 
-    /// Close idle tabs that have exceeded `tab_max_idle_secs` and open fresh replacements.
+    /// Close idle tabs that have exceeded `tab_max_idle_secs` and open fresh
+    /// replacements.
     ///
     /// Intended to be called periodically from a background tokio task.
     pub async fn evict_idle(&self) -> Result<()> {
@@ -408,7 +425,7 @@ impl BrowserPool {
             })
             .collect();
 
-        let results = futures::future::join_all(futs).await;
+        let results = future::join_all(futs).await;
         let mut ready = self.ready.lock().await;
         for result in results {
             ready.push_back(result?);
@@ -432,11 +449,11 @@ impl BrowserPool {
 
         // Close all tabs in parallel
         let tab_futs: Vec<_> = tabs.into_iter().map(|tab| tab.page.close()).collect();
-        futures::future::join_all(tab_futs).await;
+        future::join_all(tab_futs).await;
 
         // Close all browser sessions in parallel
         let session_futs: Vec<_> = self.sessions.iter().map(|s| s.close()).collect();
-        futures::future::join_all(session_futs).await;
+        future::join_all(session_futs).await;
 
         Ok(())
     }

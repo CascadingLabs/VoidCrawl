@@ -1,15 +1,19 @@
 //! `BrowserSession` — the main entry point for controlling a browser.
 
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
-use chromiumoxide::browser::{Browser, BrowserConfig};
-use chromiumoxide::handler::Handler;
-use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
+use chromiumoxide::{
+    browser::{Browser, BrowserConfig},
+    handler::Handler,
+};
+use serde_json::Value;
+use tokio::{sync::Mutex, task::JoinHandle};
 
-use crate::error::{Result, YosoiError};
-use crate::page::Page;
-use crate::stealth::StealthConfig;
+use crate::{
+    error::{Result, YosoiError},
+    page::Page,
+    stealth::StealthConfig,
+};
 
 /// How the browser should be acquired.
 #[derive(Debug, Clone, Default)]
@@ -26,25 +30,25 @@ pub enum BrowserMode {
 /// Builder for `BrowserSession`.
 #[derive(Debug, Clone)]
 pub struct BrowserSessionBuilder {
-    mode: BrowserMode,
-    stealth: StealthConfig,
-    extra_args: Vec<String>,
+    mode:              BrowserMode,
+    stealth:           StealthConfig,
+    extra_args:        Vec<String>,
     chrome_executable: Option<String>,
-    proxy: Option<String>,
-    no_sandbox: bool,
-    window_size: Option<(u32, u32)>,
+    proxy:             Option<String>,
+    no_sandbox:        bool,
+    window_size:       Option<(u32, u32)>,
 }
 
 impl Default for BrowserSessionBuilder {
     fn default() -> Self {
         Self {
-            mode: BrowserMode::Headless,
-            stealth: StealthConfig::chrome_like(),
-            extra_args: Vec::new(),
+            mode:              BrowserMode::Headless,
+            stealth:           StealthConfig::chrome_like(),
+            extra_args:        Vec::new(),
             chrome_executable: None,
-            proxy: None,
-            no_sandbox: false,
-            window_size: None,
+            proxy:             None,
+            no_sandbox:        false,
+            window_size:       None,
         }
     }
 }
@@ -68,9 +72,7 @@ impl BrowserSessionBuilder {
     }
 
     pub fn remote_debug(self, ws_url: impl Into<String>) -> Self {
-        self.mode(BrowserMode::RemoteDebug {
-            ws_url: ws_url.into(),
-        })
+        self.mode(BrowserMode::RemoteDebug { ws_url: ws_url.into() })
     }
 
     pub fn stealth(mut self, config: StealthConfig) -> Self {
@@ -138,9 +140,15 @@ impl BrowserSessionBuilder {
 ///
 /// Use [`BrowserSessionBuilder`] or the convenience constructors to create one.
 pub struct BrowserSession {
-    browser: Arc<Mutex<Browser>>,
+    browser:       Arc<Mutex<Browser>>,
     _handler_task: JoinHandle<()>,
-    stealth: StealthConfig,
+    stealth:       StealthConfig,
+}
+
+impl fmt::Debug for BrowserSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BrowserSession").field("stealth", &self.stealth).finish_non_exhaustive()
+    }
 }
 
 impl BrowserSession {
@@ -181,7 +189,7 @@ impl BrowserSession {
                     .await
                     .map_err(|e| YosoiError::ConnectionFailed(e.to_string()))?
             }
-            _ => {
+            BrowserMode::Headless | BrowserMode::Headful => {
                 // Disable chromiumoxide's DEFAULT_ARGS which include
                 // `--enable-automation` and `--disable-extensions` —
                 // both are instant giveaways to WAFs like Akamai.
@@ -259,9 +267,7 @@ impl BrowserSession {
                     .arg("--disable-search-engine-choice-screen")
                     .arg("--homepage=about:blank");
 
-                let config = builder
-                    .build()
-                    .map_err(|e| YosoiError::LaunchFailed(e.to_string()))?;
+                let config = builder.build().map_err(YosoiError::LaunchFailed)?;
 
                 Browser::launch(config)
                     .await
@@ -271,11 +277,7 @@ impl BrowserSession {
 
         let handler_task = spawn_handler(handler);
 
-        Ok(Self {
-            browser: Arc::new(Mutex::new(browser)),
-            _handler_task: handler_task,
-            stealth,
-        })
+        Ok(Self { browser: Arc::new(Mutex::new(browser)), _handler_task: handler_task, stealth })
     }
 
     /// Open a new tab, apply stealth settings, and navigate to `url`.
@@ -315,30 +317,21 @@ impl BrowserSession {
     /// List all open pages.
     pub async fn pages(&self) -> Result<Vec<Page>> {
         let browser = self.browser.lock().await;
-        let cdp_pages = browser
-            .pages()
-            .await
-            .map_err(|e| YosoiError::PageError(e.to_string()))?;
+        let cdp_pages = browser.pages().await.map_err(|e| YosoiError::PageError(e.to_string()))?;
         Ok(cdp_pages.into_iter().map(Page::new).collect())
     }
 
     /// Get browser version string.
     pub async fn version(&self) -> Result<String> {
         let browser = self.browser.lock().await;
-        let info = browser
-            .version()
-            .await
-            .map_err(|e| YosoiError::Other(e.to_string()))?;
+        let info = browser.version().await.map_err(|e| YosoiError::Other(e.to_string()))?;
         Ok(info.product)
     }
 
     /// Gracefully close the browser.
     pub async fn close(&self) -> Result<()> {
         let mut browser = self.browser.lock().await;
-        browser
-            .close()
-            .await
-            .map_err(|e| YosoiError::Other(e.to_string()))?;
+        browser.close().await.map_err(|e| YosoiError::Other(e.to_string()))?;
         Ok(())
     }
 
@@ -368,19 +361,18 @@ async fn resolve_ws_url(url: &str) -> Result<String> {
 
     // Treat as an HTTP endpoint, fetch /json/version
     let version_url = format!("{}/json/version", url.trim_end_matches('/'));
-    let resp: serde_json::Value = reqwest::get(&version_url)
+    let resp: Value = reqwest::get(&version_url)
         .await
         .map_err(|e| YosoiError::ConnectionFailed(format!("GET {version_url}: {e}")))?
         .json()
         .await
         .map_err(|e| YosoiError::ConnectionFailed(format!("parse {version_url}: {e}")))?;
 
-    resp.get("webSocketDebuggerUrl")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| {
+    resp.get("webSocketDebuggerUrl").and_then(|v| v.as_str()).map(ToString::to_string).ok_or_else(
+        || {
             YosoiError::ConnectionFailed(
                 "webSocketDebuggerUrl not found in /json/version response".into(),
             )
-        })
+        },
+    )
 }

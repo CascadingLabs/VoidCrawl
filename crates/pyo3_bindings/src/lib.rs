@@ -3,13 +3,13 @@
 //! Exposes `PyBrowserSession` and `PyPage` as Python classes with async methods
 //! that bridge to Python's asyncio via `pyo3-async-runtimes`.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use pyo3::exceptions::PyRuntimeError;
-use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::{
+    exceptions::PyRuntimeError,
+    prelude::*,
+    types::{PyBytes, PyDict, PyList},
+};
 use tokio::sync::Mutex;
 use void_crawl_core::{BrowserMode, BrowserPool, BrowserSession, Page, PooledTab, StealthConfig};
 
@@ -90,11 +90,8 @@ async fn do_launch(
     chrome_executable: Option<String>,
     extra_args: Vec<String>,
 ) -> PyResult<()> {
-    let stealth = if stealth_enabled {
-        StealthConfig::chrome_like()
-    } else {
-        StealthConfig::none()
-    };
+    let stealth =
+        if stealth_enabled { StealthConfig::chrome_like() } else { StealthConfig::none() };
 
     let mut builder = BrowserSession::builder().mode(mode).stealth(stealth);
 
@@ -129,9 +126,7 @@ pub struct PyPage {
 
 impl PyPage {
     fn new(page: Page) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(Some(page))),
-        }
+        Self { inner: Arc::new(Mutex::new(Some(page))) }
     }
 }
 
@@ -217,9 +212,11 @@ impl PyPage {
         with_page!(self, py, |page| page.url())
     }
 
-    /// Evaluate a JavaScript expression and return the result as a native Python object.
+    /// Evaluate a JavaScript expression and return the result as a native
+    /// Python object.
     ///
-    /// JSON objects → dict, arrays → list, strings → str, numbers → int/float, etc.
+    /// JSON objects → dict, arrays → list, strings → str, numbers → int/float,
+    /// etc.
     fn evaluate_js<'py>(&self, py: Python<'py>, expression: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -386,13 +383,13 @@ impl PyPage {
 ///         html = await page.content()
 #[pyclass(name = "BrowserSession")]
 pub struct PyBrowserSession {
-    inner: Arc<Mutex<Option<BrowserSession>>>,
-    mode: BrowserMode,
-    stealth_enabled: bool,
-    no_sandbox: bool,
-    proxy: Option<String>,
+    inner:             Arc<Mutex<Option<BrowserSession>>>,
+    mode:              BrowserMode,
+    stealth_enabled:   bool,
+    no_sandbox:        bool,
+    proxy:             Option<String>,
     chrome_executable: Option<String>,
-    extra_args: Vec<String>,
+    extra_args:        Vec<String>,
 }
 
 #[pymethods]
@@ -437,7 +434,8 @@ impl PyBrowserSession {
         }
     }
 
-    /// Launch (or connect to) the browser. Called automatically by `__aenter__`.
+    /// Launch (or connect to) the browser. Called automatically by
+    /// `__aenter__`.
     fn launch<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
         let mode = self.mode.clone();
@@ -481,9 +479,8 @@ impl PyBrowserSession {
         let inner = Arc::clone(&self.inner);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = inner.lock().await;
-            let session = guard
-                .as_ref()
-                .ok_or_else(|| PyRuntimeError::new_err("browser not launched"))?;
+            let session =
+                guard.as_ref().ok_or_else(|| PyRuntimeError::new_err("browser not launched"))?;
             session.version().await.map_err(to_py_err)
         })
     }
@@ -574,8 +571,8 @@ impl PyBrowserSession {
 ///         html = await tab.content()
 #[pyclass(name = "PooledTab")]
 pub struct PyPooledTab {
-    inner: Arc<Mutex<Option<PooledTab>>>,
-    pool: Arc<BrowserPool>,
+    inner:     Arc<Mutex<Option<PooledTab>>>,
+    pool:      Arc<BrowserPool>,
     /// Snapshot of use_count at the moment the tab was acquired.
     #[pyo3(get)]
     use_count: u32,
@@ -825,9 +822,7 @@ impl PyBrowserPool {
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let pool = BrowserPool::from_env().await.map_err(to_py_err)?;
-            Ok(PyBrowserPool {
-                inner: Arc::new(pool),
-            })
+            Ok(PyBrowserPool { inner: Arc::new(pool) })
         })
     }
 
@@ -845,11 +840,7 @@ impl PyBrowserPool {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let tab = pool.acquire().await.map_err(to_py_err)?;
             let use_count = tab.use_count;
-            Ok(PyPooledTab {
-                inner: Arc::new(Mutex::new(Some(tab))),
-                pool,
-                use_count,
-            })
+            Ok(PyPooledTab { inner: Arc::new(Mutex::new(Some(tab))), pool, use_count })
         })
     }
 
@@ -895,10 +886,7 @@ impl PyBrowserPool {
 
     fn __repr__(&self) -> String {
         let cfg = self.inner.config();
-        format!(
-            "BrowserPool(browsers={}, tabs_per_browser={})",
-            cfg.browsers, cfg.tabs_per_browser
-        )
+        format!("BrowserPool(browsers={}, tabs_per_browser={})", cfg.browsers, cfg.tabs_per_browser)
     }
 }
 

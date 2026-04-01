@@ -6,20 +6,20 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StealthConfig {
     /// User-Agent string override. `None` = use browser default.
-    pub user_agent: Option<String>,
+    pub user_agent:          Option<String>,
     /// Viewport width in pixels.
-    pub viewport_width: u32,
+    pub viewport_width:      u32,
     /// Viewport height in pixels.
-    pub viewport_height: u32,
+    pub viewport_height:     u32,
     /// Accept-Language header value.
-    pub locale: String,
+    pub locale:              String,
     /// JavaScript snippet injected via `Page.addScriptToEvaluateOnNewDocument`
     /// *before* every page load. Runs in the page's main world.
-    pub inject_js: Option<String>,
+    pub inject_js:           Option<String>,
     /// Whether to use chromiumoxide's built-in `enable_stealth_mode`.
     pub use_builtin_stealth: bool,
     /// Whether to bypass Content-Security-Policy for JS injection.
-    pub bypass_csp: bool,
+    pub bypass_csp:          bool,
 }
 
 impl Default for StealthConfig {
@@ -45,27 +45,27 @@ impl StealthConfig {
         Self {
             // None = keep the browser's real UA, preventing version
             // mismatches between the UA string and the actual Chrome build.
-            user_agent: None,
-            viewport_width: 1920,
-            viewport_height: 1080,
-            locale: "en-US,en;q=0.9".into(),
-            inject_js: Some(Self::default_stealth_js().into()),
+            user_agent:          None,
+            viewport_width:      1920,
+            viewport_height:     1080,
+            locale:              "en-US,en;q=0.9".into(),
+            inject_js:           Some(Self::default_stealth_js().into()),
             // Disabled: chromiumoxide's stealth sends detectable CDP patterns.
             use_builtin_stealth: false,
-            bypass_csp: true,
+            bypass_csp:          true,
         }
     }
 
     /// Minimal config — no overrides, no injection, just headless defaults.
     pub fn none() -> Self {
         Self {
-            user_agent: None,
-            viewport_width: 1920,
-            viewport_height: 1080,
-            locale: "en-US,en;q=0.9".into(),
-            inject_js: None,
+            user_agent:          None,
+            viewport_width:      1920,
+            viewport_height:     1080,
+            locale:              "en-US,en;q=0.9".into(),
+            inject_js:           None,
             use_builtin_stealth: false,
-            bypass_csp: false,
+            bypass_csp:          false,
         }
     }
 
@@ -79,10 +79,10 @@ impl StealthConfig {
     ///
     /// We only patch the two things that are universally needed:
     /// 1. `navigator.webdriver` — set by Chrome when run via CDP
-    /// 2. Shadow DOM mode — force open so we can interact with
-    ///    Cloudflare Turnstile and similar challenge iframes.
+    /// 2. Shadow DOM mode — force open so we can interact with Cloudflare
+    ///    Turnstile and similar challenge iframes.
     fn default_stealth_js() -> &'static str {
-        r#"
+        r"
 // Remove navigator.webdriver (set to true by CDP automation).
 delete Object.getPrototypeOf(navigator).webdriver;
 Object.defineProperty(navigator, 'webdriver', {
@@ -95,6 +95,6 @@ Element.prototype._attachShadow = Element.prototype.attachShadow;
 Element.prototype.attachShadow = function(init) {
     return this._attachShadow({ ...init, mode: 'open' });
 };
-"#
+"
     }
 }

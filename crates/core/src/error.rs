@@ -1,5 +1,6 @@
-//! Error types for void_crawl_core.
+//! Error types for `void_crawl_core`.
 
+use chromiumoxide::error::CdpError;
 use thiserror::Error;
 
 /// All errors produced by this crate.
@@ -42,11 +43,13 @@ pub enum YosoiError {
     Other(String),
 }
 
-/// Convenience alias.
-pub type Result<T> = std::result::Result<T, YosoiError>;
+use core::result;
 
-impl From<chromiumoxide::error::CdpError> for YosoiError {
-    fn from(e: chromiumoxide::error::CdpError) -> Self {
-        YosoiError::Other(e.to_string())
+/// Convenience alias.
+pub type Result<T> = result::Result<T, YosoiError>;
+
+impl From<CdpError> for YosoiError {
+    fn from(e: CdpError) -> Self {
+        Self::Other(e.to_string())
     }
 }
