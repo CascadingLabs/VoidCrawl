@@ -92,9 +92,9 @@ import asyncio
 from void_crawl import BrowserPool
 
 async def main():
-    async with await BrowserPool.from_env() as pool:
+    async with BrowserPool.from_env() as pool:
         # Tabs are recycled, not closed — near-instant reuse
-        async with await pool.acquire() as tab:
+        async with pool.acquire() as tab:
             await tab.navigate("https://example.com")
             print(await tab.title())
             print(len(await tab.content()))
@@ -109,9 +109,9 @@ import asyncio
 from void_crawl import BrowserPool
 
 async def main():
-    async with await BrowserPool.from_env() as pool:
+    async with BrowserPool.from_env() as pool:
         async def fetch(url: str) -> str:
-            async with await pool.acquire() as tab:
+            async with pool.acquire() as tab:
                 await tab.navigate(url)
                 return await tab.content()
 
@@ -223,7 +223,7 @@ pool = await BrowserPool.from_env()  # reads env vars
 Same methods as `Page` (navigate, content, title, url, evaluate_js, screenshot_png, query_selector, etc.) plus:
 - `use_count: int` — How many times this tab has been used
 
-Use as async context manager for auto-release: `async with await pool.acquire() as tab:`
+Use as async context manager for auto-release: `async with pool.acquire() as tab:`
 
 ### `BrowserSession` (Python)
 

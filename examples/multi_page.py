@@ -2,7 +2,7 @@
 
 import asyncio
 
-from void_crawl import BrowserSession
+from void_crawl import BrowserConfig, BrowserSession
 
 URLS = [
     "https://example.com",
@@ -13,7 +13,7 @@ URLS = [
 
 async def main() -> None:
     """Open multiple tabs in one session and print their titles."""
-    async with BrowserSession(headless=True) as browser:
+    async with BrowserSession(BrowserConfig()) as browser:
         pages = [await browser.new_page(url) for url in URLS]
         for page in pages:
             title = await page.title()

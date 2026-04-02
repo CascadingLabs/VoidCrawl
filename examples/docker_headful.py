@@ -26,36 +26,29 @@ What you'll see:
 """
 
 import asyncio
-import os
 
-from void_crawl import BrowserPool
+from void_crawl import BrowserConfig, BrowserPool, PoolConfig
 
 
 async def main() -> None:
     """Connect to Docker headful Chrome and demonstrate navigation, DOM queries, screenshots."""
     # ── Connect to Docker Chrome ─────────────────────────────────────
     # The headful Docker container runs Chrome on ports 19222 and 19223.
-    # These are different from the default 9222/9223 to avoid conflicts
-    # with any Chrome you might be running natively.
-    os.environ["CHROME_WS_URLS"] = "http://localhost:19222,http://localhost:19223"
-    os.environ["TABS_PER_BROWSER"] = "2"
+    config = PoolConfig(
+        chrome_ws_urls=["http://localhost:19222", "http://localhost:19223"],
+        tabs_per_browser=2,
+        browser=BrowserConfig(headless=False),
+    )
 
-    async with await BrowserPool.from_env() as pool:
+    async with BrowserPool(config) as pool:
         # ── Basic navigation ─────────────────────────────────────────
-        # Open a tab and navigate. If you have a VNC client open on
-        # localhost:5900, you'll see Chrome loading this page right now.
-        async with await pool.acquire() as tab:
+        async with pool.acquire() as tab:
             # goto() combines navigate + wait-for-network-idle in one shot.
-            # It sets up the CDP event listener BEFORE starting navigation,
-            # so it never misses an early networkIdle event.
             event = await tab.goto(
                 "https://en.wikipedia.org/wiki/Web_scraping",
                 timeout=30.0,
             )
             print(f"Wait event: {event}")
-            # "networkIdle" = 0 in-flight requests for 500ms (best signal)
-            # "networkAlmostIdle" = ≤2 in-flight requests (fallback)
-            # None = timeout reached
 
             title = await tab.title()
             html = await tab.content()
@@ -63,17 +56,12 @@ async def main() -> None:
             print(f"HTML: {len(html):,} chars")
 
             # ── DOM queries ──────────────────────────────────────────
-            # query_selector_all uses a single JS eval that returns all
-            # results at once — no N serial CDP round-trips.
             headings = await tab.query_selector_all("#toc li a")
             print(f"Table of contents entries: {len(headings)}")
             for h in headings[:5]:
-                # Each entry is an <a> tag innerHTML like "1.2 Legal issues"
                 print(f"  - {h}")
 
             # ── Screenshot ───────────────────────────────────────────
-            # Full-page PNG. In VNC you'll see the page exactly as it
-            # looks in the screenshot.
             png_bytes = await tab.screenshot_png()
             import anyio
 
@@ -85,17 +73,14 @@ async def main() -> None:
             )
 
             # ── JavaScript evaluation ────────────────────────────────
-            # Returns native Python types (dict, list, int, etc.),
-            # not JSON strings.
             link_count = await tab.evaluate_js('document.querySelectorAll("a").length')
-            print(f"Links on page: {link_count}")  # an int, not "123"
+            print(f"Links on page: {link_count}")
 
         # ── Parallel fetch ───────────────────────────────────────────
-        # Watch VNC — you'll see both tabs loading simultaneously.
         print("\nParallel fetch (watch both tabs in VNC!)...")
 
         async def fetch(url: str) -> tuple[str, int]:
-            async with await pool.acquire() as tab:
+            async with pool.acquire() as tab:
                 await tab.goto(url)
                 t = await tab.title()
                 length = len(await tab.content())

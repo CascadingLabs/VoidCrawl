@@ -2,13 +2,13 @@
 
 import asyncio
 
-from void_crawl import BrowserPool
+from void_crawl import BrowserPool, PoolConfig
 
 
 async def main() -> None:
     """Evaluate various JavaScript expressions in a page context."""
-    async with await BrowserPool.from_env() as pool:
-        async with await pool.acquire() as tab:
+    async with BrowserPool(PoolConfig()) as pool:
+        async with pool.acquire() as tab:
             await tab.navigate("https://example.com")
 
             # evaluate_js returns native Python types (str, int, float, dict, list, bool, None)

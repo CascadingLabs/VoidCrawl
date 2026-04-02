@@ -11,7 +11,7 @@ Stealth mode (enabled by default) patches common bot-detection signals:
 import asyncio
 import json
 
-from void_crawl import BrowserSession, Page
+from void_crawl import BrowserConfig, BrowserSession, Page
 
 DETECTION_JS = """
 JSON.stringify({
@@ -36,13 +36,13 @@ async def check_fingerprint(label: str, page: Page) -> None:
 async def main() -> None:
     """Compare fingerprints with stealth enabled vs disabled."""
     # Stealth ON (default)
-    async with BrowserSession(headless=True, stealth=True) as browser:
+    async with BrowserSession(BrowserConfig(stealth=True)) as browser:
         page = await browser.new_page("https://example.com")
         await check_fingerprint("stealth=True", page)
         await page.close()
 
     # Stealth OFF
-    async with BrowserSession(headless=True, stealth=False) as browser:
+    async with BrowserSession(BrowserConfig(stealth=False)) as browser:
         page = await browser.new_page("https://example.com")
         await check_fingerprint("stealth=False", page)
         await page.close()

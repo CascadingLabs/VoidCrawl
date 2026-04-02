@@ -17,8 +17,10 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
 ]
+dependencies = [ "pydantic>=2" ]
 
 [tool.maturin]
 features = [ "pyo3/extension-module" ]
 manifest-path = "crates/pyo3_bindings/Cargo.toml"
-module-name = "void_crawl"
+module-name = "void_crawl._ext"
+python-packages = [ "void_crawl" ]

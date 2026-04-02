@@ -41,8 +41,8 @@ Reads configuration from environment variables:
 ### Context Manager
 
 ```python
-async with await BrowserPool.from_env() as pool:
-    async with await pool.acquire() as tab:
+async with BrowserPool.from_env() as pool:
+    async with pool.acquire() as tab:
         await tab.navigate("https://example.com")
         html = await tab.content()
     # tab auto-released here
@@ -85,7 +85,7 @@ Same as [`Page`](#page) except no `close()` — closing is handled by the pool:
 ### Context Manager
 
 ```python
-async with await pool.acquire() as tab:
+async with pool.acquire() as tab:
     ...  # tab auto-released on exit
 ```
 

@@ -2,7 +2,7 @@
 
 import asyncio
 
-from void_crawl import BrowserSession
+from void_crawl import BrowserConfig, BrowserSession
 
 FORM_PAGE = """data:text/html,
 <html>
@@ -20,7 +20,7 @@ FORM_PAGE = """data:text/html,
 
 async def main() -> None:
     """Query DOM elements, type into an input, and click a button."""
-    async with BrowserSession(headless=True) as browser:
+    async with BrowserSession(BrowserConfig()) as browser:
         page = await browser.new_page(FORM_PAGE)
 
         # Query a single element (returns inner HTML or None)
