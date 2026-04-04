@@ -3,8 +3,8 @@ build-backend = "maturin"
 requires = [ "maturin>=1.7,<2" ]
 
 [project]
-name = "void-crawl"
-version = "0.1.5"
+name = "voidcrawl"
+version = "0.1.6"
 description = "Rust-native CDP browser automation for Python via PyO3"
 license = { text = "Apache-2.0" }
 
@@ -25,6 +25,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+  "commitizen>=4.13",
   "mypy>=1.15",
   "pytest>=9",
   "pytest-asyncio>=1",
@@ -38,6 +39,17 @@ features = [ "pyo3/extension-module" ]
 manifest-path = "crates/pyo3_bindings/Cargo.toml"
 module-name = "void_crawl._ext"
 python-packages = [ "void_crawl" ]
+
+# ── Commitizen ────────────────────────────────────────────────────────────
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+tag_format = "$version"
+version_scheme = "pep440"
+version_provider = "pep621"
+update_changelog_on_bump = true
+major_version_zero = true
+post_bump_hooks = [ "bash scripts/post_bump.sh" ]
 
 # ── Poe Tasks ─────────────────────────────────────────────────────────────
 
@@ -76,6 +88,26 @@ sequence = [
 [tool.poe.tasks.docs]
 help = "Generate API reference markdown from docstrings"
 cmd = "python scripts/generate_api_docs.py --output docs/api-reference.md"
+
+[tool.poe.tasks.bump]
+help = "Auto-detect bump from conventional commits"
+cmd = "uv run cz bump --yes"
+
+[tool.poe.tasks.bump-dry]
+help = "Preview what the next bump would be"
+cmd = "uv run cz bump --dry-run"
+
+[tool.poe.tasks.bump-patch]
+help = "Patch release (e.g. 0.1.5 → 0.1.6)"
+cmd = "uv run cz bump --increment PATCH --yes"
+
+[tool.poe.tasks.bump-minor]
+help = "Minor release (e.g. 0.1.5 → 0.2.0)"
+cmd = "uv run cz bump --increment MINOR --yes"
+
+[tool.poe.tasks.bump-major]
+help = "Major release (e.g. 0.1.5 → 1.0.0)"
+cmd = "uv run cz bump --increment MAJOR --yes"
 
 [tool.poe.tasks.ci]
 help = "Full CI pipeline (lint + format + typecheck + test)"
