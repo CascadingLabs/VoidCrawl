@@ -4,7 +4,7 @@ requires = [ "maturin>=1.7,<2" ]
 
 [project]
 name = "void-crawl"
-version = "0.1.0"
+version = "0.0.1"
 description = "Rust-native CDP browser automation for Python via PyO3"
 license = { text = "Apache-2.0" }
 
@@ -19,8 +19,146 @@ classifiers = [
 ]
 dependencies = [ "pydantic>=2" ]
 
+[dependency-groups]
+dev = [
+  "mypy>=1.15",
+  "pytest>=9",
+  "pytest-asyncio>=1",
+  "griffe>=2",
+  "poethepoet>=0.42",
+]
+
 [tool.maturin]
 features = [ "pyo3/extension-module" ]
 manifest-path = "crates/pyo3_bindings/Cargo.toml"
 module-name = "void_crawl._ext"
 python-packages = [ "void_crawl" ]
+
+# ── Poe Tasks ─────────────────────────────────────────────────────────────
+
+[tool.poe.tasks.lint]
+help = "Run ruff linter"
+cmd = "ruff check"
+
+[tool.poe.tasks.format]
+help = "Run ruff formatter"
+cmd = "ruff format"
+
+[tool.poe.tasks."format:check"]
+help = "Check formatting without modifying files"
+cmd = "ruff format --check"
+
+[tool.poe.tasks.typecheck]
+help = "Run mypy type checker"
+cmd = "mypy"
+
+[tool.poe.tasks.test]
+help = "Run pytest suite"
+cmd = "pytest tests/ -v"
+
+[tool.poe.tasks."lint:fix"]
+help = "Run ruff linter with auto-fix"
+cmd = "ruff check --fix"
+
+[tool.poe.tasks.check]
+help = "Run all checks (lint + format + typecheck)"
+sequence = [
+  { cmd = "ruff check" },
+  { cmd = "ruff format --check" },
+  { cmd = "mypy" },
+]
+
+[tool.poe.tasks.ci]
+help = "Full CI pipeline (lint + format + typecheck + test)"
+sequence = [
+  { cmd = "ruff check --no-fix --exit-non-zero-on-fix" },
+  { cmd = "ruff format --check" },
+  { cmd = "mypy" },
+  { cmd = "pytest tests/ -v" },
+]
+
+# ── Ruff ──────────────────────────────────────────────────────────────────
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+src = [ "void_crawl", "tests", "examples" ]
+
+[tool.ruff.lint]
+select = [
+  "F",      # Pyflakes
+  "E",      # pycodestyle errors
+  "W",      # pycodestyle warnings
+  "I",      # isort
+  "N",      # pep8-naming
+  "UP",     # pyupgrade
+  "B",      # flake8-bugbear
+  "A",      # flake8-builtins
+  "C4",     # flake8-comprehensions
+  "DTZ",    # flake8-datetimez
+  "T10",    # flake8-debugger
+  "ISC",    # flake8-implicit-str-concat
+  "PIE",    # flake8-pie
+  "PT",     # flake8-pytest-style
+  "RSE",    # flake8-raise
+  "RET",    # flake8-return
+  "SIM",    # flake8-simplify
+  "TCH",    # flake8-type-checking
+  "ARG",    # flake8-unused-arguments
+  "PTH",    # flake8-use-pathlib
+  "PGH",    # pygrep-hooks
+  "PL",     # Pylint
+  "TRY",    # tryceratops
+  "FLY",    # flynt
+  "PERF",   # Perflint
+  "FURB",   # refurb
+  "RUF",    # Ruff-specific
+]
+ignore = [
+  "ISC001",   # conflicts with ruff formatter
+  "PLR0913",  # too many arguments — common in action constructors
+  "PLR2004",  # magic value in comparison — noisy in tests
+  "TRY003",   # long exception messages are fine
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+  "ARG",      # unused arguments in test fixtures/mocks
+  "PT011",    # pytest.raises too broad — acceptable in tests
+]
+"examples/**/*.py" = [
+  "T20",      # print() is expected in examples
+]
+
+[tool.ruff.lint.isort]
+known-first-party = [ "void_crawl" ]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+# ── Mypy ──────────────────────────────────────────────────────────────────
+
+[tool.mypy]
+python_version = "3.10"
+files = [ "void_crawl", "tests" ]
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+show_error_codes = true
+enable_error_code = [ "ignore-without-code", "redundant-expr", "truthy-bool" ]
+
+[[tool.mypy.overrides]]
+module = "void_crawl._ext"
+# Native extension — type stubs in _ext.pyi cover this
+follow_imports = "skip"
+
+# ── Pytest ────────────────────────────────────────────────────────────────
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

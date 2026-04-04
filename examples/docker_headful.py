@@ -31,7 +31,7 @@ from void_crawl import BrowserConfig, BrowserPool, PoolConfig
 
 
 async def main() -> None:
-    """Connect to Docker headful Chrome and demonstrate navigation, DOM queries, screenshots."""
+    """Connect to Docker headful Chrome and demonstrate navigation."""
     # ── Connect to Docker Chrome ─────────────────────────────────────
     # The headful Docker container runs Chrome on ports 19222 and 19223.
     config = PoolConfig(
@@ -63,14 +63,11 @@ async def main() -> None:
 
             # ── Screenshot ───────────────────────────────────────────
             png_bytes = await tab.screenshot_png()
-            import anyio
+            import anyio  # noqa: PLC0415
 
-            await anyio.Path("/tmp/docker_headful_screenshot.png").write_bytes(
-                png_bytes
-            )
-            print(
-                f"Screenshot: {len(png_bytes):,} bytes -> /tmp/docker_headful_screenshot.png"
-            )
+            path = "/tmp/docker_headful_screenshot.png"
+            await anyio.Path(path).write_bytes(png_bytes)
+            print(f"Screenshot: {len(png_bytes):,} bytes -> {path}")
 
             # ── JavaScript evaluation ────────────────────────────────
             link_count = await tab.evaluate_js('document.querySelectorAll("a").length')
@@ -95,9 +92,8 @@ async def main() -> None:
 
     print("\nDone! The Docker container is still running.")
     print("Connect VNC to localhost:5900 to see the Chrome windows.")
-    print(
-        "Stop with: docker compose -f docker/docker-compose.headful.yml --profile amd down"
-    )
+    stop_cmd = "docker compose -f docker/docker-compose.headful.yml --profile amd down"
+    print(f"Stop with: {stop_cmd}")
 
 
 if __name__ == "__main__":

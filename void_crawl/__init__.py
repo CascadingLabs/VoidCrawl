@@ -7,8 +7,12 @@ import os
 from pydantic import BaseModel, Field
 
 from void_crawl._ext import (
-    BrowserSession as _BrowserSession,
     BrowserPool as _BrowserPool,
+)
+from void_crawl._ext import (
+    BrowserSession as _BrowserSession,
+)
+from void_crawl._ext import (
     Page,
     PooledTab,
     _AcquireContext,
@@ -17,10 +21,10 @@ from void_crawl._ext import (
 
 __all__ = [
     "BrowserConfig",
-    "PoolConfig",
-    "BrowserSession",
     "BrowserPool",
+    "BrowserSession",
     "Page",
+    "PoolConfig",
     "PooledTab",
 ]
 
@@ -73,30 +77,30 @@ class PoolConfig(BaseModel):
     def from_env(cls) -> PoolConfig:
         """Build a PoolConfig from environment variables.
 
-        | Variable            | Description                                    | Default |
-        |---------------------|------------------------------------------------|---------|
-        | ``CHROME_WS_URLS``  | Comma-separated ws:// or http:// URLs          | —       |
-        | ``BROWSER_COUNT``   | Number of Chrome processes to launch           | 1       |
-        | ``TABS_PER_BROWSER``| Max concurrent tabs per browser                | 4       |
-        | ``TAB_MAX_USES``    | Hard recycle threshold                         | 50      |
-        | ``TAB_MAX_IDLE_SECS``| Idle eviction timeout                         | 60      |
-        | ``CHROME_NO_SANDBOX``| Set to "1" to disable sandbox                 | —       |
-        | ``CHROME_HEADLESS`` | Set to "0" for headful mode                    | 1       |
+        | Variable             | Description                     | Default |
+        |----------------------|---------------------------------|---------|
+        | ``CHROME_WS_URLS``   | Comma-separated ws/http URLs    | —       |
+        | ``BROWSER_COUNT``    | Chrome processes to launch      | 1       |
+        | ``TABS_PER_BROWSER`` | Max concurrent tabs per browser | 4       |
+        | ``TAB_MAX_USES``     | Hard recycle threshold          | 50      |
+        | ``TAB_MAX_IDLE_SECS``| Idle eviction timeout           | 60      |
+        | ``CHROME_NO_SANDBOX``| Set to "1" to disable sandbox   | —       |
+        | ``CHROME_HEADLESS``  | Set to "0" for headful mode     | 1       |
         """
         ws_urls_raw = os.environ.get("CHROME_WS_URLS", "")
         chrome_ws_urls = [u.strip() for u in ws_urls_raw.split(",") if u.strip()]
 
         browser_count = (
-            int(os.environ.get("BROWSER_COUNT", 1))
+            int(os.environ.get("BROWSER_COUNT", "1"))
             if not chrome_ws_urls
             else len(chrome_ws_urls)
         )
 
         return cls(
             browsers=browser_count,
-            tabs_per_browser=int(os.environ.get("TABS_PER_BROWSER", 4)),
-            tab_max_uses=int(os.environ.get("TAB_MAX_USES", 50)),
-            tab_max_idle_secs=int(os.environ.get("TAB_MAX_IDLE_SECS", 60)),
+            tabs_per_browser=int(os.environ.get("TABS_PER_BROWSER", "4")),
+            tab_max_uses=int(os.environ.get("TAB_MAX_USES", "50")),
+            tab_max_idle_secs=int(os.environ.get("TAB_MAX_IDLE_SECS", "60")),
             chrome_ws_urls=chrome_ws_urls,
             browser=BrowserConfig(
                 no_sandbox=os.environ.get("CHROME_NO_SANDBOX") == "1",
@@ -118,8 +122,8 @@ class BrowserSession:
             html = await page.content()
     """
 
-    def __init__(self, config: BrowserConfig = BrowserConfig()) -> None:
-        self._config = config
+    def __init__(self, config: BrowserConfig | None = None) -> None:
+        self._config = config if config is not None else BrowserConfig()
         self._inner: _BrowserSession | None = None
 
     async def __aenter__(self) -> BrowserSession:
@@ -235,4 +239,7 @@ class BrowserPool:
 
     def __repr__(self) -> str:
         cfg = self._config
-        return f"BrowserPool(browsers={cfg.browsers}, tabs_per_browser={cfg.tabs_per_browser})"
+        return (
+            f"BrowserPool(browsers={cfg.browsers},"
+            f" tabs_per_browser={cfg.tabs_per_browser})"
+        )

@@ -7,16 +7,15 @@ from void_crawl import BrowserPool, PoolConfig
 
 async def main() -> None:
     """Launch a headless browser, visit example.com, and print page info."""
-    async with BrowserPool(PoolConfig()) as pool:
-        async with pool.acquire() as tab:
-            await tab.navigate("https://example.com")
-            title = await tab.title()
-            url = await tab.url()
-            html = await tab.content()
+    async with BrowserPool(PoolConfig()) as pool, pool.acquire() as tab:
+        await tab.navigate("https://example.com")
+        title = await tab.title()
+        url = await tab.url()
+        html = await tab.content()
 
-            print(f"Title: {title}")
-            print(f"URL:   {url}")
-            print(f"HTML length: {len(html)} chars")
+        print(f"Title: {title}")
+        print(f"URL:   {url}")
+        print(f"HTML length: {len(html)} chars")
 
 
 if __name__ == "__main__":

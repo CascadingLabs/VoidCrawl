@@ -30,7 +30,8 @@ async def with_proxy() -> None:
     Requires a running proxy (e.g. `mitmproxy` on port 8080).
     Uncomment and adjust the proxy URL to try it out.
     """
-    # async with BrowserSession(BrowserConfig(proxy='http://127.0.0.1:8080')) as browser:
+    # proxy_cfg = BrowserConfig(proxy='http://127.0.0.1:8080')
+    # async with BrowserSession(proxy_cfg) as browser:
     #     page = await browser.new_page('https://httpbin.org/ip')
     #     print(await page.content())
     #     await page.close()
