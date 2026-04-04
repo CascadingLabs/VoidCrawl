@@ -237,7 +237,11 @@ class BrowserSession:
         return await self._inner.new_page(url)
 
     async def version(self) -> str:
-        """Return the browser version string (e.g. ``"Chrome/126.0.6478.126"``)."""
+        """Return the browser version string (e.g. ``"Chrome/126.0.6478.126"``).
+
+        Returns:
+            The Chrome/Chromium product version reported by the browser.
+        """
         assert self._inner is not None, "BrowserSession not started — use async with"
         return await self._inner.version()
 

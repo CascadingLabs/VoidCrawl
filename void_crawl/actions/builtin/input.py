@@ -96,7 +96,11 @@ class CdpTypeText(ActionNode):
         self.text = text
 
     async def run(self, tab: Tab) -> None:
-        """Dispatch ``keyDown``/``keyUp`` pairs for each character in *text*."""
+        """Dispatch ``keyDown``/``keyUp`` pairs for each character in *text*.
+
+        Args:
+            tab: Tab-like object to send the key events to.
+        """
         for ch in self.text:
             await tab.dispatch_key_event("keyDown", key=ch, text=ch)
             await tab.dispatch_key_event("keyUp", key=ch)

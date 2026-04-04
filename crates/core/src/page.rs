@@ -279,7 +279,12 @@ impl Page {
             .evaluate(expression)
             .await
             .map_err(|e| YosoiError::JsEvalError(e.to_string()))?;
-        result.into_value().map_err(|e| YosoiError::JsEvalError(e.to_string()))
+        // `into_value()` fails when the JS expression returns null/undefined
+        // (the RemoteObject has no `value` field).  Fall back to Value::Null.
+        match result.value() {
+            Some(v) => Ok(v.clone()),
+            None => Ok(Value::Null),
+        }
     }
 
     // ── Screenshots & PDF ───────────────────────────────────────────────

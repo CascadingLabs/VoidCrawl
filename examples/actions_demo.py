@@ -69,7 +69,8 @@ class CdpDoubleClick(ActionNode):
 
 
 async def main() -> None:
-    async with BrowserSession(BrowserConfig()) as browser:
+    # Toggle headless=False to watch the browser visually
+    async with BrowserSession(BrowserConfig(headless=False)) as browser:
         page = await browser.new_page(DEMO_PAGE)
 
         # 1. Use individual prebaked actions

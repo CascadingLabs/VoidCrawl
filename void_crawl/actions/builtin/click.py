@@ -76,7 +76,11 @@ class CdpClick(ActionNode):
         self.button = button
 
     async def run(self, tab: Tab) -> None:
-        """Dispatch ``mousePressed`` then ``mouseReleased`` at ``(x, y)``."""
+        """Dispatch ``mousePressed`` then ``mouseReleased`` at ``(x, y)``.
+
+        Args:
+            tab: Tab-like object to send the click events to.
+        """
         await tab.dispatch_mouse_event(
             "mousePressed", self.x, self.y, button=self.button, click_count=1
         )
@@ -109,7 +113,11 @@ class CdpClickAndHold(ActionNode):
         self.button = button
 
     async def run(self, tab: Tab) -> None:
-        """Press, hold for *duration_ms*, then release at ``(x, y)``."""
+        """Press, hold for *duration_ms*, then release at ``(x, y)``.
+
+        Args:
+            tab: Tab-like object to send the mouse events to.
+        """
         await tab.dispatch_mouse_event(
             "mousePressed", self.x, self.y, button=self.button, click_count=1
         )

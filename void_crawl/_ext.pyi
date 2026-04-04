@@ -41,13 +41,25 @@ class PooledTab:
         """Block until the current navigation completes."""
         ...
     async def content(self) -> str:
-        """Return the full page HTML (``document.documentElement.outerHTML``)."""
+        """Return the full page HTML (``document.documentElement.outerHTML``).
+
+        Returns:
+            The complete outer HTML of the document element.
+        """
         ...
     async def title(self) -> str | None:
-        """Return the document title, or ``None``."""
+        """Return the document title, or ``None``.
+
+        Returns:
+            The ``document.title`` string, or ``None`` if unavailable.
+        """
         ...
     async def url(self) -> str | None:
-        """Return the current page URL, or ``None``."""
+        """Return the current page URL, or ``None``.
+
+        Returns:
+            The page URL as a string, or ``None`` if unavailable.
+        """
         ...
     async def evaluate_js(self, expression: str) -> object:
         """Evaluate a JavaScript *expression* and return the result.
@@ -57,16 +69,26 @@ class PooledTab:
 
         Args:
             expression: JavaScript expression or IIFE string.
+
+        Returns:
+            The deserialised result of the expression.
         """
         ...
     async def screenshot_png(self) -> bytes:
-        """Capture a full-page screenshot as PNG bytes."""
+        """Capture a full-page screenshot as PNG bytes.
+
+        Returns:
+            Raw PNG image data.
+        """
         ...
     async def query_selector(self, selector: str) -> str | None:
         """Return the outer HTML of the first element matching *selector*, or ``None``.
 
         Args:
             selector: CSS selector string.
+
+        Returns:
+            Outer HTML string of the matched element, or ``None`` if no match.
         """
         ...
     async def query_selector_all(self, selector: str) -> list[str]:
@@ -74,6 +96,9 @@ class PooledTab:
 
         Args:
             selector: CSS selector string.
+
+        Returns:
+            List of outer HTML strings, one per matched element.
         """
         ...
     async def click_element(self, selector: str) -> None:
@@ -250,13 +275,25 @@ class Page:
         """Block until the current navigation completes."""
         ...
     async def content(self) -> str:
-        """Return the full page HTML (``document.documentElement.outerHTML``)."""
+        """Return the full page HTML (``document.documentElement.outerHTML``).
+
+        Returns:
+            The complete outer HTML of the document element.
+        """
         ...
     async def title(self) -> str | None:
-        """Return the document title, or ``None``."""
+        """Return the document title, or ``None``.
+
+        Returns:
+            The ``document.title`` string, or ``None`` if unavailable.
+        """
         ...
     async def url(self) -> str | None:
-        """Return the current page URL, or ``None``."""
+        """Return the current page URL, or ``None``.
+
+        Returns:
+            The page URL as a string, or ``None`` if unavailable.
+        """
         ...
     async def evaluate_js(self, expression: str) -> object:
         """Evaluate a JavaScript *expression* and return the result.
@@ -266,15 +303,25 @@ class Page:
 
         Args:
             expression: JavaScript expression or IIFE string.
+
+        Returns:
+            The deserialised result of the expression.
         """
         ...
     async def screenshot_png(self) -> bytes:
-        """Capture a full-page screenshot as PNG bytes."""
+        """Capture a full-page screenshot as PNG bytes.
+
+        Returns:
+            Raw PNG image data.
+        """
         ...
     async def pdf_bytes(self) -> bytes:
         """Render the page as a PDF and return the raw bytes.
 
         Only works in headless mode.
+
+        Returns:
+            Raw PDF file data.
         """
         ...
     async def query_selector(self, selector: str) -> str | None:
@@ -282,6 +329,9 @@ class Page:
 
         Args:
             selector: CSS selector string.
+
+        Returns:
+            Outer HTML string of the matched element, or ``None`` if no match.
         """
         ...
     async def query_selector_all(self, selector: str) -> list[str]:
@@ -289,6 +339,9 @@ class Page:
 
         Args:
             selector: CSS selector string.
+
+        Returns:
+            List of outer HTML strings, one per matched element.
         """
         ...
     async def click_element(self, selector: str) -> None:

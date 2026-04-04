@@ -69,7 +69,11 @@ class CdpScroll(ActionNode):
         self.delta_y = delta_y
 
     async def run(self, tab: Tab) -> None:
-        """Dispatch a ``mouseWheel`` event at ``(x, y)``."""
+        """Dispatch a ``mouseWheel`` event at ``(x, y)``.
+
+        Args:
+            tab: Tab-like object to send the scroll event to.
+        """
         await tab.dispatch_mouse_event(
             "mouseWheel",
             self.x,

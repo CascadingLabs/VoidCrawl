@@ -46,7 +46,11 @@ class CdpHover(ActionNode):
         self.y = y
 
     async def run(self, tab: Tab) -> None:
-        """Dispatch a ``mouseMoved`` event to ``(x, y)``."""
+        """Dispatch a ``mouseMoved`` event to ``(x, y)``.
+
+        Args:
+            tab: Tab-like object to send the hover event to.
+        """
         await tab.dispatch_mouse_event("mouseMoved", self.x, self.y)
 
     def __repr__(self) -> str:
