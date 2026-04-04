@@ -39,10 +39,8 @@ from voidcrawl._ext import (
     _PoolParamsContext,
 )
 from voidcrawl.actions._protocol import JsTab, Tab
-from voidcrawl.contracts import Attr, Schema, Text, safe_url, strip_tags
+from voidcrawl.schema import Attr, Schema, Text, safe_url, strip_tags
 
-# Aliases for backward compatibility / ergonomic naming
-Contract = Schema
 Selector = Text
 
 __all__ = [
@@ -50,7 +48,6 @@ __all__ = [
     "BrowserConfig",
     "BrowserPool",
     "BrowserSession",
-    "Contract",
     "JsTab",
     "Page",
     "PageResponse",

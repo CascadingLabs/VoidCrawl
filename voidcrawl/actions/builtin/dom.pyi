@@ -6,7 +6,7 @@ from typing import Generic, TypeVar, overload
 
 from voidcrawl.actions._base import JsActionNode
 from voidcrawl.actions._protocol import JsTab
-from voidcrawl.contracts import Schema
+from voidcrawl.schema import Schema
 
 __all__ = ["GetAttribute", "GetText", "QueryAll", "SetAttribute"]
 
@@ -39,7 +39,7 @@ class GetText(JsActionNode):
 class QueryAll(JsActionNode, Generic[_T]):
     """Query all elements matching *selector* and extract fields from each.
 
-    Pass a :class:`~voidcrawl.contracts.Schema` subclass as *fields* to
+    Pass a :class:`~voidcrawl.schema.Schema` subclass as *fields* to
     receive typed model instances, or a plain dict mapping for raw results.
 
     Example — typed Schema::

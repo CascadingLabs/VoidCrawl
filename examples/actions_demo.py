@@ -11,7 +11,7 @@ from voidcrawl import BrowserConfig, BrowserSession
 from voidcrawl.actions import QueryAll
 
 
-class Article(vc.Contract):
+class Article(vc.Schema):
     headline: str = vc.Selector(".hn-feed-headline")
     category: str | None = vc.Selector(".hn-feed-cat")
     excerpt: str | None = vc.Selector(".hn-feed-excerpt", sanitize=vc.strip_tags)

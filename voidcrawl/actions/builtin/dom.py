@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, overload
 
 from voidcrawl.actions._base import JsActionNode, inline_js
-from voidcrawl.contracts import Schema
+from voidcrawl.schema import Schema
 
 if TYPE_CHECKING:
     from voidcrawl.actions._protocol import JsTab
@@ -73,14 +73,14 @@ class QueryAll(JsActionNode, Generic[_T]):
     Pass an empty string ``""`` as the sub-selector to target the root
     element itself rather than a descendant.
 
-    Pass a :class:`~voidcrawl.contracts.Schema` subclass as *fields*
+    Pass a :class:`~voidcrawl.schema.Schema` subclass as *fields*
     to receive typed model instances instead of raw dicts.
 
     Args:
         selector: CSS selector for the root elements to iterate over.
         fields: Mapping of result key → sub-selector or
             ``(sub_selector, attribute)`` tuple, **or** a
-            :class:`~voidcrawl.contracts.Schema` subclass whose field
+            :class:`~voidcrawl.schema.Schema` subclass whose field
             declarations are used automatically.
 
     Example — raw dicts::

@@ -17,7 +17,7 @@ from voidcrawl.actions import QueryAll
 TARGET_URL = "https://qscrape.dev/l2/scoretap"
 
 
-class Match(vc.Contract):
+class Match(vc.Schema):
     team_a: str = vc.Selector(".st-team-right .st-team-name")
     team_b: str = vc.Selector(".st-team:not(.st-team-right) .st-team-name")
     score: str | None = vc.Selector(".st-score")

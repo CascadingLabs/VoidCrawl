@@ -1,4 +1,4 @@
-"""Type stubs for voidcrawl.contracts."""
+"""Type stubs for voidcrawl.schema."""
 
 from __future__ import annotations
 

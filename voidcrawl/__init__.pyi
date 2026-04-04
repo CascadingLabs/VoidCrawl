@@ -17,21 +17,23 @@ from voidcrawl.actions._protocol import (
 from voidcrawl.actions._protocol import (
     Tab as Tab,
 )
-from voidcrawl.contracts import (
+from voidcrawl.schema import (
     Attr as Attr,
 )
-from voidcrawl.contracts import (
+from voidcrawl.schema import (
     Schema as Schema,
 )
-from voidcrawl.contracts import (
+from voidcrawl.schema import (
     Text as Text,
 )
-from voidcrawl.contracts import (
+from voidcrawl.schema import (
     safe_url as safe_url,
 )
-from voidcrawl.contracts import (
+from voidcrawl.schema import (
     strip_tags as strip_tags,
 )
+
+Selector = Text
 
 __all__ = [
     "Attr",
@@ -44,6 +46,7 @@ __all__ = [
     "PoolConfig",
     "PooledTab",
     "Schema",
+    "Selector",
     "Tab",
     "Text",
     "safe_url",

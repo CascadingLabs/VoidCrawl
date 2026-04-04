@@ -9,7 +9,7 @@ from voidcrawl.actions import QueryAll
 TARGET_URL = "https://qscrape.dev/l2/news"
 
 
-class Article(vc.Contract):
+class Article(vc.Schema):
     headline: str = vc.Selector(".hn-feed-headline")
     category: str | None = vc.Selector(".hn-feed-cat")
 
