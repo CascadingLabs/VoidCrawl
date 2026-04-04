@@ -13,7 +13,7 @@ use pyo3::{
 };
 use pyo3_async_runtimes::tokio::future_into_py;
 use serde_json::Value;
-use tokio::{sync::Mutex, task::JoinHandle};
+use tokio::sync::Mutex;
 use void_crawl_core::{
     BrowserMode, BrowserPool, BrowserSession, DispatchKeyEventType, DispatchMouseEventType,
     MouseButton, Page, PageResponse, PoolConfig, PooledTab, StealthConfig, VoidCrawlError,
@@ -93,7 +93,7 @@ fn json_to_py(py: Python<'_>, val: Value) -> PyResult<Bound<'_, PyAny>> {
 /// Attributes:
 ///     html (str): Full outer HTML after network idle.
 ///     url (str): Final URL after any redirects.
-///     status_code (int | None): HTTP status of the last response, or
+///     `status_code` (int | None): HTTP status of the last response, or
 ///         ``None`` when served from cache / service worker.
 ///     redirected (bool): ``True`` when at least one HTTP redirect occurred.
 #[pyclass(name = "PageResponse")]
@@ -279,7 +279,8 @@ impl PyPage {
     /// starts, so early networkIdle events are never missed.
     ///
     /// Returns:
-    ///     PageResponse: HTML, final URL, HTTP status code, and redirect flag.
+    ///     `PageResponse`: HTML, final URL, HTTP status code, and redirect
+    /// flag.
     #[pyo3(signature = (url, timeout=30.0))]
     fn goto<'py>(&self, py: Python<'py>, url: String, timeout: f64) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
@@ -651,6 +652,12 @@ impl PyBrowserSession {
     }
 
     /// Open a new page and navigate to the URL.
+    ///
+    /// **Cancellation safety**: if the Python future is cancelled (e.g. by
+    /// `asyncio.wait_for`) while the tab is opening, the browser session is
+    /// permanently lost — subsequent calls will raise "browser not launched".
+    /// This matches the `with_page!` contract: a cancelled CDP operation
+    /// leaves the browser in an indeterminate state.
     fn new_page<'py>(&self, py: Python<'py>, url: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
         future_into_py(py, async move {
@@ -1120,7 +1127,6 @@ impl PyAcquireContext {
 #[pyclass(name = "_PoolContext")]
 pub struct PyPoolContext {
     pool_slot: Arc<Mutex<Option<Arc<BrowserPool>>>>,
-    task_slot: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl fmt::Debug for PyPoolContext {
@@ -1133,11 +1139,10 @@ impl fmt::Debug for PyPoolContext {
 impl PyPoolContext {
     fn __aenter__<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let pool_slot = Arc::clone(&slf.borrow().pool_slot);
-        let task_slot = Arc::clone(&slf.borrow().task_slot);
         future_into_py(py, async move {
             let pool = Arc::new(BrowserPool::from_env().await.map_err(to_py_err)?);
             if pool.config().auto_evict {
-                *task_slot.lock().await = Some(Arc::clone(&pool).spawn_eviction_task());
+                Arc::clone(&pool).start_eviction_task();
             }
             *pool_slot.lock().await = Some(Arc::clone(&pool));
             Ok(PyBrowserPool { inner: pool })
@@ -1153,11 +1158,7 @@ impl PyPoolContext {
         _exc_tb: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let pool_slot = Arc::clone(&self.pool_slot);
-        let task_slot = Arc::clone(&self.task_slot);
         future_into_py(py, async move {
-            if let Some(task) = task_slot.lock().await.take() {
-                task.abort();
-            }
             if let Some(pool) = pool_slot.lock().await.take() {
                 let _ = pool.close().await;
             }
@@ -1199,10 +1200,7 @@ impl PyBrowserPool {
     ///         ...
     #[classmethod]
     fn from_env(_cls: &Bound<'_, PyType>) -> PyPoolContext {
-        PyPoolContext {
-            pool_slot: Arc::new(Mutex::new(None)),
-            task_slot: Arc::new(Mutex::new(None)),
-        }
+        PyPoolContext { pool_slot: Arc::new(Mutex::new(None)) }
     }
 
     /// Pre-open tabs across all sessions.
@@ -1229,6 +1227,7 @@ impl PyBrowserPool {
         headless, no_sandbox, stealth, ws_urls, proxy, chrome_executable, extra_args
     ))]
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::fn_params_excessive_bools)]
     fn _from_params(
         _cls: &Bound<'_, PyType>,
         browsers: usize,
@@ -1258,7 +1257,6 @@ impl PyBrowserPool {
             chrome_executable,
             extra_args,
             pool_slot: Arc::new(Mutex::new(None)),
-            task_slot: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1315,6 +1313,7 @@ impl PyBrowserPool {
 /// Launches browser sessions from explicit parameters in `__aenter__` and
 /// closes the pool in `__aexit__`. Used internally by the Python
 /// `BrowserPool(config)` wrapper.
+#[allow(clippy::struct_excessive_bools)]
 #[pyclass(name = "_PoolParamsContext")]
 pub struct PyPoolParamsContext {
     browsers:          usize,
@@ -1330,7 +1329,6 @@ pub struct PyPoolParamsContext {
     chrome_executable: Option<String>,
     extra_args:        Vec<String>,
     pool_slot:         Arc<Mutex<Option<Arc<BrowserPool>>>>,
-    task_slot:         Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl fmt::Debug for PyPoolParamsContext {
@@ -1356,7 +1354,6 @@ impl PyPoolParamsContext {
         let chrome_executable = this.chrome_executable.clone();
         let extra_args = this.extra_args.clone();
         let pool_slot = Arc::clone(&this.pool_slot);
-        let task_slot = Arc::clone(&this.task_slot);
         drop(this);
 
         future_into_py(py, async move {
@@ -1418,7 +1415,7 @@ impl PyPoolParamsContext {
             };
             let pool = Arc::new(BrowserPool::new(config, sessions));
             if auto_evict {
-                *task_slot.lock().await = Some(Arc::clone(&pool).spawn_eviction_task());
+                Arc::clone(&pool).start_eviction_task();
             }
             *pool_slot.lock().await = Some(Arc::clone(&pool));
             Ok(PyBrowserPool { inner: pool })
@@ -1434,11 +1431,7 @@ impl PyPoolParamsContext {
         _exc_tb: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let pool_slot = Arc::clone(&self.pool_slot);
-        let task_slot = Arc::clone(&self.task_slot);
         future_into_py(py, async move {
-            if let Some(task) = task_slot.lock().await.take() {
-                task.abort();
-            }
             if let Some(pool) = pool_slot.lock().await.take() {
                 let _ = pool.close().await;
             }

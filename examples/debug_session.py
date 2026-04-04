@@ -7,7 +7,7 @@ whole script.
 Key concepts
 ------------
 * **stepping=True** (default) — pause before *every* action.
-* **stepping=False** — run freely and only pause at ``@vd_breakpoint`` actions.
+* **stepping=False** — run freely and only pause at ``@vc_breakpoint`` actions.
 * **highlight=True** (default) — flash a red CSS outline on the target element
   before the action runs, so you can see exactly what will be clicked/typed.
 * **start_url** — required if you want to use the back (b) or restart (r)
@@ -44,20 +44,20 @@ from voidcrawl.actions import (
     WaitForSelector,
     inline_js,
 )
-from voidcrawl.debug import DebugSession, vd_breakpoint
+from voidcrawl.debug import DebugSession, vc_breakpoint
 
 TARGET_URL = "https://qscrape.dev/l2/taxes"
 
 
 # ---------------------------------------------------------------------------
-# Custom action decorated with @vd_breakpoint.
+# Custom action decorated with @vc_breakpoint.
 #
 # When stepping=False, the debugger runs all actions without pausing — except
-# for actions whose class is decorated with @vd_breakpoint.  This mirrors how
+# for actions whose class is decorated with @vc_breakpoint.  This mirrors how
 # debugger breakpoints work in an IDE: mark the lines that matter, then press
 # "continue" and the debugger stops only where you asked.
 # ---------------------------------------------------------------------------
-@vd_breakpoint
+@vc_breakpoint
 class ViewFirstRecord(JsActionNode):
     """Click the first property record's view button — marked as a breakpoint."""
 
@@ -96,7 +96,7 @@ async def demo_stepping() -> None:
 
 
 async def demo_breakpoints() -> None:
-    """Part 2: run freely, pause only at @vd_breakpoint actions."""
+    """Part 2: run freely, pause only at @vc_breakpoint actions."""
     print("\n=== Part 2: breakpoint-only mode (stepping=False) ===\n")
 
     async with BrowserSession(BrowserConfig(headless=False)) as browser:
@@ -115,7 +115,7 @@ async def demo_breakpoints() -> None:
         dbg.add(ClickElement(".er-btn-primary"))
         dbg.add(WaitForSelector(".er-row"))
 
-        # … but this one is decorated with @vd_breakpoint, so the debugger
+        # … but this one is decorated with @vc_breakpoint, so the debugger
         # will stop here even though stepping=False.
         dbg.add(ViewFirstRecord(".er-view-btn"))
 

@@ -13,7 +13,7 @@ void_crawl/
 │   │       ├── session.rs # BrowserSession — launch/connect/close
 │   │       ├── page.rs    # Page — navigate, content, JS eval, screenshot, DOM queries
 │   │       ├── stealth.rs # StealthConfig — anti-detection patches
-│   │       └── error.rs   # YosoiError enum
+│   │       └── error.rs   # VoidCrawlError enum
 │   └── pyo3_bindings/     # PyO3 extension module (cdylib)
 │       └── src/lib.rs     # PyBrowserSession + PyPage pyclass structs
 ├── pyproject.toml         # maturin build config

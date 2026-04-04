@@ -10,7 +10,7 @@ use chromiumoxide::{
             DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams,
             DispatchMouseEventType, MouseButton,
         },
-        network::{EventResponseReceived, Headers, SetExtraHttpHeadersParams},
+        network::{EventResponseReceived, Headers, ResourceType, SetExtraHttpHeadersParams},
         page::{
             AddScriptToEvaluateOnNewDocumentParams, CaptureScreenshotFormat, EventLifecycleEvent,
             PrintToPdfParams, SetBypassCspParams,
@@ -178,16 +178,27 @@ impl Page {
                 }
                 maybe_network = network.next() => {
                     if let Some(event) = maybe_network {
-                        // status is i64 from the CDP spec; real HTTP codes fit
-                        // in u16, so the lossy truncation is intentional.
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let code = event.response.status as u16;
-                        // 3xx responses are redirects in the chain; count them
-                        // so we know if the final URL differs from the initial.
-                        if (300..400).contains(&code) {
-                            redirect_count += 1;
-                        } else {
-                            status_code = Some(code);
+                        // Only the Document response carries the page's actual
+                        // status code. Sub-resources (images, scripts, XHRs)
+                        // are ignored so a 404 favicon doesn't overwrite a 200
+                        // document status.
+                        if event.r#type == ResourceType::Document {
+                            // status is i64 from the CDP spec; real HTTP codes
+                            // fit in u16, so the lossy truncation is intentional.
+                            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                            let code = event.response.status as u16;
+                            if (300..400).contains(&code) {
+                                // Redirect in the navigation chain.
+                                redirect_count += 1;
+                            } else if code != 0 {
+                                // Chrome emits 0 for cancelled/intercepted
+                                // requests — treat as "no network response".
+                                status_code = Some(code);
+                            }
+                            // A new Document response after networkAlmostIdle
+                            // means a new navigation started; reset the flag so
+                            // we don't exit on a stale almost-idle signal.
+                            got_almost_idle = false;
                         }
                     }
                 }
@@ -370,28 +381,29 @@ impl Page {
     /// Run `document.querySelector(selector)` and return the inner HTML.
     /// Returns `None` if no element matches. Void elements (e.g. `<input>`)
     /// return `Some("")`.
+    ///
+    /// Uses a JS eval rather than `find_element` so that a missing element
+    /// returns `Ok(None)` without any CDP error — real errors (closed browser,
+    /// network failure, etc.) still propagate as `Err`.
     pub async fn query_selector(&self, selector: &str) -> Result<Option<String>> {
-        match self.inner.find_element(selector).await {
-            Ok(el) => {
-                let html =
-                    el.inner_html().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
-                Ok(Some(html.unwrap_or_default()))
-            }
-            Err(e) => {
-                // Distinguish a genuine "element not found" from real CDP/channel
-                // errors (closed browser, network failure, etc.) so callers don't
-                // silently swallow infrastructure failures as a missing element.
-                let msg = e.to_string().to_lowercase();
-                if msg.contains("not found")
-                    || msg.contains("no such element")
-                    || msg.contains("cannot find")
-                    || msg.contains("could not find")
-                {
-                    Ok(None)
-                } else {
-                    Err(VoidCrawlError::PageError(e.to_string()))
-                }
-            }
+        // `querySelector` returns null for no match — never throws — so the
+        // only error path here is a real CDP failure, not a missing element.
+        let js = format!(
+            "(function(){{ var el = document.querySelector({selector:?}); \
+             return el === null ? null : el.innerHTML; }})()"
+        );
+        let val: Value = self
+            .inner
+            .evaluate_expression(js)
+            .await
+            .map_err(|e| VoidCrawlError::PageError(e.to_string()))?
+            .into_value()
+            .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+
+        match val {
+            Value::Null => Ok(None),
+            Value::String(s) => Ok(Some(s)),
+            other => Ok(Some(other.to_string())),
         }
     }
 

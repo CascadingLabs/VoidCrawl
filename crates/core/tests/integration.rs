@@ -214,12 +214,12 @@ async fn test_pool_basic() {
     tab.page.navigate("https://example.com").await.expect("navigate failed");
     let html = tab.page.content().await.expect("content failed");
     assert!(html.contains("Example Domain"));
-    pool.release(tab).await;
+    pool.release(tab).await; // infallible
 
     // Second acquire — should get a recycled tab with use_count == 1
     let tab2 = pool.acquire().await.expect("second acquire failed");
     assert_eq!(tab2.use_count, 1);
-    pool.release(tab2).await;
+    pool.release(tab2).await; // infallible
 
     pool.close().await.expect("pool close failed");
 }
@@ -252,10 +252,10 @@ async fn test_pool_parallel() {
     }
 
     // Release all
-    pool.release(t1).await;
-    pool.release(t2).await;
-    pool.release(t3).await;
-    pool.release(t4).await;
+    pool.release(t1).await; // infallible
+    pool.release(t2).await; // infallible
+    pool.release(t3).await; // infallible
+    pool.release(t4).await; // infallible
 
     pool.close().await.expect("pool close failed");
 }
@@ -275,17 +275,17 @@ async fn test_pool_hard_recycle() {
     // Use 1
     let tab = pool.acquire().await.expect("acquire 1");
     assert_eq!(tab.use_count, 0);
-    pool.release(tab).await;
+    pool.release(tab).await; // infallible
 
     // Use 2
     let tab = pool.acquire().await.expect("acquire 2");
     assert_eq!(tab.use_count, 1);
-    pool.release(tab).await;
+    pool.release(tab).await; // infallible
 
     // Use 3 — should trigger hard recycle (use_count was 2, >= tab_max_uses)
     let tab = pool.acquire().await.expect("acquire 3");
     assert_eq!(tab.use_count, 0, "tab should have been hard-recycled");
-    pool.release(tab).await;
+    pool.release(tab).await; // infallible
 
     pool.close().await.expect("pool close failed");
 }
@@ -304,7 +304,7 @@ async fn test_pool_idle_eviction() {
 
     // Acquire, use, release
     let tab = pool.acquire().await.expect("acquire");
-    pool.release(tab).await;
+    pool.release(tab).await; // infallible
 
     // Wait for idle timeout
     time::sleep(Duration::from_secs(2)).await;
@@ -315,7 +315,7 @@ async fn test_pool_idle_eviction() {
     // Acquire again — should get a fresh tab (use_count reset)
     let tab = pool.acquire().await.expect("acquire after eviction");
     assert_eq!(tab.use_count, 0, "evicted tab should be fresh");
-    pool.release(tab).await;
+    pool.release(tab).await; // infallible
 
     pool.close().await.expect("pool close failed");
 }

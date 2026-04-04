@@ -32,7 +32,7 @@ JSON.stringify({
 async def check_fingerprint(label: str, page: Page) -> None:
     """Print bot-detection fingerprint signals for the given page."""
     raw = await page.evaluate_js(DETECTION_JS)
-    fingerprint = json.loads(raw)
+    fingerprint = json.loads(str(raw))
     print(f"\n[{label}]")
     for key, value in fingerprint.items():
         print(f"  {key}: {value}")

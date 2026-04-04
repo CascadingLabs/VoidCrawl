@@ -212,6 +212,21 @@ class Schema(BaseModel):
                 spec[name] = (extra["_vc_attr"][0], extra["_vc_attr"][1])
         return spec
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        # Detect required fields that have no Text()/Attr() declaration at
+        # class-definition time so errors surface immediately rather than as
+        # an opaque Pydantic "field required" ValidationError at scrape time.
+        for name, fi in cls.model_fields.items():
+            extra: dict[str, Any] = fi.json_schema_extra or {}  # type: ignore[assignment]
+            has_vc_meta = "_vc_selector" in extra or "_vc_attr" in extra
+            if not has_vc_meta and fi.is_required():
+                raise TypeError(
+                    f"{cls.__name__}.{name}: required Schema field must declare "
+                    f"how it is extracted — use Text({name!r}) or Attr(...) "
+                    "as the field default."
+                )
+
     @model_validator(mode="before")
     @classmethod
     def _vc_sanitize(cls, data: Any) -> Any:
@@ -222,5 +237,4 @@ class Schema(BaseModel):
             for m in fi.metadata:
                 if isinstance(m, _SanitizeMeta):
                     out[name] = m.fn(out.get(name))
-                    break
         return out

@@ -8,11 +8,11 @@ from voidcrawl.actions._base import ActionNode
 from voidcrawl.actions._flow import Flow, FlowResult
 from voidcrawl.actions._protocol import Tab
 
-__all__ = ["DebugSession", "vd_breakpoint"]
+__all__ = ["DebugSession", "vc_breakpoint"]
 
 _T = TypeVar("_T", bound=type)
 
-def vd_breakpoint(cls: _T) -> _T:
+def vc_breakpoint(cls: _T) -> _T:
     """Mark an action class as a debugger breakpoint.
 
     When a :class:`DebugSession` encounters an action whose class is marked

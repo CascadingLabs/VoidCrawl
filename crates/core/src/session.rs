@@ -350,6 +350,11 @@ impl BrowserSession {
     }
 
     /// Gracefully close the browser.
+    ///
+    /// Signals Chrome to shut down and waits for the CDP response. The
+    /// temporary user data directory (if any) is cleaned up when this
+    /// `BrowserSession` is subsequently dropped — not immediately here,
+    /// because `close()` takes `&self` and cannot move out the `TempDir`.
     pub async fn close(&self) -> Result<()> {
         let mut browser = self.browser.lock().await;
         browser.close().await.map_err(|e| VoidCrawlError::Other(e.to_string()))?;

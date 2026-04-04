@@ -85,6 +85,7 @@ async def main() -> None:
                 t = await tab.title()
                 length = len(await tab.content())
                 return t or "(no title)", length
+            raise AssertionError("unreachable")
 
         results = await asyncio.gather(
             fetch("https://qscrape.dev/l2/eshop"),

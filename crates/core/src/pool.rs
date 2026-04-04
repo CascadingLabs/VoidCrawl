@@ -14,7 +14,7 @@ use std::{
     collections::VecDeque,
     env, fmt,
     sync::{
-        Arc,
+        Arc, Mutex as StdMutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -118,12 +118,15 @@ impl fmt::Debug for PooledTab {
 /// # }
 /// ```
 pub struct BrowserPool {
-    sessions:     Vec<BrowserSession>,
-    ready:        Mutex<VecDeque<PooledTab>>,
-    semaphore:    Arc<Semaphore>,
-    config:       PoolConfig,
+    sessions:      Vec<BrowserSession>,
+    ready:         Mutex<VecDeque<PooledTab>>,
+    semaphore:     Arc<Semaphore>,
+    config:        PoolConfig,
     /// Round-robin counter for distributing new tabs across sessions.
-    next_session: AtomicUsize,
+    next_session:  AtomicUsize,
+    /// Background eviction task handle.  `StdMutex` (not tokio) because we
+    /// only set/take the handle in sync contexts — no `.await` inside the lock.
+    eviction_task: StdMutex<Option<JoinHandle<()>>>,
 }
 
 impl fmt::Debug for BrowserPool {
@@ -150,6 +153,7 @@ impl BrowserPool {
             semaphore: Arc::new(Semaphore::new(total_tabs)),
             config,
             next_session: AtomicUsize::new(0),
+            eviction_task: StdMutex::new(None),
         }
     }
 
@@ -255,9 +259,9 @@ impl BrowserPool {
 
     /// Optionally pre-open tabs across all sessions and fill the ready queue.
     ///
-    /// Tabs are created **in parallel** across sessions, then inserted
-    /// into the ready queue. Semaphore permits are consumed and re-added
-    /// one-by-one so a partial failure leaves the semaphore consistent.
+    /// Tabs are created **in parallel** across sessions, then inserted into
+    /// the ready queue. Successful tabs are kept even when some fail; the
+    /// first error (if any) is returned after all successful tabs are stored.
     ///
     /// This is **optional** — if not called, tabs are created lazily on
     /// first [`acquire()`](Self::acquire).
@@ -448,31 +452,52 @@ impl BrowserPool {
         &self.config
     }
 
-    /// Spawn a background Tokio task that periodically calls
+    /// Start a background Tokio task that periodically calls
     /// [`evict_idle`](Self::evict_idle).
     ///
-    /// The eviction interval is `tab_max_idle_secs / 2` (minimum 1 second).
-    /// Abort the returned [`JoinHandle`] to stop the task — this is done
-    /// automatically when the Python pool context exits.
+    /// **Idempotent** — if an eviction task is already running, this is a
+    /// no-op.  The handle is stored inside the pool and cancelled
+    /// automatically by [`close`](Self::close).  Call
+    /// [`stop_eviction_task`](Self::stop_eviction_task) to cancel early.
     ///
     /// # Panics
     ///
     /// Must be called from within a Tokio runtime context.
-    pub fn spawn_eviction_task(self: Arc<Self>) -> JoinHandle<()> {
+    pub fn start_eviction_task(self: Arc<Self>) {
+        // Recover from a poisoned mutex: if a previous panic occurred while
+        // holding this lock, the inner value is still usable.
+        let mut slot = self.eviction_task.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_some() {
+            return; // Already running — ignore duplicate call.
+        }
         let pool = Arc::clone(&self);
         let interval = Duration::from_secs((self.config.tab_max_idle_secs / 2).max(1));
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             loop {
                 sleep(interval).await;
                 // Ignore errors — a single eviction failure (e.g. a tab
                 // failing to close) should not kill the background task.
                 let _ = pool.evict_idle().await;
             }
-        })
+        });
+        *slot = Some(handle);
+    }
+
+    /// Stop the background eviction task (if running).
+    ///
+    /// Called automatically by [`close`](Self::close).
+    pub fn stop_eviction_task(&self) {
+        let mut slot = self.eviction_task.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(task) = slot.take() {
+            task.abort();
+        }
     }
 
     /// Drain all tabs and close all browser sessions.
     pub async fn close(&self) -> Result<()> {
+        // Stop the eviction task before closing so it doesn't race with tab
+        // and session teardown.
+        self.stop_eviction_task();
         // Drain the ready queue
         let tabs: Vec<PooledTab> = {
             let mut ready = self.ready.lock().await;

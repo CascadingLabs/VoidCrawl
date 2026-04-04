@@ -17,7 +17,7 @@ async def _open(browser: BrowserSession, url: str) -> tuple[str, str]:
     """Open *url* in a new tab, wait for hydration, return (title, url)."""
     page: Page = await browser.new_page(url)
     await page.wait_for_network_idle()
-    return (await page.title() or "(no title)", await page.url())
+    return (await page.title() or "(no title)", await page.url() or "")
 
 
 async def main() -> None:

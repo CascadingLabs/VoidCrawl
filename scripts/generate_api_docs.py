@@ -21,7 +21,7 @@ from __future__ import annotations
 import argparse
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import griffe
 
@@ -252,7 +252,7 @@ _ACTION_FRAMEWORK = {
 }
 # Everything else from actions.builtin is a "Builtin Action"
 
-_DEBUG_TYPES = {"DebugSession", "vd_breakpoint"}
+_DEBUG_TYPES = {"DebugSession", "vc_breakpoint"}
 
 # Section key → (output filename, page title, description template)
 _SECTION_FILES = {
@@ -355,7 +355,7 @@ def _extract_all_names(pkg: griffe.Module) -> list[str]:
 
 def _build_sections(exclude: set[str], repo_url: str, ref: str) -> dict[str, list[str]]:
     """Load the package and populate per-section content lists."""
-    pkg = griffe.load("voidcrawl")
+    pkg = cast("griffe.Module", griffe.load("voidcrawl"))
 
     # Merge __all__ from voidcrawl, voidcrawl.actions, voidcrawl.debug
     top_names = _extract_all_names(pkg)
@@ -391,8 +391,8 @@ def _build_sections(exclude: set[str], repo_url: str, ref: str) -> dict[str, lis
                 break
         if obj is None:
             continue
-        target = obj.final_target if obj.is_alias else obj
-        _classify(name, target, exclude, sections, repo_url, ref)
+        target = obj.final_target if isinstance(obj, griffe.Alias) else obj
+        _classify(name, cast("Object", target), exclude, sections, repo_url, ref)
 
     return sections
 

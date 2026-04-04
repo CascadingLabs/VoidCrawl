@@ -41,17 +41,23 @@ from voidcrawl._ext import (
 from voidcrawl.actions._protocol import JsTab, Tab
 from voidcrawl.contracts import Attr, Schema, Text, safe_url, strip_tags
 
+# Aliases for backward compatibility / ergonomic naming
+Contract = Schema
+Selector = Text
+
 __all__ = [
     "Attr",
     "BrowserConfig",
     "BrowserPool",
     "BrowserSession",
+    "Contract",
     "JsTab",
     "Page",
     "PageResponse",
     "PoolConfig",
     "PooledTab",
     "Schema",
+    "Selector",
     "Tab",
     "Text",
     "safe_url",
@@ -159,6 +165,8 @@ class PoolConfig(BaseModel):
         +------------------------+---------------------------------+---------+
         | ``CHROME_HEADLESS``    | Set to ``"0"`` for headful      | 1       |
         +------------------------+---------------------------------+---------+
+        | ``AUTO_EVICT``         | Set to ``"0"`` to disable       | 1       |
+        +------------------------+---------------------------------+---------+
 
         Returns:
             A fully-populated :class:`PoolConfig`.
@@ -183,6 +191,7 @@ class PoolConfig(BaseModel):
             tabs_per_browser=int(os.environ.get("TABS_PER_BROWSER", "4")),
             tab_max_uses=int(os.environ.get("TAB_MAX_USES", "50")),
             tab_max_idle_secs=int(os.environ.get("TAB_MAX_IDLE_SECS", "60")),
+            auto_evict=os.environ.get("AUTO_EVICT", "1") != "0",
             chrome_ws_urls=chrome_ws_urls,
             browser=BrowserConfig(
                 no_sandbox=os.environ.get("CHROME_NO_SANDBOX") == "1",
@@ -312,8 +321,13 @@ class BrowserPool:
     async def __aenter__(self) -> BrowserPool:
         cfg = self._config
         bc = cfg.browser
+        # When connecting to existing Chrome instances, the browser count is
+        # determined by the number of URLs, not PoolConfig.browsers.
+        effective_browsers = (
+            len(cfg.chrome_ws_urls) if cfg.chrome_ws_urls else cfg.browsers
+        )
         ctx: _PoolParamsContext = _BrowserPool._from_params(
-            browsers=cfg.browsers,
+            browsers=effective_browsers,
             tabs_per_browser=cfg.tabs_per_browser,
             tab_max_uses=cfg.tab_max_uses,
             tab_max_idle_secs=cfg.tab_max_idle_secs,

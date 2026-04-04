@@ -2,7 +2,7 @@
 
 Provides :class:`DebugSession` for stepping through actions with
 breakpoints, history inspection, and back/forward navigation.
-Use :func:`vd_breakpoint` to mark action classes that should
+Use :func:`vc_breakpoint` to mark action classes that should
 automatically pause execution.
 
 Example:
@@ -20,7 +20,7 @@ Example:
 
     With breakpoints::
 
-        @vd_breakpoint
+        @vc_breakpoint
         class MyClick(JsActionNode): ...
 
 
@@ -53,14 +53,14 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DebugSession",
-    "vd_breakpoint",
+    "vc_breakpoint",
 ]
 
-_BREAKPOINT_ATTR = "_vd_breakpoint"
+_BREAKPOINT_ATTR = "_vc_breakpoint"
 _console = Console()
 
 
-def vd_breakpoint(cls: type) -> type:
+def vc_breakpoint(cls: type) -> type:
     """Mark an action class as a debugger breakpoint.
 
     When a :class:`DebugSession` encounters an action whose class is
@@ -74,7 +74,7 @@ def vd_breakpoint(cls: type) -> type:
         The same class, with an internal marker attribute set.
 
     Example:
-        >>> @vd_breakpoint
+        >>> @vc_breakpoint
         ... class ImportantClick(JsActionNode):
         ...     js = inline_js("document.querySelector(__params.s).click();")
         ...
@@ -86,7 +86,7 @@ def vd_breakpoint(cls: type) -> type:
 
 
 def _is_breakpoint(action: ActionNode) -> bool:
-    """Return True if *action*'s class is decorated with :func:`vd_breakpoint`."""
+    """Return True if *action*'s class is decorated with :func:`vc_breakpoint`."""
     return getattr(type(action), _BREAKPOINT_ATTR, False)
 
 
