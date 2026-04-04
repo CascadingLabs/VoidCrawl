@@ -66,9 +66,7 @@ jobs:
         uses: astral-sh/setup-uv@v6
 
       - name: Install dependencies and build extension
-        run: |
-          uv sync --python ${{ matrix.python-version }} --group dev
-          uv run maturin develop --release --manifest-path crates/pyo3_bindings/Cargo.toml
+        run: uv sync --python ${{ matrix.python-version }} --group dev
 
       - name: Ruff lint
         run: uv run ruff check --no-fix --exit-non-zero-on-fix
