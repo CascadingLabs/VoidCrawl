@@ -14,8 +14,9 @@ name = "void_crawl"
 crate-type = ["cdylib"]
 
 [dependencies]
-void_crawl_core = { path = "../core" }
+void_crawl_core = { path = "../core", version = "0.1.0" }
 pyo3 = { version = "0.28", features = ["extension-module"] }
 pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
 tokio = { version = "1", features = ["sync"] }
 serde_json = "1"
+futures = "0.3"

@@ -8,6 +8,10 @@ pub mod pool;
 pub mod session;
 pub mod stealth;
 
+// Re-export CDP input types for downstream crates (pyo3_bindings).
+pub use chromiumoxide::cdp::browser_protocol::input::{
+    DispatchKeyEventType, DispatchMouseEventType, MouseButton,
+};
 pub use error::{Result, YosoiError};
 pub use page::Page;
 pub use pool::{BrowserPool, PoolConfig, PooledTab};

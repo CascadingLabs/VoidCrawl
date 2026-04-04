@@ -75,8 +75,8 @@ from void_crawl import BrowserPool
 os.environ["CHROME_WS_URLS"] = "http://localhost:19222,http://localhost:19223"
 
 async def main():
-    async with await BrowserPool.from_env() as pool:
-        async with await pool.acquire() as tab:
+    async with BrowserPool.from_env() as pool:
+        async with pool.acquire() as tab:
             # This navigation happens inside Docker's Chrome.
             # If you have a VNC client open on localhost:5900,
             # you'll see the page load in real time.

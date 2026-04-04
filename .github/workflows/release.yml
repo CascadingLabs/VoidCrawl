@@ -10,9 +10,76 @@ permissions:
   id-token: write  # for PyPI trusted publishing
 
 jobs:
+  # ── Rust checks ─────────────────────────────────────────────────────────
+  rust-checks:
+    name: Rust checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@56f84321dbccf38fb67ce29ab63e4754056677e0 # stable
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+
+      - name: cargo check
+        run: cargo check --workspace --all-targets
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+  # ── Python tests ────────────────────────────────────────────────────────
+  python-tests:
+    name: Python ${{ matrix.python-version }} tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@56f84321dbccf38fb67ce29ab63e4754056677e0 # stable
+        with:
+          toolchain: stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@6b9c6063abd6010835c3544eaaeab6a6af3f3f0d # v6
+
+      - name: Install dependencies and build extension
+        run: |
+          uv sync --python ${{ matrix.python-version }} --group dev
+          uv run maturin develop --release --manifest-path crates/pyo3_bindings/Cargo.toml
+
+      - name: Ruff lint
+        run: uv run ruff check --no-fix --exit-non-zero-on-fix
+
+      - name: Ruff format check
+        run: uv run ruff format --check
+
+      - name: Mypy
+        run: uv run mypy
+
+      - name: Pytest
+        run: uv run pytest tests/ -v
+
   # ── Build wheels for all platforms ──────────────────────────────────────
   build-wheels:
     name: Build (${{ matrix.target }})
+    needs: [rust-checks, python-tests]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -68,6 +135,7 @@ jobs:
   # ── Build source distribution ────────────────────────────────────────────
   build-sdist:
     name: Build sdist
+    needs: [rust-checks, python-tests]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code

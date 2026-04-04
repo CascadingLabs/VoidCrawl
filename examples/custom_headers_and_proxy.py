@@ -2,12 +2,12 @@
 
 import asyncio
 
-from void_crawl import BrowserSession
+from void_crawl import BrowserConfig, BrowserSession
 
 
 async def custom_headers() -> None:
     """Inject custom HTTP headers into every request from a page."""
-    async with BrowserSession(headless=True) as browser:
+    async with BrowserSession(BrowserConfig()) as browser:
         page = await browser.new_page("about:blank")
         await page.set_headers(
             {
@@ -30,7 +30,8 @@ async def with_proxy() -> None:
     Requires a running proxy (e.g. `mitmproxy` on port 8080).
     Uncomment and adjust the proxy URL to try it out.
     """
-    # async with BrowserSession(headless=True, proxy='http://127.0.0.1:8080') as browser:
+    # proxy_cfg = BrowserConfig(proxy='http://127.0.0.1:8080')
+    # async with BrowserSession(proxy_cfg) as browser:
     #     page = await browser.new_page('https://httpbin.org/ip')
     #     print(await page.content())
     #     await page.close()

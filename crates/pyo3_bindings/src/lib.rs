@@ -5,8 +5,9 @@
 
 use std::{collections::HashMap, convert::Infallible, fmt, sync::Arc, time::Duration};
 
+use futures::future;
 use pyo3::{
-    exceptions::PyRuntimeError,
+    exceptions::{PyRuntimeError, PyValueError},
     prelude::*,
     types::{PyBytes, PyDict, PyList, PyType},
 };
@@ -14,7 +15,8 @@ use pyo3_async_runtimes::tokio::future_into_py;
 use serde_json::Value;
 use tokio::sync::Mutex;
 use void_crawl_core::{
-    BrowserMode, BrowserPool, BrowserSession, Page, PooledTab, StealthConfig, YosoiError,
+    BrowserMode, BrowserPool, BrowserSession, DispatchKeyEventType, DispatchMouseEventType,
+    MouseButton, Page, PoolConfig, PooledTab, StealthConfig, YosoiError,
 };
 
 // ── Error conversion ────────────────────────────────────────────────────
@@ -81,6 +83,49 @@ fn json_to_py(py: Python<'_>, val: Value) -> PyResult<Bound<'_, PyAny>> {
             }
             Ok(dict.into_any())
         }
+    }
+}
+
+// ── CDP Input enum conversions ──────────────────────────────────────────
+
+fn parse_mouse_event_type(s: &str) -> PyResult<DispatchMouseEventType> {
+    match s {
+        "mousePressed" => Ok(DispatchMouseEventType::MousePressed),
+        "mouseReleased" => Ok(DispatchMouseEventType::MouseReleased),
+        "mouseMoved" => Ok(DispatchMouseEventType::MouseMoved),
+        "mouseWheel" => Ok(DispatchMouseEventType::MouseWheel),
+        other => Err(PyValueError::new_err(format!(
+            "unknown mouse event type: {other:?} \
+             (expected mousePressed, mouseReleased, mouseMoved, or mouseWheel)"
+        ))),
+    }
+}
+
+fn parse_mouse_button(s: &str) -> PyResult<MouseButton> {
+    match s {
+        "none" => Ok(MouseButton::None),
+        "left" => Ok(MouseButton::Left),
+        "middle" => Ok(MouseButton::Middle),
+        "right" => Ok(MouseButton::Right),
+        "back" => Ok(MouseButton::Back),
+        "forward" => Ok(MouseButton::Forward),
+        other => Err(PyValueError::new_err(format!(
+            "unknown mouse button: {other:?} \
+             (expected none, left, middle, right, back, or forward)"
+        ))),
+    }
+}
+
+fn parse_key_event_type(s: &str) -> PyResult<DispatchKeyEventType> {
+    match s {
+        "keyDown" => Ok(DispatchKeyEventType::KeyDown),
+        "keyUp" => Ok(DispatchKeyEventType::KeyUp),
+        "rawKeyDown" => Ok(DispatchKeyEventType::RawKeyDown),
+        "char" => Ok(DispatchKeyEventType::Char),
+        other => Err(PyValueError::new_err(format!(
+            "unknown key event type: {other:?} \
+             (expected keyDown, keyUp, rawKeyDown, or char)"
+        ))),
     }
 }
 
@@ -368,6 +413,82 @@ impl PyPage {
         })
     }
 
+    /// Dispatch a mouse event via the CDP Input.dispatchMouseEvent command.
+    #[pyo3(signature = (event_type, x, y, button="left", click_count=1, delta_x=None, delta_y=None, modifiers=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_mouse_event<'py>(
+        &self,
+        py: Python<'py>,
+        event_type: &str,
+        x: f64,
+        y: f64,
+        button: &str,
+        click_count: i64,
+        delta_x: Option<f64>,
+        delta_y: Option<f64>,
+        modifiers: Option<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let evt = parse_mouse_event_type(event_type)?;
+        let btn = parse_mouse_button(button)?;
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let page = inner
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
+            let result = page
+                .dispatch_mouse_event(
+                    evt,
+                    x,
+                    y,
+                    Some(btn),
+                    Some(click_count),
+                    delta_x,
+                    delta_y,
+                    modifiers,
+                )
+                .await
+                .map_err(to_py_err);
+            inner.lock().await.replace(page);
+            result
+        })
+    }
+
+    /// Dispatch a key event via the CDP Input.dispatchKeyEvent command.
+    #[pyo3(signature = (event_type, key=None, code=None, text=None, modifiers=None))]
+    fn dispatch_key_event<'py>(
+        &self,
+        py: Python<'py>,
+        event_type: &str,
+        key: Option<String>,
+        code: Option<String>,
+        text: Option<String>,
+        modifiers: Option<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let evt = parse_key_event_type(event_type)?;
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let page = inner
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
+            let result = page
+                .dispatch_key_event(
+                    evt,
+                    key.as_deref(),
+                    code.as_deref(),
+                    text.as_deref(),
+                    modifiers,
+                )
+                .await
+                .map_err(to_py_err);
+            inner.lock().await.replace(page);
+            result
+        })
+    }
+
     /// Close this page / tab.
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
@@ -579,19 +700,12 @@ impl PyBrowserSession {
 
 /// A tab checked out from a [`BrowserPool`].
 ///
-/// Exposes the same navigation / DOM methods as [`Page`]. When used as an
-/// async context manager the tab is automatically returned to the pool on exit.
-///
-/// # Example
-///
-///
-///     async with pool.acquire() as tab:
-///         await tab.navigate("https://example.com")
-///         html = await tab.content()
+/// Exposes the same navigation / DOM methods as [`Page`]. Obtained via the
+/// `async with pool.acquire() as tab:` pattern — release back to the pool
+/// is handled automatically by the context manager.
 #[pyclass(name = "PooledTab")]
 pub struct PyPooledTab {
     inner:     Arc<Mutex<Option<PooledTab>>>,
-    pool:      Arc<BrowserPool>,
     /// Snapshot of `use_count` at the moment the tab was acquired.
     #[pyo3(get)]
     use_count: u32,
@@ -599,7 +713,7 @@ pub struct PyPooledTab {
 
 impl fmt::Debug for PyPooledTab {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PyPooledTab").field("use_count", &self.use_count).finish_non_exhaustive()
+        f.debug_struct("PooledTab").field("use_count", &self.use_count).finish_non_exhaustive()
     }
 }
 
@@ -790,11 +904,126 @@ impl PyPooledTab {
         })
     }
 
-    // ── async context manager ───────────────────────────────────────────
+    /// Dispatch a mouse event via the CDP Input.dispatchMouseEvent command.
+    #[pyo3(signature = (event_type, x, y, button="left", click_count=1, delta_x=None, delta_y=None, modifiers=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_mouse_event<'py>(
+        &self,
+        py: Python<'py>,
+        event_type: &str,
+        x: f64,
+        y: f64,
+        button: &str,
+        click_count: i64,
+        delta_x: Option<f64>,
+        delta_y: Option<f64>,
+        modifiers: Option<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let evt = parse_mouse_event_type(event_type)?;
+        let btn = parse_mouse_button(button)?;
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let tab = inner
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| PyRuntimeError::new_err("tab has been released"))?;
+            let result = tab
+                .page
+                .dispatch_mouse_event(
+                    evt,
+                    x,
+                    y,
+                    Some(btn),
+                    Some(click_count),
+                    delta_x,
+                    delta_y,
+                    modifiers,
+                )
+                .await
+                .map_err(to_py_err);
+            inner.lock().await.replace(tab);
+            result
+        })
+    }
 
-    fn __aenter__<'py>(slf: Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let slf_ref = slf.into_any().unbind();
-        future_into_py(py, async move { Ok(slf_ref) })
+    /// Dispatch a key event via the CDP Input.dispatchKeyEvent command.
+    #[pyo3(signature = (event_type, key=None, code=None, text=None, modifiers=None))]
+    fn dispatch_key_event<'py>(
+        &self,
+        py: Python<'py>,
+        event_type: &str,
+        key: Option<String>,
+        code: Option<String>,
+        text: Option<String>,
+        modifiers: Option<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let evt = parse_key_event_type(event_type)?;
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let tab = inner
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| PyRuntimeError::new_err("tab has been released"))?;
+            let result = tab
+                .page
+                .dispatch_key_event(
+                    evt,
+                    key.as_deref(),
+                    code.as_deref(),
+                    text.as_deref(),
+                    modifiers,
+                )
+                .await
+                .map_err(to_py_err);
+            inner.lock().await.replace(tab);
+            result
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        format!("PooledTab(use_count={})", self.use_count)
+    }
+}
+
+// ── PyAcquireContext ────────────────────────────────────────────────────
+
+/// Lazy context manager returned by [`BrowserPool.acquire()`].
+///
+/// Does the actual tab checkout in `__aenter__` and releases on `__aexit__`.
+///
+/// # Example
+///
+///
+///     async with pool.acquire() as tab:
+///         await tab.navigate("https://example.com")
+///         html = await tab.content()
+#[pyclass(name = "_AcquireContext")]
+pub struct PyAcquireContext {
+    pool:     Arc<BrowserPool>,
+    tab_slot: Arc<Mutex<Option<PooledTab>>>,
+}
+
+impl fmt::Debug for PyAcquireContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("_AcquireContext").finish_non_exhaustive()
+    }
+}
+
+#[pymethods]
+impl PyAcquireContext {
+    fn __aenter__<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let (pool, tab_slot) = {
+            let this = slf.borrow();
+            (Arc::clone(&this.pool), Arc::clone(&this.tab_slot))
+        };
+        future_into_py(py, async move {
+            let tab = pool.acquire().await.map_err(to_py_err)?;
+            let use_count = tab.use_count;
+            *tab_slot.lock().await = Some(tab);
+            Ok(PyPooledTab { inner: tab_slot, use_count })
+        })
     }
 
     #[pyo3(signature = (_exc_type=None, _exc_val=None, _exc_tb=None))]
@@ -805,19 +1034,66 @@ impl PyPooledTab {
         _exc_val: Option<Bound<'py, PyAny>>,
         _exc_tb: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let inner = Arc::clone(&self.inner);
         let pool = Arc::clone(&self.pool);
+        let tab_slot = Arc::clone(&self.tab_slot);
         future_into_py(py, async move {
-            let mut guard = inner.lock().await;
-            if let Some(tab) = guard.take() {
+            if let Some(tab) = tab_slot.lock().await.take() {
                 let _ = pool.release(tab).await;
             }
             Ok(false)
         })
     }
+}
 
-    fn __repr__(&self) -> String {
-        format!("PooledTab(use_count={})", self.use_count)
+// ── PyPoolContext ───────────────────────────────────────────────────────
+
+/// Lazy context manager returned by [`BrowserPool.from_env()`].
+///
+/// Does the actual pool construction in `__aenter__` and closes on `__aexit__`.
+///
+/// # Example
+///
+///
+///     async with BrowserPool.from_env() as pool:
+///         async with pool.acquire() as tab:
+///             await tab.navigate("https://example.com")
+#[pyclass(name = "_PoolContext")]
+pub struct PyPoolContext {
+    pool_slot: Arc<Mutex<Option<Arc<BrowserPool>>>>,
+}
+
+impl fmt::Debug for PyPoolContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("_PoolContext").finish_non_exhaustive()
+    }
+}
+
+#[pymethods]
+impl PyPoolContext {
+    fn __aenter__<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let pool_slot = Arc::clone(&slf.borrow().pool_slot);
+        future_into_py(py, async move {
+            let pool = Arc::new(BrowserPool::from_env().await.map_err(to_py_err)?);
+            *pool_slot.lock().await = Some(Arc::clone(&pool));
+            Ok(PyBrowserPool { inner: pool })
+        })
+    }
+
+    #[pyo3(signature = (_exc_type=None, _exc_val=None, _exc_tb=None))]
+    fn __aexit__<'py>(
+        &self,
+        py: Python<'py>,
+        _exc_type: Option<Bound<'py, PyAny>>,
+        _exc_val: Option<Bound<'py, PyAny>>,
+        _exc_tb: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let pool_slot = Arc::clone(&self.pool_slot);
+        future_into_py(py, async move {
+            if let Some(pool) = pool_slot.lock().await.take() {
+                let _ = pool.close().await;
+            }
+            Ok(false)
+        })
     }
 }
 
@@ -830,8 +1106,8 @@ impl PyPooledTab {
 /// # Example
 ///
 ///
-///     async with await BrowserPool.from_env() as pool:
-///         async with await pool.acquire() as tab:
+///     async with BrowserPool.from_env() as pool:
+///         async with pool.acquire() as tab:
 ///             await tab.navigate("https://example.com")
 ///             html = await tab.content()
 #[pyclass(name = "BrowserPool")]
@@ -847,13 +1123,14 @@ impl fmt::Debug for PyBrowserPool {
 
 #[pymethods]
 impl PyBrowserPool {
-    /// Create a pool from environment variables.
+    /// Return a context manager that builds the pool from environment
+    /// variables.
+    ///
+    ///     async with BrowserPool.from_env() as pool:
+    ///         ...
     #[classmethod]
-    fn from_env<'py>(_cls: &Bound<'py, PyType>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        future_into_py(py, async move {
-            let pool = BrowserPool::from_env().await.map_err(to_py_err)?;
-            Ok(PyBrowserPool { inner: Arc::new(pool) })
-        })
+    fn from_env(_cls: &Bound<'_, PyType>) -> PyPoolContext {
+        PyPoolContext { pool_slot: Arc::new(Mutex::new(None)) }
     }
 
     /// Pre-open tabs across all sessions.
@@ -862,14 +1139,52 @@ impl PyBrowserPool {
         future_into_py(py, async move { pool.warmup().await.map_err(to_py_err) })
     }
 
-    /// Check out a tab from the pool.
-    fn acquire<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let pool = Arc::clone(&self.inner);
-        future_into_py(py, async move {
-            let tab = pool.acquire().await.map_err(to_py_err)?;
-            let use_count = tab.use_count;
-            Ok(PyPooledTab { inner: Arc::new(Mutex::new(Some(tab))), pool, use_count })
-        })
+    /// Return a context manager that checks out a tab from the pool.
+    ///
+    ///     async with pool.acquire() as tab:
+    ///         ...
+    fn acquire(&self) -> PyAcquireContext {
+        PyAcquireContext { pool: Arc::clone(&self.inner), tab_slot: Arc::new(Mutex::new(None)) }
+    }
+
+    /// Return a context manager that builds a pool from explicit parameters.
+    ///
+    /// Called by the Python `BrowserPool(config)` wrapper — not part of the
+    /// public Python API.
+    #[classmethod]
+    #[pyo3(signature = (
+        browsers, tabs_per_browser, tab_max_uses, tab_max_idle_secs,
+        headless, no_sandbox, stealth, ws_urls, proxy, chrome_executable, extra_args
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn _from_params(
+        _cls: &Bound<'_, PyType>,
+        browsers: usize,
+        tabs_per_browser: usize,
+        tab_max_uses: u32,
+        tab_max_idle_secs: u64,
+        headless: bool,
+        no_sandbox: bool,
+        stealth: bool,
+        ws_urls: Vec<String>,
+        proxy: Option<String>,
+        chrome_executable: Option<String>,
+        extra_args: Vec<String>,
+    ) -> PyPoolParamsContext {
+        PyPoolParamsContext {
+            browsers,
+            tabs_per_browser,
+            tab_max_uses,
+            tab_max_idle_secs,
+            headless,
+            no_sandbox,
+            stealth,
+            ws_urls,
+            proxy,
+            chrome_executable,
+            extra_args,
+            pool_slot: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// Return a tab to the pool.
@@ -918,13 +1233,143 @@ impl PyBrowserPool {
     }
 }
 
+// ── PyPoolParamsContext ─────────────────────────────────────────────────
+
+/// Context manager returned by `BrowserPool._from_params()`.
+///
+/// Launches browser sessions from explicit parameters in `__aenter__` and
+/// closes the pool in `__aexit__`. Used internally by the Python
+/// `BrowserPool(config)` wrapper.
+#[pyclass(name = "_PoolParamsContext")]
+pub struct PyPoolParamsContext {
+    browsers:          usize,
+    tabs_per_browser:  usize,
+    tab_max_uses:      u32,
+    tab_max_idle_secs: u64,
+    headless:          bool,
+    no_sandbox:        bool,
+    stealth:           bool,
+    ws_urls:           Vec<String>,
+    proxy:             Option<String>,
+    chrome_executable: Option<String>,
+    extra_args:        Vec<String>,
+    pool_slot:         Arc<Mutex<Option<Arc<BrowserPool>>>>,
+}
+
+impl fmt::Debug for PyPoolParamsContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("_PoolParamsContext").finish_non_exhaustive()
+    }
+}
+
+#[pymethods]
+impl PyPoolParamsContext {
+    fn __aenter__<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let this = slf.borrow();
+        let browsers = this.browsers;
+        let tabs_per_browser = this.tabs_per_browser;
+        let tab_max_uses = this.tab_max_uses;
+        let tab_max_idle_secs = this.tab_max_idle_secs;
+        let headless = this.headless;
+        let no_sandbox = this.no_sandbox;
+        let stealth_enabled = this.stealth;
+        let ws_urls = this.ws_urls.clone();
+        let proxy = this.proxy.clone();
+        let chrome_executable = this.chrome_executable.clone();
+        let extra_args = this.extra_args.clone();
+        let pool_slot = Arc::clone(&this.pool_slot);
+        drop(this);
+
+        future_into_py(py, async move {
+            let stealth =
+                if stealth_enabled { StealthConfig::chrome_like() } else { StealthConfig::none() };
+
+            let sessions: Vec<BrowserSession> = if ws_urls.is_empty() {
+                let futs: Vec<_> = (0..browsers)
+                    .map(|_| {
+                        let mut builder = if headless {
+                            BrowserSession::builder().headless()
+                        } else {
+                            BrowserSession::builder().headful()
+                        };
+                        builder = builder.stealth(stealth.clone());
+                        if no_sandbox {
+                            builder = builder.no_sandbox();
+                        }
+                        if let Some(ref p) = proxy {
+                            builder = builder.proxy(p.clone());
+                        }
+                        if let Some(ref exe) = chrome_executable {
+                            builder = builder.chrome_executable(exe.clone());
+                        }
+                        for arg in &extra_args {
+                            builder = builder.arg(arg.clone());
+                        }
+                        builder.launch()
+                    })
+                    .collect();
+                future::join_all(futs)
+                    .await
+                    .into_iter()
+                    .collect::<void_crawl_core::Result<Vec<_>>>()
+                    .map_err(to_py_err)?
+            } else {
+                let futs: Vec<_> = ws_urls
+                    .into_iter()
+                    .map(|url| {
+                        BrowserSession::builder()
+                            .remote_debug(url)
+                            .stealth(stealth.clone())
+                            .launch()
+                    })
+                    .collect();
+                future::join_all(futs)
+                    .await
+                    .into_iter()
+                    .collect::<void_crawl_core::Result<Vec<_>>>()
+                    .map_err(to_py_err)?
+            };
+
+            let config = PoolConfig {
+                browsers: sessions.len(),
+                tabs_per_browser,
+                tab_max_uses,
+                tab_max_idle_secs,
+            };
+            let pool = Arc::new(BrowserPool::new(config, sessions));
+            *pool_slot.lock().await = Some(Arc::clone(&pool));
+            Ok(PyBrowserPool { inner: pool })
+        })
+    }
+
+    #[pyo3(signature = (_exc_type=None, _exc_val=None, _exc_tb=None))]
+    fn __aexit__<'py>(
+        &self,
+        py: Python<'py>,
+        _exc_type: Option<Bound<'py, PyAny>>,
+        _exc_val: Option<Bound<'py, PyAny>>,
+        _exc_tb: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let pool_slot = Arc::clone(&self.pool_slot);
+        future_into_py(py, async move {
+            if let Some(pool) = pool_slot.lock().await.take() {
+                let _ = pool.close().await;
+            }
+            Ok(false)
+        })
+    }
+}
+
 // ── Module ──────────────────────────────────────────────────────────────
 
 #[pymodule]
-fn void_crawl(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _ext(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBrowserSession>()?;
     m.add_class::<PyPage>()?;
     m.add_class::<PyBrowserPool>()?;
     m.add_class::<PyPooledTab>()?;
+    m.add_class::<PyAcquireContext>()?;
+    m.add_class::<PyPoolContext>()?;
+    m.add_class::<PyPoolParamsContext>()?;
     Ok(())
 }

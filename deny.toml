@@ -6,15 +6,12 @@
 allow = [
   "MIT",
   "Apache-2.0",
-  "MIT OR Apache-2.0",
   "Apache-2.0 WITH LLVM-exception",
   "BSD-2-Clause",
   "BSD-3-Clause",
   "ISC",
-  "OpenSSL",
-  "Zlib",
   "Unicode-3.0",
-  "Unicode-DFS-2016",
+  "CDLA-Permissive-2.0",
 ]
 
 # Confidence threshold — licenses detected below this are treated as unlicensed
@@ -25,6 +22,17 @@ confidence-threshold = 0.8
 multiple-versions = "warn"
 # Deny crates marked as wildcards in Cargo.toml
 wildcards = "deny"
+# Known-unresolvable duplicates pulled in by transitive deps
+skip = [
+    # getrandom: ring needs 0.2, rand needs 0.3, tempfile needs 0.4 — transitive, unresolvable
+    { name = "getrandom" },
+    # r-efi: pulled in by getrandom 0.3 and 0.4 at different versions — transitive
+    { name = "r-efi" },
+    # reqwest: we pin 0.12; chromiumoxide pulls in 0.13 — unresolvable without upstream change
+    { name = "reqwest" },
+    # windows-sys: ring needs 0.52, tokio/tempfile ecosystem needs 0.61 — transitive
+    { name = "windows-sys" },
+]
 
 [advisories]
 # Warn on crates with known security vulnerabilities (requires cargo-deny 0.14+)

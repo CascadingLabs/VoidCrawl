@@ -92,15 +92,15 @@ from void_crawl import BrowserPool
 
 # For WAF-protected sites — use headful (set CHROME_HEADLESS=0)
 os.environ["CHROME_HEADLESS"] = "0"
-async with await BrowserPool.from_env() as pool:
-    async with await pool.acquire() as tab:
+async with BrowserPool.from_env() as pool:
+    async with pool.acquire() as tab:
         await tab.navigate("https://waf-protected-site.com")
         await tab.wait_for_stable_dom(timeout=15.0)
         html = await tab.content()
 
 # For unprotected sites — headless is fine and faster
-async with await BrowserPool.from_env() as pool:
-    async with await pool.acquire() as tab:
+async with BrowserPool.from_env() as pool:
+    async with pool.acquire() as tab:
         await tab.navigate("https://example.com")
         html = await tab.content()
 ```
@@ -110,7 +110,7 @@ async with await BrowserPool.from_env() as pool:
 JS-heavy sites and WAF challenge pages don't have their content ready at page load. Instead of a blind `sleep()`, use `wait_for_stable_dom()`:
 
 ```python
-async with await pool.acquire() as tab:
+async with pool.acquire() as tab:
     await tab.navigate(url)
 
     # Polls every 300ms. Returns True when:

@@ -39,8 +39,8 @@ import asyncio
 from void_crawl import BrowserPool
 
 async def main():
-    async with await BrowserPool.from_env() as pool:
-        async with await pool.acquire() as tab:
+    async with BrowserPool.from_env() as pool:
+        async with pool.acquire() as tab:
             await tab.navigate("https://example.com")
             print(await tab.title())   # "Example Domain"
             print(len(await tab.content()))

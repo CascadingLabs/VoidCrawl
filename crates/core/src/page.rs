@@ -6,6 +6,10 @@ use chromiumoxide::{
     Page as CdpPage,
     cdp::browser_protocol::{
         emulation::{SetDeviceMetricsOverrideParams, SetUserAgentOverrideParams},
+        input::{
+            DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams,
+            DispatchMouseEventType, MouseButton,
+        },
         network::{Headers, SetExtraHttpHeadersParams},
         page::{
             AddScriptToEvaluateOnNewDocumentParams, CaptureScreenshotFormat, EventLifecycleEvent,
@@ -275,7 +279,12 @@ impl Page {
             .evaluate(expression)
             .await
             .map_err(|e| YosoiError::JsEvalError(e.to_string()))?;
-        result.into_value().map_err(|e| YosoiError::JsEvalError(e.to_string()))
+        // `into_value()` fails when the JS expression returns null/undefined
+        // (the RemoteObject has no `value` field).  Fall back to Value::Null.
+        match result.value() {
+            Some(v) => Ok(v.clone()),
+            None => Ok(Value::Null),
+        }
     }
 
     // ── Screenshots & PDF ───────────────────────────────────────────────
@@ -371,6 +380,81 @@ impl Page {
         let json_val =
             serde_json::to_value(&headers).map_err(|e| YosoiError::PageError(e.to_string()))?;
         let params = SetExtraHttpHeadersParams::new(Headers::new(json_val));
+        self.inner.execute(params).await.map_err(|e| YosoiError::PageError(e.to_string()))?;
+        Ok(())
+    }
+
+    // ── CDP Input ───────────────────────────────────────────────────────
+
+    /// Dispatch a mouse event via the CDP `Input.dispatchMouseEvent` command.
+    ///
+    /// This sends a **browser-level** input event — as opposed to a JS
+    /// `dispatchEvent(new MouseEvent(...))` — so it is processed by the
+    /// compositor and behaves like a real user action (including triggering
+    /// hover states, native drag, etc.).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn dispatch_mouse_event(
+        &self,
+        event_type: DispatchMouseEventType,
+        x: f64,
+        y: f64,
+        button: Option<MouseButton>,
+        click_count: Option<i64>,
+        delta_x: Option<f64>,
+        delta_y: Option<f64>,
+        modifiers: Option<i64>,
+    ) -> Result<()> {
+        let mut builder = DispatchMouseEventParams::builder().r#type(event_type).x(x).y(y);
+
+        if let Some(b) = button {
+            builder = builder.button(b);
+        }
+        if let Some(c) = click_count {
+            builder = builder.click_count(c);
+        }
+        if let Some(dx) = delta_x {
+            builder = builder.delta_x(dx);
+        }
+        if let Some(dy) = delta_y {
+            builder = builder.delta_y(dy);
+        }
+        if let Some(m) = modifiers {
+            builder = builder.modifiers(m);
+        }
+
+        let params = builder.build().map_err(YosoiError::PageError)?;
+        self.inner.execute(params).await.map_err(|e| YosoiError::PageError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Dispatch a key event via the CDP `Input.dispatchKeyEvent` command.
+    ///
+    /// Sends a browser-level keyboard event. Use `KeyDown` + `KeyUp` for
+    /// modifier keys or special keys, and `Char` for text input.
+    pub async fn dispatch_key_event(
+        &self,
+        event_type: DispatchKeyEventType,
+        key: Option<&str>,
+        code: Option<&str>,
+        text: Option<&str>,
+        modifiers: Option<i64>,
+    ) -> Result<()> {
+        let mut builder = DispatchKeyEventParams::builder().r#type(event_type);
+
+        if let Some(k) = key {
+            builder = builder.key(k);
+        }
+        if let Some(c) = code {
+            builder = builder.code(c);
+        }
+        if let Some(t) = text {
+            builder = builder.text(t);
+        }
+        if let Some(m) = modifiers {
+            builder = builder.modifiers(m);
+        }
+
+        let params = builder.build().map_err(YosoiError::PageError)?;
         self.inner.execute(params).await.map_err(|e| YosoiError::PageError(e.to_string()))?;
         Ok(())
     }
