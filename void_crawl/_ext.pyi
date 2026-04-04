@@ -82,23 +82,23 @@ class PooledTab:
         """
         ...
     async def query_selector(self, selector: str) -> str | None:
-        """Return the outer HTML of the first element matching *selector*, or ``None``.
+        """Return the inner HTML of the first element matching *selector*, or ``None``.
 
         Args:
             selector: CSS selector string.
 
         Returns:
-            Outer HTML string of the matched element, or ``None`` if no match.
+            Inner HTML string of the matched element, or ``None`` if no match.
         """
         ...
     async def query_selector_all(self, selector: str) -> list[str]:
-        """Return the outer HTML of every element matching *selector*.
+        """Return the inner HTML of every element matching *selector*.
 
         Args:
             selector: CSS selector string.
 
         Returns:
-            List of outer HTML strings, one per matched element.
+            List of inner HTML strings, one per matched element.
         """
         ...
     async def click_element(self, selector: str) -> None:
@@ -325,23 +325,23 @@ class Page:
         """
         ...
     async def query_selector(self, selector: str) -> str | None:
-        """Return the outer HTML of the first element matching *selector*, or ``None``.
+        """Return the inner HTML of the first element matching *selector*, or ``None``.
 
         Args:
             selector: CSS selector string.
 
         Returns:
-            Outer HTML string of the matched element, or ``None`` if no match.
+            Inner HTML string of the matched element, or ``None`` if no match.
         """
         ...
     async def query_selector_all(self, selector: str) -> list[str]:
-        """Return the outer HTML of every element matching *selector*.
+        """Return the inner HTML of every element matching *selector*.
 
         Args:
             selector: CSS selector string.
 
         Returns:
-            List of outer HTML strings, one per matched element.
+            List of inner HTML strings, one per matched element.
         """
         ...
     async def click_element(self, selector: str) -> None:

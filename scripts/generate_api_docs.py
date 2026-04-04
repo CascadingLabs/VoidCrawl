@@ -77,6 +77,25 @@ def _gh_link(obj: Object, repo_url: str, ref: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+_RST_ROLE_RE = re.compile(r":(?:class|meth|func|attr|mod|obj|exc|data):`~?([^`]+)`")
+
+
+def _strip_rst_roles(text: str) -> str:
+    """Convert RST cross-reference roles to plain markdown backtick refs.
+
+    ``:class:`Page``` → ``Page``,  ``:meth:`~Flow.run``` → ``run``.
+    """
+
+    def _replace(m: re.Match[str]) -> str:
+        target = m.group(1)
+        # :meth:`~Foo.bar` → show only the last component
+        if target.startswith("~"):
+            target = target[1:].rsplit(".", 1)[-1]
+        return f"`{target}`"
+
+    return _RST_ROLE_RE.sub(_replace, text)
+
+
 def _render_docstring(obj: Object) -> str:
     """Render a griffe docstring as markdown (Google-style sections)."""
     if not obj.docstring:
@@ -89,13 +108,17 @@ def _render_docstring(obj: Object) -> str:
         kind = section.kind.value
 
         if kind == "text":
-            parts.append(str(section.value).strip())
+            parts.append(_strip_rst_roles(str(section.value).strip()))
 
         elif kind == "parameters":
             parts.append("**Args:**\n")
             for param in section.value:
                 ann = f"`{param.annotation}`" if param.annotation else ""
-                desc = param.description.strip() if param.description else ""
+                desc = (
+                    _strip_rst_roles(param.description.strip())
+                    if param.description
+                    else ""
+                )
                 parts.append(f"- `{param.name}` {ann} — {desc}")
             parts.append("")
 
@@ -103,7 +126,11 @@ def _render_docstring(obj: Object) -> str:
             parts.append("**Attributes:**\n")
             for attr in section.value:
                 ann = f"`{attr.annotation}`" if attr.annotation else ""
-                desc = attr.description.strip() if attr.description else ""
+                desc = (
+                    _strip_rst_roles(attr.description.strip())
+                    if attr.description
+                    else ""
+                )
                 parts.append(f"- `{attr.name}` {ann} — {desc}")
             parts.append("")
 
@@ -113,7 +140,8 @@ def _render_docstring(obj: Object) -> str:
                 section.value if isinstance(section.value, list) else [section.value]
             )
             descs = [
-                (f"`{i.annotation}` — " if i.annotation else "") + (i.description or "")
+                (f"`{i.annotation}` — " if i.annotation else "")
+                + _strip_rst_roles(i.description or "")
                 for i in items
             ]
             parts.append(f"**{label}:** {' '.join(descs)}".strip())
@@ -122,7 +150,9 @@ def _render_docstring(obj: Object) -> str:
         elif kind == "raises":
             parts.append("**Raises:**\n")
             for exc in section.value:
-                desc = exc.description.strip() if exc.description else ""
+                desc = (
+                    _strip_rst_roles(exc.description.strip()) if exc.description else ""
+                )
                 parts.append(f"- `{exc.annotation}` — {desc}")
             parts.append("")
 
@@ -222,6 +252,8 @@ _ACTION_FRAMEWORK = {
 }
 # Everything else from actions.builtin is a "Builtin Action"
 
+_DEBUG_TYPES = {"DebugSession", "vd_breakpoint"}
+
 # Section key → (output filename, page title, description template)
 _SECTION_FILES = {
     "Configuration": (
@@ -244,7 +276,27 @@ _SECTION_FILES = {
         "Built-in Actions",
         "Built-in action reference for void_crawl {version}",
     ),
+    "Debug": (
+        "debug.md",
+        "Debug",
+        "Debug and replay reference for void_crawl {version}",
+    ),
 }
+
+
+def _add_to_section(
+    section: list[str],
+    name: str,
+    target: Object,
+    exclude: set[str],
+    link: str,
+    repo_url: str,
+    ref: str,
+) -> None:
+    if isinstance(target, griffe.Class):
+        section.extend(_format_class(name, target, exclude, link, repo_url, ref))
+    elif isinstance(target, griffe.Function):
+        section.extend(_format_function(name, target, link))
 
 
 def _classify(
@@ -273,19 +325,16 @@ def _classify(
                 _format_class(name, target, exclude, link, repo_url, ref)
             )
     elif name in _ACTION_FRAMEWORK:
-        if isinstance(target, griffe.Class):
-            sections["Action Framework"].extend(
-                _format_class(name, target, exclude, link, repo_url, ref)
-            )
-        elif isinstance(target, griffe.Function):
-            sections["Action Framework"].extend(_format_function(name, target, link))
-    # Remaining symbols are builtin actions
-    elif isinstance(target, griffe.Class):
-        sections["Builtin Actions"].extend(
-            _format_class(name, target, exclude, link, repo_url, ref)
+        _add_to_section(
+            sections["Action Framework"], name, target, exclude, link, repo_url, ref
         )
-    elif isinstance(target, griffe.Function):
-        sections["Builtin Actions"].extend(_format_function(name, target, link))
+    elif name in _DEBUG_TYPES:
+        _add_to_section(sections["Debug"], name, target, exclude, link, repo_url, ref)
+    else:
+        # Remaining symbols are builtin actions
+        _add_to_section(
+            sections["Builtin Actions"], name, target, exclude, link, repo_url, ref
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +357,7 @@ def _build_sections(exclude: set[str], repo_url: str, ref: str) -> dict[str, lis
     """Load the package and populate per-section content lists."""
     pkg = griffe.load("void_crawl")
 
-    # Merge __all__ from void_crawl and void_crawl.actions
+    # Merge __all__ from void_crawl, void_crawl.actions, void_crawl.debug
     top_names = _extract_all_names(pkg)
 
     actions_mod = pkg.members.get("actions")
@@ -316,10 +365,15 @@ def _build_sections(exclude: set[str], repo_url: str, ref: str) -> dict[str, lis
     if actions_mod and isinstance(actions_mod, griffe.Module):
         action_names = _extract_all_names(actions_mod)
 
+    debug_mod = pkg.members.get("debug")
+    debug_names: list[str] = []
+    if debug_mod and isinstance(debug_mod, griffe.Module):
+        debug_names = _extract_all_names(debug_mod)
+
     # Deduplicate, preserving order
     seen: set[str] = set()
     all_names: list[str] = []
-    for n in top_names + action_names:
+    for n in top_names + action_names + debug_names:
         if n not in seen:
             seen.add(n)
             all_names.append(n)
@@ -331,7 +385,7 @@ def _build_sections(exclude: set[str], repo_url: str, ref: str) -> dict[str, lis
             continue
         # Resolve from the right module
         obj = None
-        for mod in (pkg, actions_mod):
+        for mod in (pkg, actions_mod, debug_mod):
             if mod and name in mod.members:
                 obj = mod.members[name]
                 break

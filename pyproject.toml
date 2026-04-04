@@ -17,7 +17,11 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
 ]
-dependencies = [ "pydantic>=2" ]
+dependencies = [
+ "click>=8.3.2",
+ "pydantic>=2",
+ "rich>=14.3.3",
+]
 
 [dependency-groups]
 dev = [

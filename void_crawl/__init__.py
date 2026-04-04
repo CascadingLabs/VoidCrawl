@@ -231,7 +231,7 @@ class BrowserSession:
             url: The URL to load in the new tab.
 
         Returns:
-            A :class:`Page` handle for the new tab.
+            The new tab handle.
         """
         assert self._inner is not None, "BrowserSession not started — use async with"
         return await self._inner.new_page(url)

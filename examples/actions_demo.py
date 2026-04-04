@@ -1,4 +1,11 @@
-"""Demonstrate the actions framework: prebaked, custom, and composed flows."""
+"""Demonstrate the actions framework: prebaked, custom, and composed flows.
+
+Run modes controlled by ``MODE`` at the top of the file:
+
+- ``"debug"``  — interactive step debugger (headful, breakpoints, back/forward)
+- ``"replay"`` — automatic headful replay with delay between steps
+- ``"fast"``   — headless, no instrumentation (default for CI)
+"""
 
 import asyncio
 
@@ -15,6 +22,11 @@ from void_crawl.actions import (
     Tab,
     inline_js,
 )
+from void_crawl.debug import DebugSession, vd_breakpoint
+
+# ── Run configuration ────────────────────────────────────────────────────
+MODE = "debug"  # "debug" | "replay" | "fast"
+STEP_DELAY = 1.0  # Seconds between steps in replay mode
 
 DEMO_PAGE = """data:text/html,
 <html>
@@ -68,40 +80,98 @@ class CdpDoubleClick(ActionNode):
             )
 
 
+# ── Mark an action as a breakpoint (pauses even in continue mode) ────────
+
+
+@vd_breakpoint
+class BreakpointClick(JsActionNode):
+    """Example breakpointed action: click via JS and always pause in debugger."""
+
+    js = inline_js("""\
+const el = document.querySelector(__params.selector);
+if (!el) throw new Error('Element not found: ' + __params.selector);
+el.click();
+return null;
+""")
+
+    def __init__(self, selector: str) -> None:
+        self.selector = selector
+
+
+# ── Main ─────────────────────────────────────────────────────────────────
+
+
 async def main() -> None:
-    # Toggle headless=False to watch the browser visually
-    async with BrowserSession(BrowserConfig(headless=False)) as browser:
+    headless = MODE == "fast"
+
+    async with BrowserSession(BrowserConfig(headless=headless)) as browser:
         page = await browser.new_page(DEMO_PAGE)
 
-        # 1. Use individual prebaked actions
-        print("--- Individual actions ---")
-        await SetInputValue("#name", "World").run(page)
-        await ClickElement("#greet").run(page)
-        title = await GetText("#title").run(page)
-        print(f"Title after greet: {title}")
+        if MODE == "debug":
+            # Interactive debugger — step, back, continue, breakpoints
+            dbg = DebugSession(
+                page,
+                start_url=DEMO_PAGE,
+                stepping=True,
+                highlight=True,
+            )
+            dbg.add(SetInputValue("#name", "World"))
+            dbg.add(ClickElement("#greet"))
+            dbg.add(GetText("#title"))
+            dbg.add(AppendToOutput("First line"))
+            dbg.add(ScrollTo(0, 0))
+            dbg.add(AppendToOutput("Added via flow"))
+            dbg.add(GetText("#output"))
+            # This one is decorated with @vd_breakpoint — pauses even after "c"
+            dbg.add(BreakpointClick("#greet"))
+            dbg.add(CdpClick(100.0, 50.0))
 
-        # 2. Use a custom JS action (no params() override needed)
-        print("\n--- Custom JS action ---")
-        count = await AppendToOutput("First line").run(page)
-        print(f"Output children after append: {count}")
+            result = await dbg.start()
+            print(f"\nFinal results: {result.results}")
 
-        # 3. Compose actions into a flow
-        print("\n--- Flow ---")
-        flow = Flow(
-            [
-                ScrollTo(0, 0),
-                AppendToOutput("Added via flow"),
-                GetText("#output"),
-            ]
-        )
-        result = await flow.run(page)
-        print(f"Flow results: {result.results}")
-        print(f"Last result (output text): {result.last}")
+        elif MODE == "replay":
+            # Automatic replay — headful with delay, no interaction
+            dbg = DebugSession(
+                page,
+                start_url=DEMO_PAGE,
+                stepping=False,
+                step_delay=STEP_DELAY,
+                highlight=True,
+            )
+            dbg.add(SetInputValue("#name", "World"))
+            dbg.add(ClickElement("#greet"))
+            dbg.add(GetText("#title"))
+            dbg.add(AppendToOutput("First line"))
+            dbg.add(ScrollTo(0, 0))
+            dbg.add(AppendToOutput("Added via flow"))
+            dbg.add(GetText("#output"))
+            dbg.add(CdpClick(100.0, 50.0))
 
-        # 4. CDP-level action
-        print("\n--- CDP click ---")
-        await CdpClick(100.0, 50.0).run(page)
-        print("CDP click dispatched at (100, 50)")
+            result = await dbg.start()
+            print(f"\nFinal results: {result.results}")
+
+        else:
+            # Fast mode — headless, no instrumentation
+            await SetInputValue("#name", "World").run(page)
+            await ClickElement("#greet").run(page)
+            title = await GetText("#title").run(page)
+            print(f"Title: {title}")
+
+            count = await AppendToOutput("First line").run(page)
+            print(f"Output children: {count}")
+
+            flow = Flow(
+                [
+                    ScrollTo(0, 0),
+                    AppendToOutput("Added via flow"),
+                    GetText("#output"),
+                ]
+            )
+            result = await flow.run(page)
+            print(f"Flow results: {result.results}")
+
+            await CdpClick(100.0, 50.0).run(page)
+            print("CDP click dispatched")
 
         await page.close()
 

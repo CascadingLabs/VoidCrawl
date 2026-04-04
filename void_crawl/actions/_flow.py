@@ -74,7 +74,7 @@ class Flow:
             action: The action to append.
 
         Returns:
-            This :class:`Flow` instance (for builder-style chaining).
+            This instance, for builder-style chaining.
         """
         self._actions.append(action)
         return self
@@ -86,11 +86,10 @@ class Flow:
         """Execute all actions sequentially against *tab*.
 
         Args:
-            tab: Any object satisfying the :class:`~void_crawl.actions.Tab`
-                protocol.
+            tab: Any object satisfying the ``Tab`` protocol.
 
         Returns:
-            A :class:`FlowResult` containing one result per action.
+            One result per action.
         """
         results: list[object] = []
         for action in self._actions:

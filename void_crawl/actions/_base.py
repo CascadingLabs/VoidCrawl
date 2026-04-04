@@ -59,7 +59,7 @@ def load_js(path: str | Path) -> JsSource:
         path: Filesystem path to the ``.js`` file.
 
     Returns:
-        A :class:`JsSource` containing the file contents.
+        The loaded JavaScript source.
     """
     p = Path(path)
     if not p.is_absolute():
@@ -75,7 +75,7 @@ def inline_js(code: str) -> JsSource:
         code: Raw JavaScript source code.
 
     Returns:
-        A :class:`JsSource` wrapping *code*.
+        The wrapped JavaScript source.
     """
     return JsSource(code)
 
