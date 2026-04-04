@@ -22,6 +22,12 @@ confidence-threshold = 0.8
 multiple-versions = "warn"
 # Deny crates marked as wildcards in Cargo.toml
 wildcards = "deny"
+# Known-unresolvable duplicates pulled in by transitive deps
+skip = [
+    # ring (via reqwest/rustls) needs 0.2; rand (via chromiumoxide/tungstenite) needs 0.3;
+    # pyo3 ecosystem needs 0.4 — all three are deep transitive deps we can't pin away.
+    { name = "getrandom" },
+]
 
 [advisories]
 # Warn on crates with known security vulnerabilities (requires cargo-deny 0.14+)
