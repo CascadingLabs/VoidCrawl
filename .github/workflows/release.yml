@@ -128,7 +128,7 @@ jobs:
             --release
             --manifest-path crates/pyo3_bindings/Cargo.toml
             --out dist
-            --interpreter python3.10 python3.11 python3.12 python3.13
+            --interpreter python3.10 python3.11 python3.12 python3.13 python3.14
           sccache: "true"
           docker-options: ${{ matrix.docker-options }}
 
