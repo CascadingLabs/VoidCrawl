@@ -395,13 +395,19 @@ impl Page {
             "(function(){{ var el = document.querySelector({selector:?}); \
              return el === null ? null : el.innerHTML; }})()"
         );
-        let val: Value = self
+        let result = self
             .inner
             .evaluate_expression(js)
             .await
-            .map_err(|e| VoidCrawlError::PageError(e.to_string()))?
-            .into_value()
             .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+
+        // `into_value()` returns Err("No value found") when JS evaluates to
+        // null/undefined — that is exactly the "not found" case, not a real
+        // error, so map it to Ok(None).
+        let val: Value = match result.into_value() {
+            Ok(v) => v,
+            Err(_) => return Ok(None),
+        };
 
         match val {
             Value::Null => Ok(None),

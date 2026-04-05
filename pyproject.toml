@@ -4,7 +4,7 @@ requires = [ "maturin>=1.7,<2" ]
 
 [project]
 name = "voidcrawl"
-version = "0.1.9"
+version = "0.2.0"
 description = "Rust-native CDP browser automation for Python via PyO3"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -37,6 +37,7 @@ dev = [
   "click>=8.3.2",
   "commitizen>=4.13",
   "httpx>=0.28.1",
+  "maturin>=1.7,<2",
   "mypy>=1.15",
   "pytest>=9",
   "pytest-asyncio>=1",
