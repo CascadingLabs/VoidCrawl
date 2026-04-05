@@ -10,7 +10,10 @@ use chromiumoxide::{
             DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams,
             DispatchMouseEventType, MouseButton,
         },
-        network::{EventResponseReceived, Headers, ResourceType, SetExtraHttpHeadersParams},
+        network::{
+            Cookie, CookieParam, DeleteCookiesParams, EventResponseReceived, Headers, ResourceType,
+            SetExtraHttpHeadersParams,
+        },
         page::{
             AddScriptToEvaluateOnNewDocumentParams, CaptureScreenshotFormat, EventLifecycleEvent,
             PrintToPdfParams, SetBypassCspParams,
@@ -468,6 +471,40 @@ impl Page {
             serde_json::to_value(&headers).map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
         let params = SetExtraHttpHeadersParams::new(Headers::new(json_val));
         self.inner.execute(params).await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        Ok(())
+    }
+
+    // ── Cookies ─────────────────────────────────────────────────────────
+
+    /// Return all cookies that match the current page URL.
+    pub async fn get_cookies(&self) -> Result<Vec<Cookie>> {
+        self.inner.get_cookies().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))
+    }
+
+    /// Set a single cookie on the current page.
+    pub async fn set_cookie(&self, cookie: CookieParam) -> Result<()> {
+        self.inner
+            .set_cookie(cookie)
+            .await
+            .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Set multiple cookies at once.
+    pub async fn set_cookies(&self, cookies: Vec<CookieParam>) -> Result<()> {
+        self.inner
+            .set_cookies(cookies)
+            .await
+            .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Delete cookies by name, optionally scoped by domain and path.
+    pub async fn delete_cookies(&self, cookies: Vec<DeleteCookiesParams>) -> Result<()> {
+        self.inner
+            .delete_cookies(cookies)
+            .await
+            .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
         Ok(())
     }
 

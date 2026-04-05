@@ -5,6 +5,24 @@ Internal — import from ``voidcrawl`` instead.
 
 from __future__ import annotations
 
+from typing import Any
+
+class PageResponse:
+    """Result of :meth:`Page.goto` / :meth:`PooledTab.goto`.
+
+    Attributes:
+        html: Full outer HTML after network idle.
+        url: Final URL after any redirects.
+        status_code: HTTP status of the last response, or ``None``
+            when served from cache / service worker.
+        redirected: ``True`` when at least one HTTP redirect occurred.
+    """
+
+    html: str
+    url: str
+    status_code: int | None
+    redirected: bool
+
 class PooledTab:
     """A tab checked out from a :class:`~voidcrawl.BrowserPool`.
 
@@ -18,7 +36,7 @@ class PooledTab:
 
     use_count: int
 
-    async def goto(self, url: str, timeout: float = 30.0) -> str | None:
+    async def goto(self, url: str, timeout: float = 30.0) -> PageResponse:
         """Navigate to *url* and wait for network idle in one shot.
 
         Args:
@@ -26,8 +44,8 @@ class PooledTab:
             timeout: Maximum seconds to wait for network idle.
 
         Returns:
-            ``"networkIdle"`` or ``"networkAlmostIdle"`` on success,
-            ``None`` on timeout.
+            A :class:`PageResponse` with HTML, final URL, status code,
+            and redirect flag.
         """
         ...
     async def navigate(self, url: str) -> None:
@@ -41,54 +59,29 @@ class PooledTab:
         """Block until the current navigation completes."""
         ...
     async def content(self) -> str:
-        """Return the full page HTML (``document.documentElement.outerHTML``).
-
-        Returns:
-            The complete outer HTML of the document element.
-        """
+        """Return the full page HTML (``document.documentElement.outerHTML``)."""
         ...
     async def title(self) -> str | None:
-        """Return the document title, or ``None``.
-
-        Returns:
-            The ``document.title`` string, or ``None`` if unavailable.
-        """
+        """Return the document title, or ``None``."""
         ...
     async def url(self) -> str | None:
-        """Return the current page URL, or ``None``.
-
-        Returns:
-            The page URL as a string, or ``None`` if unavailable.
-        """
+        """Return the current page URL, or ``None``."""
         ...
     async def evaluate_js(self, expression: str) -> object:
         """Evaluate a JavaScript *expression* and return the result.
 
-        The return value is deserialised to a native Python type
-        (``dict``, ``list``, ``str``, ``int``, ``float``, ``bool``, or ``None``).
-
         Args:
             expression: JavaScript expression or IIFE string.
-
-        Returns:
-            The deserialised result of the expression.
         """
         ...
     async def screenshot_png(self) -> bytes:
-        """Capture a full-page screenshot as PNG bytes.
-
-        Returns:
-            Raw PNG image data.
-        """
+        """Capture a full-page screenshot as PNG bytes."""
         ...
     async def query_selector(self, selector: str) -> str | None:
         """Return the inner HTML of the first element matching *selector*, or ``None``.
 
         Args:
             selector: CSS selector string.
-
-        Returns:
-            Inner HTML string of the matched element, or ``None`` if no match.
         """
         ...
     async def query_selector_all(self, selector: str) -> list[str]:
@@ -96,9 +89,6 @@ class PooledTab:
 
         Args:
             selector: CSS selector string.
-
-        Returns:
-            List of inner HTML strings, one per matched element.
         """
         ...
     async def click_element(self, selector: str) -> None:
@@ -121,6 +111,49 @@ class PooledTab:
 
         Args:
             headers: Header name-value pairs.
+        """
+        ...
+    async def get_cookies(self) -> list[dict[str, Any]]:
+        """Return all cookies matching the current page URL.
+
+        Each cookie is a dict with keys: ``name``, ``value``, ``domain``,
+        ``path``, ``expires``, ``size``, ``httpOnly``, ``secure``, ``session``, etc.
+        """
+        ...
+    async def set_cookie(
+        self,
+        name: str,
+        value: str,
+        *,
+        domain: str | None = None,
+        path: str | None = None,
+        secure: bool | None = None,
+        http_only: bool | None = None,
+    ) -> None:
+        """Set a cookie on the current page.
+
+        Args:
+            name: Cookie name.
+            value: Cookie value.
+            domain: Cookie domain (default: current page domain).
+            path: Cookie path.
+            secure: Mark as Secure.
+            http_only: Mark as HttpOnly.
+        """
+        ...
+    async def delete_cookie(
+        self,
+        name: str,
+        *,
+        domain: str | None = None,
+        path: str | None = None,
+    ) -> None:
+        """Delete a cookie by name, optionally scoped to a domain and path.
+
+        Args:
+            name: Cookie name.
+            domain: Cookie domain.
+            path: Cookie path.
         """
         ...
     async def wait_for_stable_dom(
@@ -245,154 +278,81 @@ class BrowserPool:
     ) -> bool: ...
 
 class Page:
-    """A single browser tab created via :meth:`BrowserSession.new_page`.
+    """A single browser tab created via :meth:`BrowserSession.new_page`."""
 
-    Provides navigation, content extraction, JavaScript evaluation,
-    media capture, DOM queries, user-interaction helpers, and low-level
-    CDP input dispatch.
-    """
-
-    async def goto(self, url: str, timeout: float = 30.0) -> str | None:
-        """Navigate to *url* and wait for network idle in one shot.
-
-        Args:
-            url: The URL to load.
-            timeout: Maximum seconds to wait for network idle.
-
-        Returns:
-            ``"networkIdle"`` or ``"networkAlmostIdle"`` on success,
-            ``None`` on timeout.
-        """
+    async def goto(self, url: str, timeout: float = 30.0) -> PageResponse:
+        """Navigate to *url* and wait for network idle in one shot."""
         ...
     async def navigate(self, url: str) -> None:
-        """Navigate to *url* without waiting for any load event.
-
-        Args:
-            url: The URL to load.
-        """
+        """Navigate to *url* without waiting for any load event."""
         ...
     async def wait_for_navigation(self) -> None:
         """Block until the current navigation completes."""
         ...
     async def content(self) -> str:
-        """Return the full page HTML (``document.documentElement.outerHTML``).
-
-        Returns:
-            The complete outer HTML of the document element.
-        """
+        """Return the full page HTML."""
         ...
     async def title(self) -> str | None:
-        """Return the document title, or ``None``.
-
-        Returns:
-            The ``document.title`` string, or ``None`` if unavailable.
-        """
+        """Return the document title, or ``None``."""
         ...
     async def url(self) -> str | None:
-        """Return the current page URL, or ``None``.
-
-        Returns:
-            The page URL as a string, or ``None`` if unavailable.
-        """
+        """Return the current page URL, or ``None``."""
         ...
     async def evaluate_js(self, expression: str) -> object:
-        """Evaluate a JavaScript *expression* and return the result.
-
-        The return value is deserialised to a native Python type
-        (``dict``, ``list``, ``str``, ``int``, ``float``, ``bool``, or ``None``).
-
-        Args:
-            expression: JavaScript expression or IIFE string.
-
-        Returns:
-            The deserialised result of the expression.
-        """
+        """Evaluate a JavaScript *expression* and return the result."""
         ...
     async def screenshot_png(self) -> bytes:
-        """Capture a full-page screenshot as PNG bytes.
-
-        Returns:
-            Raw PNG image data.
-        """
+        """Capture a full-page screenshot as PNG bytes."""
         ...
     async def pdf_bytes(self) -> bytes:
-        """Render the page as a PDF and return the raw bytes.
-
-        Only works in headless mode.
-
-        Returns:
-            Raw PDF file data.
-        """
+        """Render the page as a PDF and return the raw bytes."""
         ...
     async def query_selector(self, selector: str) -> str | None:
-        """Return the inner HTML of the first element matching *selector*, or ``None``.
-
-        Args:
-            selector: CSS selector string.
-
-        Returns:
-            Inner HTML string of the matched element, or ``None`` if no match.
-        """
+        """Return inner HTML of the first matching element."""
         ...
     async def query_selector_all(self, selector: str) -> list[str]:
-        """Return the inner HTML of every element matching *selector*.
-
-        Args:
-            selector: CSS selector string.
-
-        Returns:
-            List of inner HTML strings, one per matched element.
-        """
+        """Return inner HTML of every matching element."""
         ...
     async def click_element(self, selector: str) -> None:
-        """Click the first element matching *selector*.
-
-        Args:
-            selector: CSS selector string.
-        """
+        """Click the first element matching *selector*."""
         ...
     async def type_into(self, selector: str, text: str) -> None:
-        """Focus the first element matching *selector* and type *text*.
-
-        Args:
-            selector: CSS selector string.
-            text: The text to type.
-        """
+        """Focus and type *text* into the first matching element."""
         ...
     async def set_headers(self, headers: dict[str, str]) -> None:
-        """Set extra HTTP headers for all subsequent requests from this page.
-
-        Args:
-            headers: Header name-value pairs.
-        """
+        """Set extra HTTP headers for subsequent requests."""
+        ...
+    async def get_cookies(self) -> list[dict[str, Any]]:
+        """Return all cookies matching the current page URL."""
+        ...
+    async def set_cookie(
+        self,
+        name: str,
+        value: str,
+        *,
+        domain: str | None = None,
+        path: str | None = None,
+        secure: bool | None = None,
+        http_only: bool | None = None,
+    ) -> None:
+        """Set a cookie on the current page."""
+        ...
+    async def delete_cookie(
+        self,
+        name: str,
+        *,
+        domain: str | None = None,
+        path: str | None = None,
+    ) -> None:
+        """Delete a cookie by name, optionally scoped to a domain and path."""
         ...
     async def wait_for_stable_dom(
         self, timeout: float = 10.0, min_length: int = 5000, stable_checks: int = 5
     ) -> bool:
-        """Wait until the DOM stabilises (stops changing).
-
-        Polls the HTML length repeatedly and resolves once it stays
-        constant across *stable_checks* consecutive checks.
-
-        Args:
-            timeout: Maximum seconds to wait.
-            min_length: Minimum HTML length before checking stability.
-            stable_checks: Consecutive unchanged polls required.
-
-        Returns:
-            ``True`` if the DOM stabilised, ``False`` on timeout.
-        """
+        """Wait until the DOM stabilises (stops changing)."""
         ...
     async def wait_for_network_idle(self, timeout: float = 30.0) -> str | None:
-        """Wait for network activity to settle.
-
-        Args:
-            timeout: Maximum seconds to wait.
-
-        Returns:
-            ``"networkIdle"`` or ``"networkAlmostIdle"`` on success,
-            ``None`` on timeout.
-        """
+        """Wait for network activity to settle."""
         ...
     async def dispatch_mouse_event(
         self,
@@ -405,19 +365,7 @@ class Page:
         delta_y: float | None = None,
         modifiers: int | None = None,
     ) -> None:
-        """Send a low-level CDP ``Input.dispatchMouseEvent``.
-
-        Args:
-            event_type: One of ``"mousePressed"``, ``"mouseReleased"``,
-                ``"mouseMoved"``, or ``"mouseWheel"``.
-            x: Horizontal page coordinate.
-            y: Vertical page coordinate.
-            button: ``"left"``, ``"right"``, or ``"middle"``.
-            click_count: Number of clicks (usually ``1``).
-            delta_x: Horizontal scroll delta (``mouseWheel`` only).
-            delta_y: Vertical scroll delta (``mouseWheel`` only).
-            modifiers: Bit field for modifier keys (Ctrl=1, Shift=2, etc.).
-        """
+        """Send a low-level CDP ``Input.dispatchMouseEvent``."""
         ...
     async def dispatch_key_event(
         self,
@@ -427,15 +375,7 @@ class Page:
         text: str | None = None,
         modifiers: int | None = None,
     ) -> None:
-        """Send a low-level CDP ``Input.dispatchKeyEvent``.
-
-        Args:
-            event_type: ``"keyDown"``, ``"keyUp"``, ``"rawKeyDown"``, or ``"char"``.
-            key: DOM ``KeyboardEvent.key`` value (e.g. ``"Enter"``).
-            code: Physical key code (e.g. ``"KeyA"``).
-            text: Character to insert (e.g. ``"a"``).
-            modifiers: Bit field for modifier keys.
-        """
+        """Send a low-level CDP ``Input.dispatchKeyEvent``."""
         ...
     async def close(self) -> None:
         """Close this tab and release its resources."""

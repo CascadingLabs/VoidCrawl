@@ -1,7 +1,8 @@
 """Built-in browser actions shipped with voidcrawl.
 
 Re-exports every action from the ``click``, ``dom``, ``hover``,
-``input``, ``scroll``, and ``wait`` modules for convenient import::
+``input``, ``network``, ``scroll``, and ``wait`` modules for convenient
+import::
 
     from voidcrawl.actions import ClickAt, WaitForSelector
 """
@@ -19,6 +20,10 @@ from voidcrawl.actions.builtin.input import (
     ClearInput,
     SelectOption,
     SetInputValue,
+)
+from voidcrawl.actions.builtin.network import (
+    CollectNetworkRequests,
+    InstallNetworkObserver,
 )
 from voidcrawl.actions.builtin.scroll import (
     CdpScroll,
@@ -44,9 +49,11 @@ __all__ = [
     "ClearInput",
     "ClickAt",
     "ClickElement",
+    "CollectNetworkRequests",
     "GetAttribute",
     "GetText",
     "Hover",
+    "InstallNetworkObserver",
     "QueryAll",
     "ScrollBy",
     "ScrollTo",

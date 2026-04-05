@@ -15,8 +15,9 @@ use pyo3_async_runtimes::tokio::future_into_py;
 use serde_json::Value;
 use tokio::sync::Mutex;
 use void_crawl_core::{
-    BrowserMode, BrowserPool, BrowserSession, DispatchKeyEventType, DispatchMouseEventType,
-    MouseButton, Page, PageResponse, PoolConfig, PooledTab, StealthConfig, VoidCrawlError,
+    BrowserMode, BrowserPool, BrowserSession, CookieParam, DeleteCookiesParams,
+    DispatchKeyEventType, DispatchMouseEventType, MouseButton, Page, PageResponse, PoolConfig,
+    PooledTab, StealthConfig, VoidCrawlError,
 };
 
 // ── Error conversion ────────────────────────────────────────────────────
@@ -393,6 +394,54 @@ impl PyPage {
         headers: HashMap<String, String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         with_page!(self, py, |page| page.set_headers(headers))
+    }
+
+    /// Return all cookies matching the current page URL.
+    ///
+    /// Each cookie is a dict with keys: name, value, domain, path, expires,
+    /// size, httpOnly, secure, session, sameSite, priority, etc.
+    fn get_cookies<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        with_page_map!(self, py, |page| page.get_cookies(), |cookies| {
+            let val = serde_json::to_value(&cookies)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            PyJsonValue(val)
+        })
+    }
+
+    /// Set a cookie on the current page.
+    #[pyo3(signature = (name, value, *, domain=None, path=None, secure=None, http_only=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn set_cookie<'py>(
+        &self,
+        py: Python<'py>,
+        name: String,
+        value: String,
+        domain: Option<String>,
+        path: Option<String>,
+        secure: Option<bool>,
+        http_only: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let mut cookie = CookieParam::new(name, value);
+        cookie.domain = domain;
+        cookie.path = path;
+        cookie.secure = secure;
+        cookie.http_only = http_only;
+        with_page!(self, py, |page| page.set_cookie(cookie))
+    }
+
+    /// Delete a cookie by name, optionally scoped to a domain and path.
+    #[pyo3(signature = (name, *, domain=None, path=None))]
+    fn delete_cookie<'py>(
+        &self,
+        py: Python<'py>,
+        name: String,
+        domain: Option<String>,
+        path: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let mut params = DeleteCookiesParams::new(name);
+        params.domain = domain;
+        params.path = path;
+        with_page!(self, py, |page| page.delete_cookies(vec![params]))
     }
 
     /// Wait until the DOM stabilises and exceeds `min_length` characters.
@@ -841,6 +890,51 @@ impl PyPooledTab {
         headers: HashMap<String, String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         with_pooled_page!(self, py, |page| page.set_headers(headers))
+    }
+
+    /// Return all cookies matching the current page URL.
+    fn get_cookies<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page_map!(self, py, |page| page.get_cookies(), |cookies| {
+            let val = serde_json::to_value(&cookies)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            PyJsonValue(val)
+        })
+    }
+
+    /// Set a cookie on the current page.
+    #[pyo3(signature = (name, value, *, domain=None, path=None, secure=None, http_only=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn set_cookie<'py>(
+        &self,
+        py: Python<'py>,
+        name: String,
+        value: String,
+        domain: Option<String>,
+        path: Option<String>,
+        secure: Option<bool>,
+        http_only: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let mut cookie = CookieParam::new(name, value);
+        cookie.domain = domain;
+        cookie.path = path;
+        cookie.secure = secure;
+        cookie.http_only = http_only;
+        with_pooled_page!(self, py, |page| page.set_cookie(cookie))
+    }
+
+    /// Delete a cookie by name, optionally scoped to a domain and path.
+    #[pyo3(signature = (name, *, domain=None, path=None))]
+    fn delete_cookie<'py>(
+        &self,
+        py: Python<'py>,
+        name: String,
+        domain: Option<String>,
+        path: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let mut params = DeleteCookiesParams::new(name);
+        params.domain = domain;
+        params.path = path;
+        with_pooled_page!(self, py, |page| page.delete_cookies(vec![params]))
     }
 
     /// Wait until the DOM stabilises and exceeds `min_length` characters.

@@ -24,10 +24,12 @@ from voidcrawl.actions import (
     ClearInput,
     ClickAt,
     ClickElement,
+    CollectNetworkRequests,
     Flow,
     GetAttribute,
     GetText,
     Hover,
+    InstallNetworkObserver,
     JsActionNode,
     JsTab,
     ScrollBy,
@@ -491,3 +493,82 @@ class TestCustomAction:
         params = _extract_params(tab.js_calls[0])
         assert params == {"key": "val"}
         assert "_internal" not in params
+
+
+# ── Network observer action tests ────────────────────────────────────────
+
+
+class TestNetworkObserver:
+    @pytest.mark.asyncio
+    async def test_install_observer_sends_js(self) -> None:
+        tab = MockTab()
+        await InstallNetworkObserver().run(tab)
+        assert len(tab.js_calls) == 1
+        expr = tab.js_calls[0]
+        assert "__vc_network_log" in expr
+        assert "PerformanceObserver" in expr
+
+    @pytest.mark.asyncio
+    async def test_install_observer_empty_params(self) -> None:
+        action = InstallNetworkObserver()
+        assert action.params() == {}
+
+    @pytest.mark.asyncio
+    async def test_collect_default_no_clear(self) -> None:
+        tab = MockTab()
+        await CollectNetworkRequests().run(tab)
+        params = _extract_params(tab.js_calls[0])
+        assert params == {"clear": False}
+
+    @pytest.mark.asyncio
+    async def test_collect_with_clear(self) -> None:
+        tab = MockTab()
+        await CollectNetworkRequests(clear=True).run(tab)
+        params = _extract_params(tab.js_calls[0])
+        assert params == {"clear": True}
+
+    @pytest.mark.asyncio
+    async def test_collect_returns_js_result(self) -> None:
+        entries = [
+            {
+                "name": "https://example.com/app.js",
+                "type": "script",
+                "duration": 50,
+                "size": 1024,
+            },
+            {
+                "name": "https://example.com/style.css",
+                "type": "link",
+                "duration": 30,
+                "size": 512,
+            },
+        ]
+        tab = MockTab(js_return=entries)
+        result = await CollectNetworkRequests().run(tab)
+        assert result == entries
+        assert len(result) == 2
+
+    @pytest.mark.asyncio
+    async def test_install_then_collect_flow(self) -> None:
+        """InstallNetworkObserver + CollectNetworkRequests in a Flow."""
+        entries = [
+            {
+                "name": "https://example.com/a.js",
+                "type": "script",
+                "duration": 10,
+                "size": 100,
+            },
+        ]
+        tab = MockTab(js_return=entries)
+        flow = Flow([InstallNetworkObserver(), CollectNetworkRequests()])
+        result = await flow.run(tab)
+        assert len(result.results) == 2
+        assert result.last == entries
+
+    def test_install_repr(self) -> None:
+        assert "InstallNetworkObserver" in repr(InstallNetworkObserver())
+
+    def test_collect_repr(self) -> None:
+        r = repr(CollectNetworkRequests(clear=True))
+        assert "CollectNetworkRequests" in r
+        assert "clear=True" in r

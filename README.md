@@ -17,9 +17,6 @@
   <a href="https://cascadinglabs.com/voidcrawl/"><img src="https://img.shields.io/badge/docs-cascadinglabs.com%2Fvoidcrawl-b07adf?labelColor=120a24" alt="docs"></a>
 </p>
 
-> [!WARNING]
-> **VoidCrawl is currently in Alpha.** The API is expected to change significantly. We do not expect a stable API until we are out of Beta.
-
 # VoidCrawl
 
 **CDP browser automation for Python** — a Rust-native Chrome DevTools Protocol client exposed to Python via PyO3.

@@ -6,6 +6,9 @@ from voidcrawl._ext import (
     Page as Page,
 )
 from voidcrawl._ext import (
+    PageResponse as PageResponse,
+)
+from voidcrawl._ext import (
     PooledTab as PooledTab,
 )
 from voidcrawl._ext import (
@@ -60,22 +63,6 @@ __all__ = [
     "safe_url",
     "strip_tags",
 ]
-
-class PageResponse:
-    """Result of :meth:`Page.goto` / :meth:`PooledTab.goto`.
-
-    Attributes:
-        html: Full outer HTML after network idle.
-        url: Final URL after any redirects.
-        status_code: HTTP status of the last response, or ``None`` when served
-            from cache or a service worker.
-        redirected: ``True`` when at least one HTTP redirect occurred.
-    """
-
-    html: str
-    url: str
-    status_code: int | None
-    redirected: bool
 
 class BrowserConfig:
     """Configuration for launching or connecting to a single browser instance."""
