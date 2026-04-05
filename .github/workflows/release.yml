@@ -115,6 +115,71 @@ jobs:
             target: x86_64-pc-windows-msvc
             manylinux: ""
 
+          # Windows x86
+          - runner: windows-latest
+            target: i686-pc-windows-msvc
+            manylinux: ""
+
+          # Windows ARM64
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            manylinux: ""
+
+          # Linux i686 (cross-compile)
+          - runner: ubuntu-latest
+            target: i686-unknown-linux-gnu
+            manylinux: auto
+
+          # Linux ARMv7 (cross-compile)
+          - runner: ubuntu-latest
+            target: armv7-unknown-linux-gnueabihf
+            manylinux: auto
+
+          # Linux PPC64LE (cross-compile)
+          - runner: ubuntu-latest
+            target: powerpc64le-unknown-linux-gnu
+            manylinux: auto
+
+          # Linux RISCV64 (cross-compile)
+          - runner: ubuntu-latest
+            target: riscv64gc-unknown-linux-gnu
+            manylinux: auto
+
+          # Linux S390x (cross-compile)
+          - runner: ubuntu-latest
+            target: s390x-unknown-linux-gnu
+            manylinux: auto
+
+          # Linux x86_64 MUSL
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            manylinux: musllinux_1_2
+
+          # Linux aarch64 MUSL (cross-compile)
+          - runner: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            manylinux: musllinux_1_2
+
+          # Linux i686 MUSL (cross-compile)
+          - runner: ubuntu-latest
+            target: i686-unknown-linux-musl
+            manylinux: musllinux_1_2
+
+          # Linux ARMv7 MUSL (cross-compile)
+          - runner: ubuntu-latest
+            target: armv7-unknown-linux-musleabihf
+            manylinux: musllinux_1_2
+
+          # Linux ARMv6 MUSL Hardfloat (cross-compile)
+          - runner: ubuntu-latest
+            target: arm-unknown-linux-musleabihf
+            manylinux: musllinux_1_2
+
+          # Linux RISCV64 MUSL (cross-compile)
+          - runner: ubuntu-latest
+            target: riscv64gc-unknown-linux-musl
+            manylinux: musllinux_1_2
+
     steps:
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4

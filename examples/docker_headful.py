@@ -27,20 +27,14 @@ What you'll see:
 
 import asyncio
 
-from voidcrawl import BrowserConfig, BrowserPool, PoolConfig
+from voidcrawl import BrowserPool, PoolConfig
 
 
 async def main() -> None:
     """Connect to Docker headful Chrome and demonstrate navigation."""
-    # ── Connect to Docker Chrome ─────────────────────────────────────
-    # The headful Docker container runs Chrome on ports 19222 and 19223.
-    config = PoolConfig(
-        chrome_ws_urls=["http://localhost:19222", "http://localhost:19223"],
-        tabs_per_browser=2,
-        browser=BrowserConfig(headless=False),
-    )
-
-    async with BrowserPool(config) as pool:
+    # PoolConfig.from_docker(headful=True) selects the right ports (19222/19223)
+    # and probes them so you get a clear error if the container isn't running.
+    async with BrowserPool(PoolConfig.from_docker(headful=True)) as pool:
         # ── Basic navigation ─────────────────────────────────────────
         async with pool.acquire() as tab:
             # goto() combines navigate + wait_for_network_idle — needed for

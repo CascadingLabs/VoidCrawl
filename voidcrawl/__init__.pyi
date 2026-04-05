@@ -124,6 +124,16 @@ class PoolConfig:
         browser: BrowserConfig = ...,
     ) -> None: ...
     @classmethod
+    def from_docker(
+        cls,
+        *,
+        headful: bool = False,
+        host: str = "localhost",
+        ports: list[int] | None = None,
+        tabs_per_browser: int = 4,
+        check: bool = True,
+    ) -> PoolConfig: ...
+    @classmethod
     def from_env(cls) -> PoolConfig: ...
     def model_dump(self) -> dict[str, object]: ...
 

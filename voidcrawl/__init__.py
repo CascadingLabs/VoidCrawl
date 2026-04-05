@@ -62,6 +62,27 @@ __all__ = [
 ]
 
 
+# ── Internal helpers ────────────────────────────────────────────────────
+
+
+def _first_unreachable(urls: list[str]) -> str | None:
+    """Return the first URL whose ``/json/version`` endpoint is unreachable.
+
+    Used by :meth:`PoolConfig.from_docker` to validate Docker endpoints
+    before constructing the pool.  Returns ``None`` when all endpoints respond.
+    """
+    import urllib.error  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    for url in urls:
+        try:
+            with urllib.request.urlopen(f"{url}/json/version", timeout=3) as resp:
+                resp.read()
+        except (urllib.error.URLError, OSError):  # noqa: PERF203
+            return url
+    return None
+
+
 # ── Configuration models ────────────────────────────────────────────────
 
 
@@ -162,6 +183,83 @@ class PoolConfig(BaseModel):
     auto_evict: bool = True
     chrome_ws_urls: list[str] = Field(default_factory=list)
     browser: BrowserConfig = Field(default_factory=BrowserConfig)
+
+    @classmethod
+    def from_docker(
+        cls,
+        *,
+        headful: bool = False,
+        host: str = "localhost",
+        ports: list[int] | None = None,
+        tabs_per_browser: int = 4,
+        check: bool = True,
+    ) -> PoolConfig:
+        """Build a :class:`PoolConfig` for a VoidCrawl Docker container.
+
+        Selects the correct default ports for headless or headful mode and
+        optionally probes the Chrome endpoints before returning so you get
+        a clear error message if the container is not running.
+
+        Args:
+            headful: Connect to the headful Docker container (ports
+                19222/19223).  Defaults to ``False`` (headless, ports
+                9222/9223).
+            host: Hostname where the Docker container is reachable.
+                Defaults to ``"localhost"``.
+            ports: Override the default port list.  When ``None``, uses
+                ``[9222, 9223]`` for headless or ``[19222, 19223]`` for
+                headful.
+            tabs_per_browser: Max concurrent tabs per Chrome process.
+                Defaults to ``4``.
+            check: Probe each Chrome endpoint before returning and raise
+                :exc:`RuntimeError` with a setup hint if unreachable.
+                Defaults to ``True``.
+
+        Returns:
+            A :class:`PoolConfig` with ``chrome_ws_urls`` pre-populated.
+
+        Raises:
+            RuntimeError: When ``check=True`` and a Chrome endpoint is
+                unreachable.  The error message includes the ``docker``
+                command needed to start the container.
+
+        Example:
+            Headless pool (default)::
+
+                async with BrowserPool(PoolConfig.from_docker()) as pool:
+                    async with pool.acquire() as tab:
+                        await tab.goto("https://example.com")
+
+            Headful pool — watch Chrome live at ``localhost:5900``::
+
+                async with BrowserPool(PoolConfig.from_docker(headful=True)) as pool:
+                    async with pool.acquire() as tab:
+                        await tab.goto("https://example.com")
+        """
+        default_ports = [19222, 19223] if headful else [9222, 9223]
+        effective_ports = ports if ports is not None else default_ports
+        urls = [f"http://{host}:{port}" for port in effective_ports]
+
+        if check:
+            if headful:
+                start_cmd = "./docker/run-headful.sh"
+                mode = "headful"
+            else:
+                start_cmd = "docker compose -f docker/docker-compose.yml up"
+                mode = "headless"
+            dead = _first_unreachable(urls)
+            if dead is not None:
+                raise RuntimeError(
+                    f"Cannot reach Chrome at {dead}/json/version — "
+                    f"is the {mode} Docker container running?\n"
+                    f"Start it with:  {start_cmd}"
+                )
+
+        return cls(
+            browsers=len(urls),
+            tabs_per_browser=tabs_per_browser,
+            chrome_ws_urls=urls,
+        )
 
     @classmethod
     def from_env(cls) -> PoolConfig:
