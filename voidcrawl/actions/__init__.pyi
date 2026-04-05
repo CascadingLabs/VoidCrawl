@@ -58,6 +58,9 @@ from voidcrawl.actions.builtin import (
     ClickElement as ClickElement,
 )
 from voidcrawl.actions.builtin import (
+    CollectNetworkRequests as CollectNetworkRequests,
+)
+from voidcrawl.actions.builtin import (
     GetAttribute as GetAttribute,
 )
 from voidcrawl.actions.builtin import (
@@ -65,6 +68,9 @@ from voidcrawl.actions.builtin import (
 )
 from voidcrawl.actions.builtin import (
     Hover as Hover,
+)
+from voidcrawl.actions.builtin import (
+    InstallNetworkObserver as InstallNetworkObserver,
 )
 from voidcrawl.actions.builtin import (
     QueryAll as QueryAll,
@@ -105,11 +111,13 @@ __all__ = [
     "ClearInput",
     "ClickAt",
     "ClickElement",
+    "CollectNetworkRequests",
     "Flow",
     "FlowResult",
     "GetAttribute",
     "GetText",
     "Hover",
+    "InstallNetworkObserver",
     "JsActionNode",
     "JsSource",
     "JsTab",

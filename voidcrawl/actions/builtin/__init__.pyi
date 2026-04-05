@@ -40,6 +40,12 @@ from voidcrawl.actions.builtin.input import (
 from voidcrawl.actions.builtin.input import (
     SetInputValue as SetInputValue,
 )
+from voidcrawl.actions.builtin.network import (
+    CollectNetworkRequests as CollectNetworkRequests,
+)
+from voidcrawl.actions.builtin.network import (
+    InstallNetworkObserver as InstallNetworkObserver,
+)
 from voidcrawl.actions.builtin.scroll import (
     CdpScroll as CdpScroll,
 )
@@ -81,9 +87,11 @@ __all__ = [
     "ClearInput",
     "ClickAt",
     "ClickElement",
+    "CollectNetworkRequests",
     "GetAttribute",
     "GetText",
     "Hover",
+    "InstallNetworkObserver",
     "QueryAll",
     "ScrollBy",
     "ScrollTo",

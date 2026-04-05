@@ -171,7 +171,9 @@ class TestNetworkObserverIntegration:
             await page.wait_for_network_idle()
 
             await InstallNetworkObserver().run(page)
-            requests = await CollectNetworkRequests().run(page)
+            result = await CollectNetworkRequests().run(page)
+            assert isinstance(result, list)
+            requests = result
 
             assert len(requests) > 0
             entry = requests[0]

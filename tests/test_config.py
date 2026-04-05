@@ -211,7 +211,7 @@ class TestPoolConfigFromDocker:
 
 class TestPoolConfigFromEnv:
     def test_defaults_no_env(self) -> None:
-        env = {}
+        env: dict[str, str] = {}
         with patch.dict(os.environ, env, clear=True):
             cfg = PoolConfig.from_env()
         assert cfg.browsers == 1
@@ -290,7 +290,7 @@ class TestPoolConfigFromEnv:
         assert cfg.browser.headless is False
 
     def test_headless_default(self) -> None:
-        env = {}
+        env: dict[str, str] = {}
         with patch.dict(os.environ, env, clear=True):
             cfg = PoolConfig.from_env()
         assert cfg.browser.headless is True

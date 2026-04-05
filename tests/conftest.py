@@ -9,9 +9,9 @@ from voidcrawl.scale import ResourceSnapshot
 # ── Resource snapshot fixtures ───────────────────────────────────────────
 
 
-def _make_snapshot(**overrides: object) -> ResourceSnapshot:
+def _make_snapshot(**overrides: int | float | bool | None) -> ResourceSnapshot:
     """Build a ResourceSnapshot with sensible defaults, overridden by kwargs."""
-    defaults = {
+    defaults: dict[str, int | float | bool | None] = {
         "free_ram_mb": 8000,
         "total_ram_mb": 16000,
         "cpu_cores": 4,

@@ -122,7 +122,7 @@ def _fake_report(**overrides: object) -> ScaleReport:
         "tab_max_idle_secs": 60,
     }
     defaults.update(overrides)
-    return ScaleReport(**defaults)  # type: ignore[arg-type]
+    return ScaleReport(**defaults)
 
 
 class TestScaleCommand:

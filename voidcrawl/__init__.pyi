@@ -144,6 +144,7 @@ class PoolConfig:
 class BrowserSession:
     """Async context manager wrapping a single Chromium instance via CDP."""
 
+    _config: BrowserConfig
     def __init__(self, config: BrowserConfig | None = None) -> None: ...
     async def __aenter__(self) -> BrowserSession: ...
     async def __aexit__(

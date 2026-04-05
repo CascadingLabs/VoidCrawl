@@ -19,6 +19,10 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 import pytest
 
@@ -67,7 +71,7 @@ def _wait_for_cdp(url: str, timeout: float = 60) -> dict[str, object]:
 
 
 @pytest.fixture(scope="module")
-def cdp_container() -> dict[str, object]:
+def cdp_container() -> Iterator[dict[str, object]]:
     """Build and start the headless Docker image, yield CDP info,
     then tear down.
     """
