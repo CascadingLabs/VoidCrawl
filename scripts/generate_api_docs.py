@@ -59,13 +59,26 @@ def _gh_link(obj: Object, repo_url: str, ref: str) -> str:
     """Return an inline HTML GitHub source link, or '' if unavailable."""
     lineno = getattr(obj, "lineno", None)
     filepath = getattr(obj, "filepath", None)
-    if not lineno or not filepath:
+    if not filepath:
         return ""
     try:
         rel = Path(filepath).relative_to(_REPO_ROOT)
     except ValueError:
         return ""
-    url = f"{repo_url}/blob/{ref}/{rel.as_posix()}#L{lineno}"
+    # Symbols defined in the compiled native extension resolve to the
+    # build artifact (e.g. ``voidcrawl/_ext.cpython-313-x86_64-linux-gnu.so``),
+    # which isn't checked into the repo.  Redirect to the sibling ``.pyi``
+    # stub when one exists; its line numbers don't map to the binary, so
+    # drop the line anchor in that case.
+    anchor = f"#L{lineno}" if lineno else ""
+    if rel.suffix == ".so":
+        stub = rel.with_name(rel.name.split(".", 1)[0] + ".pyi")
+        if (_REPO_ROOT / stub).exists():
+            rel = stub
+            anchor = ""
+        else:
+            return ""
+    url = f"{repo_url}/blob/{ref}/{rel.as_posix()}{anchor}"
     return (
         f' <a href="{url}" target="_blank" rel="noopener noreferrer"'
         f' title="View source on GitHub">{_GITHUB_ICON}</a>'
@@ -506,7 +519,8 @@ def main() -> None:
     else:
         version = args.version
 
-    ref = args.ref or version.lstrip("v")
+    # Release tags are ``vX.Y.Z``; keep the ``v`` so the link resolves.
+    ref = args.ref or version
 
     if args.output_dir:
         files = generate_split(version, exclude, args.github_repo, ref)
