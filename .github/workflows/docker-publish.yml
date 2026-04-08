@@ -84,11 +84,21 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.variant }}
           cache-to: type=gha,scope=${{ matrix.variant }},mode=max
 
+      # Install dive directly from upstream releases — see CI.yaml for
+      # why we don't use a third-party action wrapper.
+      - name: Install dive
+        env:
+          DIVE_VERSION: "0.13.1"
+        run: |
+          curl -fsSL "https://github.com/wagoodman/dive/releases/download/v${DIVE_VERSION}/dive_${DIVE_VERSION}_linux_amd64.deb" \
+            -o /tmp/dive.deb
+          sudo apt-get install -y /tmp/dive.deb
+          rm /tmp/dive.deb
+
       - name: Dive image-efficiency gate
-        uses: yuichielectric/dive-action@4d945fb4bb1ba7b3900ea1bbe21b2ba97d80dfc9 # 0.1.0
-        with:
-          image: voidcrawl-${{ matrix.variant }}:ci
-          config-file: ${{ github.workspace }}/.github/dive-ci.yml
+        env:
+          CI: "true"
+        run: dive voidcrawl-${{ matrix.variant }}:ci --ci-config .github/dive-ci.yml
 
       - name: Build & push (multi-arch)
         if: github.event_name != 'pull_request'

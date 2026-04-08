@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 # Single apt layer + locale/doc stripping keeps the image dive-clean.
 RUN apt-get update && apt-get install -y --no-install-recommends \
