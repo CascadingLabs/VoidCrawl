@@ -1,31 +1,30 @@
 FROM python:3.11-slim
 
-# Install Chromium + supervisord + Chrome system dependencies
+# Single apt layer + locale/doc stripping keeps the image dive-clean.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    chromium \
-    chromium-sandbox \
-    supervisor \
-    curl \
-    fonts-liberation \
-    libnss3 \
-    libatk-bridge2.0-0 \
-    libdrm2 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxrandr2 \
-    libgbm1 \
-    libasound2 \
-    libpangocairo-1.0-0 \
-    libgtk-3-0 \
-    && rm -rf /var/lib/apt/lists/*
+        chromium \
+        chromium-sandbox \
+        supervisor \
+        curl \
+        fonts-liberation \
+        libnss3 \
+        libatk-bridge2.0-0 \
+        libdrm2 \
+        libxcomposite1 \
+        libxdamage1 \
+        libxrandr2 \
+        libgbm1 \
+        libasound2 \
+        libpangocairo-1.0-0 \
+        libgtk-3-0 \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
+              /usr/share/doc/* /usr/share/man/* /usr/share/locale/* \
+    && mkdir -p /tmp/chrome-profile-1 /tmp/chrome-profile-2
 
 WORKDIR /app
 
 # Supervisord config
 COPY docker/config/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
-
-# Pre-create profile dirs so Chrome never races on first start
-RUN mkdir -p /tmp/chrome-profile-1 /tmp/chrome-profile-2
 
 # Dynamic entrypoint — generates supervisord.conf via voidcrawl.scale at start
 COPY docker/entrypoint.sh /docker/entrypoint.sh

@@ -1,0 +1,11 @@
+# dive image-efficiency gate for VoidCrawl containers.
+# See https://github.com/wagoodman/dive
+rules:
+  # At least 95 % of bytes must be "used" (no duplicate layers, no dangling files).
+  lowestEfficiency: 0.95
+
+  # Hard cap on wasted bytes across all layers (files added then removed/overwritten).
+  highestWastedBytes: 50MB
+
+  # At most 10 % of total image bytes may be wasted.
+  highestUserWastedPercent: 0.10

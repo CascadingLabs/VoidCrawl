@@ -1,0 +1,104 @@
+name: Docker publish
+
+# Publishes two images to GHCR:
+#   ghcr.io/<owner>/voidcrawl:headless-<tag>   (multi-arch: amd64 + arm64)
+#   ghcr.io/<owner>/voidcrawl:headful-<tag>    (amd64 only — needs Sway/Mesa)
+#
+# Layer cache lives in GHA cache (`type=gha`) so unchanged apt layers are free.
+# Every build is inspected with `dive` against .github/dive-ci.yml; bloated
+# images fail the job before they're tagged `latest`.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  # Runs on every PR (not just docker/** changes) so the build + dive gate
+  # is a universal merge requirement — any change that would bloat or break
+  # the image is caught before merge, even if it's a Rust/Python-only PR
+  # that bumps a dependency pulled into the container.
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ${{ github.repository_owner }}/voidcrawl
+
+jobs:
+  build:
+    name: ${{ matrix.variant }} (${{ matrix.platforms }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: headless
+            dockerfile: docker/Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - variant: headful
+            dockerfile: docker/Dockerfile.headful
+            platforms: linux/amd64
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3
+
+      - name: Login to GHCR
+        # Only push on main/tags — PRs still build + dive-check but don't publish.
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags
+        id: meta
+        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE }}
+          flavor: |
+            prefix=${{ matrix.variant }}-,onlatest=true
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build (load for dive)
+        # Load a single-arch image into the local daemon so dive can inspect it.
+        # The real multi-arch push happens in the next step, reusing the cache.
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          load: true
+          tags: voidcrawl-${{ matrix.variant }}:ci
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,scope=${{ matrix.variant }},mode=max
+
+      - name: Dive image-efficiency gate
+        uses: yuichielectric/dive-action@4d945fb4bb1ba7b3900ea1bbe21b2ba97d80dfc9 # 0.1.0
+        with:
+          image: voidcrawl-${{ matrix.variant }}:ci
+          config-file: ${{ github.workspace }}/.github/dive-ci.yml
+
+      - name: Build & push (multi-arch)
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platforms }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,scope=${{ matrix.variant }},mode=max
