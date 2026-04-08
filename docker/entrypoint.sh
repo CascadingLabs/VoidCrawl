@@ -11,10 +11,19 @@ set -euo pipefail
 SCALE_PROFILE="${SCALE_PROFILE:-balanced}"
 CONF_PATH=/tmp/supervisord-dynamic.conf
 
-# If the caller already hard-coded CHROME_WS_URLS (e.g. PoolConfig.from_docker),
-# bypass scale computation and fall back to the static config.
+# Fast path: caller set CHROME_WS_URLS (e.g. PoolConfig.from_docker, or the
+# static defaults in docker-compose.yml) → skip scale computation.
 if [[ -n "${CHROME_WS_URLS:-}" ]]; then
     echo "[entrypoint] CHROME_WS_URLS is set — using static supervisord config"
+    exec supervisord -c /etc/supervisor/conf.d/supervisord.conf
+fi
+
+# Fast path 2: voidcrawl Python package isn't installed in this image
+# (published GHCR images are runtime-only — no Rust toolchain, no maturin).
+# Fall back to the static 2-browser config. Users who want dynamic scaling
+# can mount the voidcrawl wheel in or set CHROME_WS_URLS manually.
+if ! python3 -c "import voidcrawl.scale" >/dev/null 2>&1; then
+    echo "[entrypoint] voidcrawl.scale unavailable — using static supervisord config"
     exec supervisord -c /etc/supervisor/conf.d/supervisord.conf
 fi
 

@@ -15,6 +15,7 @@
   <a href="https://pypi.python.org/pypi/voidcrawl"><img src="https://img.shields.io/pypi/v/voidcrawl?labelColor=120a24&color=b07adf" alt="PyPI"></a>
   <a href="https://pypi.python.org/pypi/voidcrawl"><img src="https://img.shields.io/pypi/pyversions/voidcrawl?labelColor=120a24&color=b07adf" alt="Python versions"></a>
   <a href="https://cascadinglabs.com/voidcrawl/"><img src="https://img.shields.io/badge/docs-cascadinglabs.com%2Fvoidcrawl-b07adf?labelColor=120a24" alt="docs"></a>
+  <a href="https://github.com/CascadingLabs/VoidCrawl/pkgs/container/voidcrawl"><img src="https://img.shields.io/badge/ghcr.io-cascadinglabs%2Fvoidcrawl-b07adf?labelColor=120a24&logo=docker&logoColor=white" alt="GHCR"></a>
 </p>
 
 # VoidCrawl
@@ -79,14 +80,23 @@ asyncio.run(main())
 
 ## Docker
 
+Pre-built multi-arch images (`linux/amd64`, `linux/arm64`) are published to GHCR on every push to `main` and every tagged release:
+
 ```bash
-docker compose -f docker/docker-compose.yml up -d
+docker run -d --network host --shm-size=2g \
+  ghcr.io/cascadinglabs/voidcrawl:headless-latest
 
 export CHROME_WS_URLS="http://localhost:9222,http://localhost:9223"
 python examples/basic_navigation.py
 ```
 
-For headful Docker with GPU + VNC, see [docs/docker-headful.md](docs/docker-headful.md).
+Or via compose:
+
+```bash
+docker compose -f docker/docker-compose.yml up -d
+```
+
+Available tags: `headless-latest`, `headless-<version>`, `headless-<sha>`, and the same set prefixed `headful-` for GPU + VNC (linux/amd64 only). See the [Docker & VNC guide](https://cascadinglabs.com/voidcrawl/guides/docker/) and the [Docker Config reference](https://cascadinglabs.com/voidcrawl/reference/docker-config/) for every runtime knob.
 
 ## Testing
 
