@@ -1,68 +1,39 @@
 #!/usr/bin/env bash
-# One-click headful Chrome in Docker with GPU acceleration.
+# Thin wrapper: detect GPU vendor, then hand off to `docker compose`.
 #
-# Auto-detects your GPU vendor and launches the right profile.
+# All runtime configuration lives in docker-compose.headful.yml + .env.
+# This script only exists to auto-pick the right compose profile based on
+# what's actually plugged into the host.
 #
 # Usage:
-#   ./docker/run-headful.sh              # auto-detect GPU
-#   ./docker/run-headful.sh --gpu amd    # force AMD
-#   ./docker/run-headful.sh --gpu nvidia # force NVIDIA
-#   ./docker/run-headful.sh --gpu intel  # force Intel
-#   ./docker/run-headful.sh --gpu cpu    # no GPU, software rendering
-#   ./docker/run-headful.sh --res 2560x1440  # custom resolution
+#   ./docker/run-headful.sh                 # auto-detect, foreground
+#   ./docker/run-headful.sh -d              # auto-detect, detached
+#   COMPOSE_PROFILES=amd docker compose -f docker/docker-compose.headful.yml up
+#     # ...is the equivalent compose-native invocation. Use that in CI.
 #
-# Connect VNC client to localhost:5900
+# Override resolution via .env or inline:
+#   VNC_WIDTH=2560 VNC_HEIGHT=1440 ./docker/run-headful.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.headful.yml"
 
-GPU_PROFILE=""
-VNC_WIDTH="1920"
-VNC_HEIGHT="1080"
-EXTRA_ARGS=""
-
-# ── Parse args ───────────────────────────────────────────────────────────
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --gpu)
-            GPU_PROFILE="$2"; shift 2 ;;
-        --res)
-            IFS='x' read -r VNC_WIDTH VNC_HEIGHT <<< "$2"; shift 2 ;;
-        --build)
-            EXTRA_ARGS="--build"; shift ;;
-        -d|--detach)
-            EXTRA_ARGS="$EXTRA_ARGS -d"; shift ;;
-        *)
-            echo "Unknown arg: $1"; exit 1 ;;
-    esac
-done
-
-# ── Auto-detect GPU if not specified ─────────────────────────────────────
-if [ -z "$GPU_PROFILE" ]; then
+detect_gpu() {
     if [ -e /dev/dri/renderD128 ]; then
-        DRIVER=$(basename "$(readlink -f /sys/class/drm/renderD128/device/driver)" 2>/dev/null || echo "unknown")
-        case "$DRIVER" in
-            amdgpu)  GPU_PROFILE="amd" ;;
-            i915|xe) GPU_PROFILE="intel" ;;
-            nvidia)  GPU_PROFILE="nvidia" ;;
-            *)       GPU_PROFILE="cpu" ;;
+        local driver
+        driver=$(basename "$(readlink -f /sys/class/drm/renderD128/device/driver)" 2>/dev/null || echo "")
+        case "$driver" in
+            amdgpu)  echo amd;    return ;;
+            i915|xe) echo intel;  return ;;
+            nvidia)  echo nvidia; return ;;
         esac
-    elif [ -e /dev/nvidia0 ]; then
-        GPU_PROFILE="nvidia"
-    else
-        GPU_PROFILE="cpu"
     fi
-    echo "Auto-detected GPU: $GPU_PROFILE"
-fi
+    [ -e /dev/nvidia0 ] && { echo nvidia; return; }
+    echo cpu
+}
 
-echo "Starting headful Chrome container..."
-echo "  GPU profile: $GPU_PROFILE"
-echo "  Resolution:  ${VNC_WIDTH}x${VNC_HEIGHT}"
-echo "  VNC:         localhost:5900"
-echo "  CDP:         localhost:9222, localhost:9223"
-echo ""
+: "${COMPOSE_PROFILES:=$(detect_gpu)}"
+export COMPOSE_PROFILES
 
-export VNC_WIDTH VNC_HEIGHT
-
-docker compose -f "$COMPOSE_FILE" --profile "$GPU_PROFILE" up --build $EXTRA_ARGS
+echo "[run-headful] profile=$COMPOSE_PROFILES  (override via COMPOSE_PROFILES=...)"
+exec docker compose -f "$COMPOSE_FILE" up "$@"

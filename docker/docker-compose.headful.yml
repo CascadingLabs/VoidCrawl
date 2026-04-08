@@ -1,22 +1,24 @@
 # Headful Chrome with Sway + wayvnc + GPU acceleration.
 #
-# Usage (one-click):
-#   docker compose -f docker/docker-compose.headful.yml --profile amd up --build
-#   docker compose -f docker/docker-compose.headful.yml --profile nvidia up --build
-#   docker compose -f docker/docker-compose.headful.yml --profile intel up --build
-#   docker compose -f docker/docker-compose.headful.yml --profile cpu up --build
+# Pick ONE profile:
+#   COMPOSE_PROFILES=amd    docker compose -f docker/docker-compose.headful.yml up
+#   COMPOSE_PROFILES=intel  docker compose -f docker/docker-compose.headful.yml up
+#   COMPOSE_PROFILES=nvidia docker compose -f docker/docker-compose.headful.yml up
+#   COMPOSE_PROFILES=cpu    docker compose -f docker/docker-compose.headful.yml up
 #
-# Then connect a VNC client to localhost:5900
-# CDP endpoints at localhost:19222 and localhost:19223
+# Or just: ./docker/run-headful.sh  (auto-detects the profile for you)
 #
-# Override resolution:
-#   VNC_WIDTH=2560 VNC_HEIGHT=1440 docker compose ...
+# Runtime knobs (set in shell or docker/.env):
+#   VNC_WIDTH, VNC_HEIGHT       — display resolution (default 1920x1080)
+#   VOIDCRAWL_IMAGE             — pull published image instead of building locally
+#                                 e.g. ghcr.io/cascadinglabs/voidcrawl:headful-latest
 
-x-common: &common
+x-headful-base: &headful-base
+  image: ${VOIDCRAWL_IMAGE:-voidcrawl-headful:local}
   build:
     context: ..
     dockerfile: docker/Dockerfile.headful
-  environment:
+  environment: &headful-env
     CDP_PORT_1: "19222"
     CDP_PORT_2: "19223"
     CHROME_WS_URLS: "http://localhost:19222,http://localhost:19223"
@@ -46,8 +48,15 @@ x-common: &common
 services:
   # ── AMD (iGPU + discrete) ────────────────────────────────────────────
   voidcrawl-cdp-amd:
-    <<: *common
+    <<: *headful-base
     profiles: ["amd"]
+    devices:
+      - /dev/dri:/dev/dri
+
+  # ── Intel (iGPU) ─────────────────────────────────────────────────────
+  voidcrawl-cdp-intel:
+    <<: *headful-base
+    profiles: ["intel"]
     devices:
       - /dev/dri:/dev/dri
 
@@ -55,7 +64,7 @@ services:
   # Requires: nvidia-container-toolkit installed on host
   # Requires: nvidia-drm.modeset=1 kernel param on host
   voidcrawl-cdp-nvidia:
-    <<: *common
+    <<: *headful-base
     profiles: ["nvidia"]
     devices:
       - /dev/dri:/dev/dri
@@ -67,29 +76,11 @@ services:
               count: all
               capabilities: [gpu]
 
-  # ── Intel (iGPU) ────────────────────────────────────────────────────
-  voidcrawl-cdp-intel:
-    <<: *common
-    profiles: ["intel"]
-    devices:
-      - /dev/dri:/dev/dri
-
   # ── CPU-only (no GPU, software rendering) ───────────────────────────
   voidcrawl-cdp-cpu:
-    <<: *common
+    <<: *headful-base
     profiles: ["cpu"]
     environment:
-      CDP_PORT_1: "19222"
-      CDP_PORT_2: "19223"
-      CHROME_WS_URLS: "http://localhost:19222,http://localhost:19223"
-      BROWSER_COUNT: "2"
-      TABS_PER_BROWSER: "4"
-      TAB_MAX_USES: "50"
-      TAB_MAX_IDLE_SECS: "60"
-      CHROME_NO_SANDBOX: "1"
-      VNC_PORT: "5900"
-      NOVNC_PORT: "6080"
-      VNC_WIDTH: "${VNC_WIDTH:-1920}"
-      VNC_HEIGHT: "${VNC_HEIGHT:-1080}"
+      <<: *headful-env
       WLR_RENDERER: "pixman"
       WLR_RENDERER_ALLOW_SOFTWARE: "1"

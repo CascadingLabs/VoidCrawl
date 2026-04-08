@@ -1,0 +1,188 @@
+# VoidCrawl — exhaustively-annotated compose example.
+#
+# This file is NOT meant to be run as-is. It exists to document every
+# knob the VoidCrawl Docker images respond to, with inline commentary
+# explaining what each setting does, its default, and when you'd change it.
+#
+# To actually run VoidCrawl, use one of:
+#   docker/docker-compose.yml          — minimal headless (production)
+#   docker/docker-compose.headful.yml  — GPU + VNC headful
+#
+# ─────────────────────────────────────────────────────────────────────────
+# Most settings below are driven by environment variables inside the
+# container (consumed by entrypoint.sh / entrypoint-headful.sh, the
+# supervisord configs, and voidcrawl.scale). Compose-level fields
+# (ports, devices, shm_size, etc.) affect Docker itself, not VoidCrawl.
+# ─────────────────────────────────────────────────────────────────────────
+
+services:
+  voidcrawl:
+    # ─── Image selection ───────────────────────────────────────────────
+    # Pin a specific SHA in production. `*-latest` tracks main; `*-<sha>`
+    # is immutable. Headful images are linux/amd64 only.
+    image: ghcr.io/cascadinglabs/voidcrawl:headless-latest
+    # image: ghcr.io/cascadinglabs/voidcrawl:headless-<git-sha>
+    # image: ghcr.io/cascadinglabs/voidcrawl:headful-latest
+
+    # Alternative: build locally from source.
+    # build:
+    #   context: ..
+    #   dockerfile: docker/Dockerfile           # or docker/Dockerfile.headful
+
+    container_name: voidcrawl
+
+    # ─── Networking ────────────────────────────────────────────────────
+    # network_mode: host is REQUIRED. Chrome ignores
+    # --remote-debugging-address in Chrome 121+ and always binds CDP to
+    # 127.0.0.1 inside the container. Host networking is the only way to
+    # reach it from the host without proxying every CDP message.
+    network_mode: host
+
+    # ─── Shared memory ─────────────────────────────────────────────────
+    # Chrome's IPC and GPU buffers live in /dev/shm. The default 64 MB
+    # causes silent tab crashes under load. 2 GB is comfortable for 2–4
+    # browsers × 4 tabs. Bump to 4 GB if you run >8 tabs per browser.
+    shm_size: "2gb"
+
+    # ─── Device passthrough (headful GPU only) ─────────────────────────
+    # Pass the host DRI render node into the container. The entrypoint
+    # auto-matches the host render-group GID so Chrome can open it.
+    # devices:
+    #   - /dev/dri:/dev/dri
+    #
+    # NVIDIA also needs the nvidia runtime (install nvidia-container-toolkit
+    # on the host first):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+    # ─── Port mappings (only if NOT using network_mode: host) ──────────
+    # Headless default CDP ports:          9222, 9223
+    # Headful default CDP ports:          19222, 19223
+    # VNC:                                  5900 (RFB, not HTTP)
+    # noVNC (browser-based VNC client):     6080
+    # ports:
+    #   - "9222:9222"
+    #   - "9223:9223"
+    #   - "5900:5900"
+    #   - "6080:6080"
+
+    environment:
+      # ─── Scale profile (headless) ────────────────────────────────────
+      # Drives voidcrawl.scale which generates supervisord.conf at
+      # container start based on memory / CPU / ulimit -n.
+      #   minimal  — 1 browser, 2 tabs  (≤2 GB RAM)
+      #   balanced — 2 browsers, 4 tabs (≥4 GB RAM, default)
+      #   advanced — 4 browsers, 8 tabs (≥16 GB RAM, high file-descriptor limit)
+      # Ignored if CHROME_WS_URLS is set (static passthrough mode).
+      SCALE_PROFILE: "balanced"
+
+      # ─── Browser pool sizing ─────────────────────────────────────────
+      # If set, bypasses scale computation. Format: comma-separated list
+      # of CDP endpoints. Index order matters — VoidCrawl round-robins
+      # across them.
+      CHROME_WS_URLS: "http://localhost:9222,http://localhost:9223"
+
+      # Number of chrome instances the pool manages. Should match the
+      # length of CHROME_WS_URLS. Used by voidcrawl.scale only when
+      # CHROME_WS_URLS is empty.
+      BROWSER_COUNT: "2"
+
+      # Tabs opened per browser. More tabs = more parallelism, more
+      # memory. 4 is the sweet spot for most sites; drop to 2 for
+      # heavyweight SPAs, bump to 8 for lightweight scraping.
+      TABS_PER_BROWSER: "4"
+
+      # ─── Tab lifecycle ───────────────────────────────────────────────
+      # Hard-recycle a tab after this many acquisitions. Mitigates memory
+      # leaks in long-lived Chrome tabs. Set to 0 to disable (not
+      # recommended for runs longer than ~1h).
+      TAB_MAX_USES: "50"
+
+      # Idle eviction: if a tab sits unused this long, it's torn down
+      # and recreated on next acquire. Balances memory vs. warm-up cost.
+      TAB_MAX_IDLE_SECS: "60"
+
+      # ─── Chrome flags ────────────────────────────────────────────────
+      # Disable Chrome's sandbox. REQUIRED inside most containers
+      # (the sandbox needs CAP_SYS_ADMIN or a userns setup that's
+      # rarely worth configuring). Leave this at "1" unless you know
+      # you've set up a sandbox-capable container.
+      CHROME_NO_SANDBOX: "1"
+
+      # ─── Headful-only: VNC ───────────────────────────────────────────
+      # CDP ports for the headful image (differ from headless to avoid
+      # colliding with a native Chrome on 9222).
+      CDP_PORT_1: "19222"
+      CDP_PORT_2: "19223"
+
+      # VNC server binds here. RFB protocol, not HTTP — don't open in a
+      # browser; use noVNC on NOVNC_PORT for that.
+      VNC_PORT: "5900"
+
+      # noVNC (HTML5 VNC client) served over HTTP. Open in any browser:
+      # http://localhost:6080
+      NOVNC_PORT: "6080"
+
+      # Virtual display resolution. Also what Chrome sees as window size.
+      # Bumping to 2560x1440 gives Chrome a "real" desktop fingerprint
+      # which some WAFs check. 1280x720 saves ~150 MB of framebuffer RAM.
+      VNC_WIDTH: "1920"
+      VNC_HEIGHT: "1080"
+
+      # ─── Headful-only: Wayland / Sway renderer ───────────────────────
+      # wlroots renderer backend. Auto-set by entrypoint-headful.sh
+      # based on detected GPU:
+      #   gles2   — AMD / Intel / NVIDIA (hardware accelerated)
+      #   pixman  — CPU fallback, always works
+      # Override only for debugging.
+      # WLR_RENDERER: "gles2"
+
+      # Allow software rendering even when a GPU is present. Needed on
+      # hosts where /dev/dri exists but the driver is broken.
+      # WLR_RENDERER_ALLOW_SOFTWARE: "1"
+
+      # Extra args passed to `sway` at startup. entrypoint-headful.sh
+      # sets this to `--unsupported-gpu` for NVIDIA.
+      # SWAY_EXTRA_ARGS: "--unsupported-gpu"
+
+    # ─── Healthcheck ───────────────────────────────────────────────────
+    # Compose marks the container unhealthy until every CDP port
+    # responds to /json/version. Use this as a depends_on gate for
+    # downstream services.
+    healthcheck:
+      test: >
+        curl -sf http://localhost:9222/json/version &&
+        curl -sf http://localhost:9223/json/version
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+    # ─── Resource limits (optional, recommended for production) ────────
+    # Chrome will happily eat all available RAM. Cap it so a runaway
+    # tab doesn't OOM the host. Scale these with TABS_PER_BROWSER.
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 4G
+    #       cpus: "2.0"
+
+    # ─── Restart policy ────────────────────────────────────────────────
+    # supervisord will restart Chrome inside the container, but if
+    # supervisord itself dies (OOM, segfault) Docker won't unless you
+    # set this.
+    restart: unless-stopped
+
+    # ─── Logging ───────────────────────────────────────────────────────
+    # Chrome is chatty. Cap log file size so /var/lib/docker doesn't
+    # fill up over weeks.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

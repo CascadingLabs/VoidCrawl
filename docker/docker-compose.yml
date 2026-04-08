@@ -1,5 +1,10 @@
+# Runtime knobs (set in shell or docker/.env):
+#   VOIDCRAWL_IMAGE  — pull published image instead of building locally,
+#                      e.g. ghcr.io/cascadinglabs/voidcrawl:headless-latest
+
 services:
   voidcrawl-cdp-headless:
+    image: ${VOIDCRAWL_IMAGE:-voidcrawl-headless:local}
     build:
       context: ..
       dockerfile: docker/Dockerfile
