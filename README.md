@@ -113,6 +113,10 @@ uv run pytest tests/ -v
 - [Full API reference](docs/api-reference.md)
 - [Examples](examples/)
 
+## Contact
+
+[contact@cascadinglabs.com](mailto:contact@cascadinglabs.com)
+
 ## License
 
 Apache-2.0
