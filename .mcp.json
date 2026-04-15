@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "voidcrawl": {
+      "command": "cargo",
+      "args": ["run", "--release", "-p", "voidcrawl_mcp", "--quiet"],
+      "env": {
+        "BROWSER_COUNT": "1",
+        "TABS_PER_BROWSER": "5",
+        "CHROME_HEADLESS": "1"
+      }
+    }
+  }
+}

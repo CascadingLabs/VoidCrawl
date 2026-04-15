@@ -1,0 +1,32 @@
+[package]
+name = "voidcrawl_mcp"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "MCP server exposing void_crawl_core stealth browsing to Claude Code"
+
+[[bin]]
+name = "voidcrawl-mcp"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+void_crawl_core = { path = "../core", version = "0.2.3" }
+rmcp = { version = "1.4", features = ["server", "macros", "transport-io"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+thiserror = "2"
+anyhow = "1"
+futures = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "macros", "test-util"] }
