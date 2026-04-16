@@ -28,6 +28,12 @@ pub struct FetchArgs {
     pub timeout_secs: Option<u64>,
 }
 
+/// JSON Schema helper: emit `{}` (any-value) instead of `true`.
+/// Claude Code's validator rejects boolean schemas in outputSchema.properties.
+fn any_value_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    serde_json::Map::new().into()
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct FetchResult {
     pub url:         String,
@@ -35,6 +41,7 @@ pub struct FetchResult {
     pub redirected:  bool,
     pub html:        String,
     pub title:       Option<String>,
+    #[schemars(schema_with = "any_value_schema")]
     pub extracted:   Option<serde_json::Value>,
 }
 
