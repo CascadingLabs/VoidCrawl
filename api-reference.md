@@ -77,6 +77,14 @@ Reads the following variables (all optional):
 +------------------------+---------------------------------+---------+
 | ``CHROME_HEADLESS``    | Set to ``"0"`` for headful      | 1       |
 +------------------------+---------------------------------+---------+
+| ``CDP_PORT_BASE``      | Pin Chrome's debug port;        | —       |
+|                        | browser *i* uses ``base + i``.  |         |
+|                        | Unset = OS-assigned (no         |         |
+|                        | conflict possible).             |         |
++------------------------+---------------------------------+---------+
+| ``CDP_PORTS``          | Comma-separated explicit ports  | —       |
+|                        | used by ``PoolConfig.from_docker``. |     |
++------------------------+---------------------------------+---------+
 **Returns:** `PoolConfig` — A fully-populated `PoolConfig`.
 
 # Sessions & Pools

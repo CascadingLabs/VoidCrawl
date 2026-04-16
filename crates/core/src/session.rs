@@ -45,6 +45,12 @@ pub struct BrowserSessionBuilder {
     proxy:             Option<String>,
     no_sandbox:        bool,
     window_size:       Option<(u32, u32)>,
+    /// Pinned `--remote-debugging-port` for launched Chrome. `None` (default)
+    /// lets the OS pick a free ephemeral port on loopback — never blocks on
+    /// a busy or firewalled address. `Some(n)` forces Chrome to bind that
+    /// port; useful when only specific ports are reachable through a
+    /// firewall or when mapping through Docker.
+    port:              Option<u16>,
     /// Persistent Chrome profile directory. `None` (default) = ephemeral
     /// `TempDir` that is deleted on session drop. `Some(path)` = mount an
     /// existing profile (e.g. one you've logged into `LinkedIn` in) and
@@ -62,6 +68,7 @@ impl Default for BrowserSessionBuilder {
             proxy:             None,
             no_sandbox:        false,
             window_size:       None,
+            port:              None,
             user_data_dir:     None,
         }
     }
@@ -124,6 +131,18 @@ impl BrowserSessionBuilder {
         self
     }
 
+    /// Pin Chrome's `--remote-debugging-port`.
+    ///
+    /// Leave unset to let the OS pick a free ephemeral port (the default and
+    /// the right choice for almost every launch mode — Chrome listens on
+    /// loopback, so port-conflict is the only failure mode it avoids). Set
+    /// when a firewall or container only exposes specific ports, or when
+    /// another tool needs to know the port up front.
+    pub fn port(mut self, port: u16) -> Self {
+        self.port = Some(port);
+        self
+    }
+
     /// Mount a persistent Chrome profile directory. Use this to reuse
     /// an existing login (cookies, local storage, extensions) across
     /// sessions. The directory is NOT deleted when the session closes.
@@ -157,6 +176,7 @@ impl BrowserSessionBuilder {
             self.proxy,
             self.no_sandbox,
             self.window_size,
+            self.port,
             self.user_data_dir,
         )
         .await
@@ -171,6 +191,11 @@ pub struct BrowserSession {
     _handler_task:  JoinHandle<()>,
     handler_alive:  Arc<AtomicBool>,
     stealth:        StealthConfig,
+    /// True when this session attached to an already-running Chrome via
+    /// `BrowserMode::RemoteDebug`. In that case `close()` must NOT send
+    /// `Browser.close` over CDP — doing so terminates the user's Chromium
+    /// process, which we didn't spawn and have no business shutting down.
+    attached:       bool,
     /// Owns the temporary user data directory for launched browsers.
     /// `None` for remote-debug sessions (no local user data dir).
     /// Dropped after `browser` and `_handler_task`, so Chrome has already
@@ -229,6 +254,7 @@ impl BrowserSession {
         proxy: Option<String>,
         no_sandbox: bool,
         window_size: Option<(u32, u32)>,
+        port: Option<u16>,
         persistent_user_data_dir: Option<PathBuf>,
     ) -> Result<Self> {
         let mut owned_user_data_dir: Option<tempfile::TempDir> = None;
@@ -274,6 +300,13 @@ impl BrowserSession {
 
                 if let Some((w, h)) = window_size {
                     builder = builder.window_size(w, h);
+                }
+
+                // Pinned debug port, or `0` (OS-assigned) by default — the
+                // latter avoids port-conflict failures entirely since the
+                // kernel hands out a guaranteed-free ephemeral port.
+                if let Some(p) = port {
+                    builder = builder.port(p);
                 }
 
                 if let Some(ref p) = proxy {
@@ -342,6 +375,7 @@ impl BrowserSession {
             _handler_task: handler_task,
             handler_alive: alive,
             stealth,
+            attached: matches!(mode, BrowserMode::RemoteDebug { .. }),
             _user_data_dir: owned_user_data_dir,
         })
     }
@@ -401,14 +435,26 @@ impl BrowserSession {
 
     /// Gracefully close the browser.
     ///
-    /// Signals Chrome to shut down and waits for the CDP response. The
-    /// temporary user data directory (if any) is cleaned up when this
-    /// `BrowserSession` is subsequently dropped — not immediately here,
-    /// because `close()` takes `&self` and cannot move out the `TempDir`.
+    /// For a launched session this signals Chrome to shut down over CDP and
+    /// cleans up the temporary user data directory when the session is
+    /// dropped. For an attached (`RemoteDebug`) session this is a no-op at
+    /// the CDP level — we only launched a WebSocket connection, not the
+    /// browser process, so we have no mandate to kill it. The connection
+    /// is released when the session is dropped.
     pub async fn close(&self) -> Result<()> {
+        if self.attached {
+            return Ok(());
+        }
         let mut browser = self.browser.lock().await;
         browser.close().await.map_err(|e| VoidCrawlError::Other(e.to_string()))?;
         Ok(())
+    }
+
+    /// True when this session was attached to an already-running browser
+    /// (the `ws_url` / `RemoteDebug` code path).
+    #[must_use]
+    pub fn is_attached(&self) -> bool {
+        self.attached
     }
 
     /// Access stealth config.

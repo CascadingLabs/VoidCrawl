@@ -58,6 +58,7 @@ All knobs are read by `BrowserPool::from_env()` in `void_crawl_core`:
 | `CHROME_WS_URLS`        | —       | Comma-separated CDP WS endpoints to connect to instead of launching. |
 | `VIEWPORT_WIDTH`        | 1920    | Stealth viewport width.                                |
 | `VIEWPORT_HEIGHT`       | 1080    | Stealth viewport height.                               |
+| `CDP_PORT_BASE`         | —       | Pin Chrome's `--remote-debugging-port` for launched browsers (browser *i* gets `base + i`). Unset = OS picks a free ephemeral port, which can't conflict. Set when a firewall only exposes specific ports. |
 
 Logging goes to stderr (`RUST_LOG=voidcrawl_mcp=debug` for more). stdout
 is reserved for the MCP protocol.

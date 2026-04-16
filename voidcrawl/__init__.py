@@ -86,6 +86,39 @@ def _first_unreachable(urls: list[str]) -> str | None:
     return None
 
 
+def _default_docker_ports(*, headful: bool) -> list[int]:
+    """Resolve the default CDP port list for :meth:`PoolConfig.from_docker`.
+
+    Resolution order (first match wins):
+
+    1. ``CDP_PORTS`` — comma-separated explicit list (e.g. ``"12345,12346"``).
+    2. ``CDP_PORT_BASE`` — single integer; yields ``[base, base + 1]``.
+    3. Hard defaults: ``[9222, 9223]`` headless, ``[19222, 19223]`` headful.
+
+    Lets operators avoid hardcoded ports when 9222/19222 collide with
+    something on the host without forking the library or passing ``ports=``
+    at every call site.
+    """
+    raw_list = os.environ.get("CDP_PORTS")
+    if raw_list:
+        parsed = [p.strip() for p in raw_list.split(",") if p.strip()]
+        try:
+            return [int(p) for p in parsed]
+        except ValueError:
+            pass  # fall through to the next strategy on malformed input
+
+    raw_base = os.environ.get("CDP_PORT_BASE")
+    if raw_base:
+        try:
+            base = int(raw_base)
+        except ValueError:
+            base = None
+        if base is not None:
+            return [base, base + 1]
+
+    return [19222, 19223] if headful else [9222, 9223]
+
+
 # ── Configuration models ────────────────────────────────────────────────
 
 
@@ -249,9 +282,11 @@ class PoolConfig(BaseModel):
                 9222/9223).
             host: Hostname where the Docker container is reachable.
                 Defaults to ``"localhost"``.
-            ports: Override the default port list.  When ``None``, uses
-                ``[9222, 9223]`` for headless or ``[19222, 19223]`` for
-                headful.
+            ports: Override the default port list.  When ``None``, the
+                defaults resolve in this order: explicit ``CDP_PORTS``
+                env var (comma-separated), else ``CDP_PORT_BASE`` +
+                ``[0, 1]``, else ``[9222, 9223]`` for headless /
+                ``[19222, 19223]`` for headful.
             tabs_per_browser: Max concurrent tabs per Chrome process.
                 Defaults to ``4``.
             check: Probe each Chrome endpoint before returning and raise
@@ -279,7 +314,7 @@ class PoolConfig(BaseModel):
                     async with pool.acquire() as tab:
                         await tab.goto("https://example.com")
         """
-        default_ports = [19222, 19223] if headful else [9222, 9223]
+        default_ports = _default_docker_ports(headful=headful)
         effective_ports = ports if ports is not None else default_ports
         urls = [f"http://{host}:{port}" for port in effective_ports]
 

@@ -179,6 +179,7 @@ impl BrowserPool {
     /// | `ACQUIRE_TIMEOUT_SECS` | Max seconds to wait in acquire() | `30` |
     /// | `VIEWPORT_WIDTH` | Stealth viewport width | `1920` |
     /// | `VIEWPORT_HEIGHT` | Stealth viewport height | `1080` |
+    /// | `CDP_PORT_BASE` | Pin Chrome's `--remote-debugging-port` for launched browsers. Browser `i` uses `base + i`. Unset = OS-assigned (recommended; can't conflict). | — |
     pub async fn from_env() -> Result<Self> {
         let tabs_per_browser: usize =
             env::var("TABS_PER_BROWSER").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
@@ -194,6 +195,11 @@ impl BrowserPool {
             env::var("VIEWPORT_WIDTH").ok().and_then(|v| v.parse().ok());
         let viewport_height: Option<u32> =
             env::var("VIEWPORT_HEIGHT").ok().and_then(|v| v.parse().ok());
+        // Leave `None` to use chromiumoxide's default (port 0 = OS-assigned),
+        // which avoids every port-conflict failure mode. Only set this when
+        // a firewall / container only exposes specific ports.
+        let cdp_port_base: Option<u16> =
+            env::var("CDP_PORT_BASE").ok().and_then(|v| v.parse().ok());
 
         let sessions = if let Ok(urls) = env::var("CHROME_WS_URLS") {
             // Connect mode: attach to pre-existing Chrome instances **in parallel**
@@ -218,7 +224,7 @@ impl BrowserPool {
                 env::var("BROWSER_COUNT").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
 
             let futs: Vec<_> = (0..browser_count)
-                .map(|_| {
+                .map(|i| {
                     let mut builder = if headless {
                         BrowserSession::builder().headless()
                     } else {
@@ -233,6 +239,14 @@ impl BrowserPool {
                         builder = builder.viewport(w, 1080);
                     } else if let Some(h) = viewport_height {
                         builder = builder.viewport(1920, h);
+                    }
+                    // Browser N gets base+N so launching multiple browsers
+                    // with a pinned base doesn't collide. `base + i` can
+                    // overflow `u16::MAX`; clamp via `saturating_add` and
+                    // let the OS reject it rather than wrap silently.
+                    if let Some(base) = cdp_port_base {
+                        builder =
+                            builder.port(base.saturating_add(u16::try_from(i).unwrap_or(u16::MAX)));
                     }
                     builder.launch()
                 })

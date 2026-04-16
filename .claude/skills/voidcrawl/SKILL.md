@@ -60,5 +60,6 @@ Each subagent returns a distilled finding; the main agent never sees the raw DOM
 
 - **Always `session_close`** when a subagent is done. Otherwise the Chrome stays alive until the server exits.
 - **Pool sizing** is read from env by the server (`BROWSER_COUNT`, `TABS_PER_BROWSER`, `TAB_MAX_USES`, `TAB_MAX_IDLE_SECS`). If `pool_status` shows `max_tabs` too low for your fan-out, tell the user to raise those in the MCP config.
+- **Debug ports**: the MCP itself is stdio — no network port. Launched Chromes default to an OS-assigned ephemeral port on loopback, which never conflicts. If the user needs a pinned port (firewall / container mapping), set `CDP_PORT_BASE=<n>` in the MCP env; browser *i* binds `n + i`. For the Docker container, override with `CDP_PORT_BASE` / `CDP_PORTS` — 9222/9223 aren't privileged, so any free port works.
 - **Stateless vs. stateful**: `fetch*` reuses pool tabs (recycled, not isolated). Use sessions when isolation matters; don't use sessions just to scrape one URL.
 - **Errors**: `invalid_params` usually means a bad selector, URL, or JS expression. `internal_error` usually means a timeout or the browser crashed — retrying once is reasonable.
