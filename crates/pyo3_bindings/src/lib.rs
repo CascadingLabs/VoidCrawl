@@ -444,26 +444,6 @@ impl PyPage {
         with_page!(self, py, |page| page.delete_cookies(vec![params]))
     }
 
-    /// Wait until the DOM stabilises and exceeds `min_length` characters.
-    ///
-    /// Returns True if stabilised within timeout, False otherwise.
-    /// Prevents redirect gates / loading stubs from being treated as content.
-    #[pyo3(signature = (timeout=10.0, min_length=5000, stable_checks=5))]
-    #[allow(deprecated)]
-    fn wait_for_stable_dom<'py>(
-        &self,
-        py: Python<'py>,
-        timeout: f64,
-        min_length: usize,
-        stable_checks: u32,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        with_page!(self, py, |page| page.wait_for_stable_dom(
-            Duration::from_secs_f64(timeout),
-            min_length,
-            stable_checks,
-        ))
-    }
-
     /// Event-driven wait for network idle. No polling.
     ///
     /// Returns the lifecycle event name ("networkIdle" or "networkAlmostIdle")
@@ -935,25 +915,6 @@ impl PyPooledTab {
         params.domain = domain;
         params.path = path;
         with_pooled_page!(self, py, |page| page.delete_cookies(vec![params]))
-    }
-
-    /// Wait until the DOM stabilises and exceeds `min_length` characters.
-    ///
-    /// Returns True if stabilised within timeout, False otherwise.
-    #[pyo3(signature = (timeout=10.0, min_length=5000, stable_checks=5))]
-    #[allow(deprecated)]
-    fn wait_for_stable_dom<'py>(
-        &self,
-        py: Python<'py>,
-        timeout: f64,
-        min_length: usize,
-        stable_checks: u32,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        with_pooled_page!(self, py, |page| page.wait_for_stable_dom(
-            Duration::from_secs_f64(timeout),
-            min_length,
-            stable_checks,
-        ))
     }
 
     /// Event-driven wait for network idle. No polling.

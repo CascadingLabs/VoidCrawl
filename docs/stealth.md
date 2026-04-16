@@ -95,7 +95,7 @@ os.environ["CHROME_HEADLESS"] = "0"
 async with BrowserPool.from_env() as pool:
     async with pool.acquire() as tab:
         await tab.navigate("https://waf-protected-site.com")
-        await tab.wait_for_stable_dom(timeout=15.0)
+        await tab.wait_for_network_idle(timeout=15.0)
         html = await tab.content()
 
 # For unprotected sites — headless is fine and faster
@@ -105,28 +105,23 @@ async with BrowserPool.from_env() as pool:
         html = await tab.content()
 ```
 
-## DOM Stability Waiting
+## Waiting for readiness (event-driven)
 
-JS-heavy sites and WAF challenge pages don't have their content ready at page load. Instead of a blind `sleep()`, use `wait_for_stable_dom()`:
+JS-heavy sites and WAF challenge pages don't have their content ready at page load. void_crawl exposes two event-driven waits — no polling, no sleeps.
 
 ```python
 async with pool.acquire() as tab:
     await tab.navigate(url)
 
-    # Polls every 300ms. Returns True when:
-    #   - innerHTML.length >= min_length (default 5000)
-    #   - Size unchanged for stable_checks consecutive polls (default 5)
-    stabilised = await tab.wait_for_stable_dom(
-        timeout=15.0,      # max seconds to wait
-        min_length=5000,   # min chars before page is "real"
-        stable_checks=5,   # consecutive stable polls required
-    )
+    # Option 1 — wait for Chrome's networkIdle lifecycle event.
+    # Returns the event name on success, None on timeout.
+    await tab.wait_for_network_idle(timeout=15.0)
 
-    if not stabilised:
-        print("Page didn't fully render — may be a stub or redirect gate")
+    # Option 2 — wait for a specific CSS selector to appear.
+    # Driven by an in-page MutationObserver; resolves the moment the
+    # element is inserted (or rejects with a timeout).
+    await tab.wait_for_selector("#results", timeout=15.0)
 ```
-
-This prevents redirect gates, loading spinners, and Akamai challenge pages from being mistaken for real content.
 
 ## Disabling Stealth
 
@@ -154,11 +149,7 @@ DOMContentLoaded → load → networkAlmostIdle → networkIdle
 - **Analytics and telemetry** (Google Analytics, Segment, etc.) fire periodic beacons that reset the 500ms idle window.
 - **Lazy-loaded content** triggers new requests as the page renders, creating a moving target.
 
-On these sites, `networkIdle` may **never fire** — or fire only after an unpredictable delay — making it useless as a reliable readiness signal. `networkAlmostIdle` (≤ 2 in-flight requests for 500ms) is a better fallback but still suffers from the same class of problems with persistent connections.
-
-For now, void_crawl uses **DOM stability polling** (`wait_for_stable_dom`) as the primary readiness check: it measures `document.body.innerHTML.length` over consecutive polls and considers the page ready when the size stabilizes above a minimum threshold. This is more robust for real-world scraping targets than event-driven approaches that assume the network will go quiet.
-
-> **Future direction**: An event-driven approach using CDP lifecycle events could reduce latency for simple static sites. If implemented, it should be used as an optimization hint with DOM stability as the fallback — never as the sole readiness mechanism.
+On these sites, `networkIdle` may **never fire** — or fire only after an unpredictable delay. Prefer `wait_for_selector("<the element you actually care about>")`: it's driven by an in-page `MutationObserver` and fires the moment that element is inserted, regardless of whether the network ever settles.
 
 ## Real-World Results
 

@@ -30,3 +30,7 @@ base64 = "0.22"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "macros", "test-util"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "server"] }
+http-body-util = "0.1"
+bytes = "1"

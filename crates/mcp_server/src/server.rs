@@ -89,9 +89,11 @@ one entry per request in input order; per-request errors do not abort the batch.
 
     #[tool(
         name = "session_open",
-        description = "Open a new stateful browser session with its own isolated profile. \
-Returns a session_id used by session_navigate / session_content / session_close. Each \
-session is a dedicated Chrome, so cookies and storage never leak between sessions."
+        description = "Open a new stateful browser session with a dedicated Chrome instance. \
+Returns a session_id used by session_navigate / session_content / session_close. \
+Pass `user_data_dir` to mount a persistent profile (e.g. one already logged into LinkedIn); \
+omit it for an ephemeral cookieless profile. Set `headful=true` to bring up a visible window \
+(useful for a one-time manual login into the persistent profile)."
     )]
     pub async fn session_open(
         &self,
@@ -103,7 +105,7 @@ session is a dedicated Chrome, so cookies and storage never leak between session
     #[tool(
         name = "session_navigate",
         description = "Navigate the given session to a URL and wait for it to settle. \
-wait_for accepts 'networkidle' (default), 'selector:<css>', or 'ms:<n>'."
+wait_for accepts 'networkidle' (default) or 'selector:<css>' (event-driven, no polling)."
     )]
     pub async fn session_navigate(
         &self,
@@ -141,7 +143,7 @@ Always call this when you're done — otherwise the browser stays alive until th
 sessions are open. Useful for sanity-checking concurrency limits before a fan-out."
     )]
     pub async fn pool_status(&self) -> Result<Json<PoolStatus>, ErrorData> {
-        Ok(Json(tools::introspect::pool_status(self).await))
+        tools::introspect::pool_status(self).await.map(Json).map_err(map_err)
     }
 }
 

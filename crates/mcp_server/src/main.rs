@@ -4,7 +4,6 @@ use std::{io::stderr, sync::Arc};
 
 use rmcp::{ServiceExt, transport::io::stdio};
 use tracing_subscriber::EnvFilter;
-use void_crawl_core::BrowserPool;
 use voidcrawl_mcp::{
     AppState, VoidCrawlServer, sessions::SessionRegistry, tools::session::close_handle,
 };
@@ -20,12 +19,10 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("voidcrawl-mcp starting");
 
-    let pool = Arc::new(BrowserPool::from_env().await?);
-    Arc::clone(&pool).start_eviction_task();
     let sessions = Arc::new(SessionRegistry::default());
-    let state = Arc::new(AppState::new(Arc::clone(&pool), Arc::clone(&sessions)));
+    let state = Arc::new(AppState::new(Arc::clone(&sessions)));
 
-    let server = VoidCrawlServer::new(state);
+    let server = VoidCrawlServer::new(Arc::clone(&state));
     let service = server.serve(stdio()).await?;
 
     tracing::info!("voidcrawl-mcp ready");
@@ -37,8 +34,10 @@ async fn main() -> anyhow::Result<()> {
             tracing::warn!(error = %e, "failed to close dedicated session");
         }
     }
-    if let Err(e) = pool.close().await {
-        tracing::warn!(error = %e, "failed to close browser pool");
+    if let Some(pool) = state.pool_if_initialized() {
+        if let Err(e) = pool.close().await {
+            tracing::warn!(error = %e, "failed to close browser pool");
+        }
     }
 
     Ok(())

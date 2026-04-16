@@ -18,8 +18,7 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 pub struct ScreenshotArgs {
     /// Absolute URL to capture.
     pub url:          String,
-    /// Optional wait strategy: "networkidle" (default), "selector:<css>", or
-    /// "ms:<n>".
+    /// Optional wait strategy: "networkidle" (default) or "selector:<css>".
     #[serde(default)]
     pub wait_for:     Option<String>,
     /// Navigation + wait timeout in seconds (default 30).
@@ -31,7 +30,7 @@ pub async fn run(
     server: &VoidCrawlServer,
     args: ScreenshotArgs,
 ) -> Result<CallToolResult, ErrorData> {
-    let pool = server.state().pool.clone();
+    let pool = server.state().pool().await.map_err(map_err)?;
     let tab = pool.acquire().await.map_err(map_err)?;
     let bytes_result = async {
         let timeout = Duration::from_secs(args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));

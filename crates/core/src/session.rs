@@ -2,6 +2,7 @@
 
 use std::{
     fmt,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -44,6 +45,11 @@ pub struct BrowserSessionBuilder {
     proxy:             Option<String>,
     no_sandbox:        bool,
     window_size:       Option<(u32, u32)>,
+    /// Persistent Chrome profile directory. `None` (default) = ephemeral
+    /// `TempDir` that is deleted on session drop. `Some(path)` = mount an
+    /// existing profile (e.g. one you've logged into `LinkedIn` in) and
+    /// leave the directory on disk after the session ends.
+    user_data_dir:     Option<PathBuf>,
 }
 
 impl Default for BrowserSessionBuilder {
@@ -56,6 +62,7 @@ impl Default for BrowserSessionBuilder {
             proxy:             None,
             no_sandbox:        false,
             window_size:       None,
+            user_data_dir:     None,
         }
     }
 }
@@ -117,6 +124,18 @@ impl BrowserSessionBuilder {
         self
     }
 
+    /// Mount a persistent Chrome profile directory. Use this to reuse
+    /// an existing login (cookies, local storage, extensions) across
+    /// sessions. The directory is NOT deleted when the session closes.
+    ///
+    /// Pick a directory dedicated to `void_crawl` — Chrome locks a
+    /// profile while it's running, so pointing at your daily-driver
+    /// profile while your real Chrome is open will fail to launch.
+    pub fn user_data_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.user_data_dir = Some(path.into());
+        self
+    }
+
     /// Override the stealth viewport dimensions.
     ///
     /// This sets the CDP device metrics override that the page reports to
@@ -138,6 +157,7 @@ impl BrowserSessionBuilder {
             self.proxy,
             self.no_sandbox,
             self.window_size,
+            self.user_data_dir,
         )
         .await
     }
@@ -200,6 +220,7 @@ impl BrowserSession {
     }
 
     /// Internal factory that handles all three modes.
+    #[allow(clippy::too_many_arguments, reason = "builder forwards all options at once")]
     async fn connect_or_launch(
         mode: BrowserMode,
         stealth: StealthConfig,
@@ -208,6 +229,7 @@ impl BrowserSession {
         proxy: Option<String>,
         no_sandbox: bool,
         window_size: Option<(u32, u32)>,
+        persistent_user_data_dir: Option<PathBuf>,
     ) -> Result<Self> {
         let mut owned_user_data_dir: Option<tempfile::TempDir> = None;
 
@@ -224,14 +246,19 @@ impl BrowserSession {
                 // both are instant giveaways to WAFs like Akamai.
                 let mut builder = BrowserConfig::builder().disable_default_args();
 
-                // Each browser instance needs its own user data dir to avoid
-                // SingletonLock conflicts when launching multiple browsers.
-                // Store the TempDir in `owned_user_data_dir` so it is kept
-                // alive for the lifetime of `BrowserSession` and cleaned up
-                // automatically on drop (instead of leaking with `.keep()`).
-                let user_data_dir = tempfile::tempdir()
-                    .map_err(|e| VoidCrawlError::LaunchFailed(format!("tmpdir: {e}")))?;
-                builder = builder.user_data_dir(user_data_dir.path());
+                // Caller-supplied persistent profile vs. ephemeral
+                // `TempDir`. The ephemeral path handles SingletonLock
+                // conflicts across concurrent browsers automatically;
+                // the persistent path is the caller's problem (they
+                // chose it, so don't pick their live daily-driver).
+                if let Some(ref path) = persistent_user_data_dir {
+                    builder = builder.user_data_dir(path);
+                } else {
+                    let tmp = tempfile::tempdir()
+                        .map_err(|e| VoidCrawlError::LaunchFailed(format!("tmpdir: {e}")))?;
+                    builder = builder.user_data_dir(tmp.path());
+                    owned_user_data_dir = Some(tmp);
+                }
 
                 if matches!(mode, BrowserMode::Headful) {
                     builder = builder.with_head();
@@ -301,13 +328,9 @@ impl BrowserSession {
 
                 let config = builder.build().map_err(VoidCrawlError::LaunchFailed)?;
 
-                let result = Browser::launch(config)
+                Browser::launch(config)
                     .await
-                    .map_err(|e| VoidCrawlError::LaunchFailed(e.to_string()))?;
-                // Store only after a successful launch so a failed launch
-                // still drops (and cleans up) the TempDir here.
-                owned_user_data_dir = Some(user_data_dir);
-                result
+                    .map_err(|e| VoidCrawlError::LaunchFailed(e.to_string()))?
             }
         };
 

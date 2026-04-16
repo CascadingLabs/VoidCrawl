@@ -286,43 +286,46 @@ impl Page {
         if got_almost_idle { Ok(Some("networkAlmostIdle".into())) } else { Ok(None) }
     }
 
-    /// Polling-based DOM stability check. Kept for backward compatibility
-    /// with code that needs a content-length guard.
-    #[deprecated(since = "0.2.0", note = "use wait_for_network_idle instead")]
-    pub async fn wait_for_stable_dom(
-        &self,
-        timeout: Duration,
-        min_length: usize,
-        stable_checks: u32,
-    ) -> Result<bool> {
-        let deadline = time::Instant::now() + timeout;
-        let poll_interval = Duration::from_millis(200);
-        let mut previous_size: usize = 0;
-        let mut stable_count: u32 = 0;
-
-        while time::Instant::now() < deadline {
-            let size: usize = usize::try_from(
-                self.evaluate_js("document.body ? document.body.innerHTML.length : 0")
-                    .await?
-                    .as_u64()
-                    .unwrap_or(0),
-            )
-            .unwrap_or(0);
-
-            if size >= min_length && size == previous_size {
-                stable_count += 1;
-                if stable_count >= stable_checks {
-                    return Ok(true);
+    /// Wait until `document.querySelector(selector)` matches an element,
+    /// driven by a `MutationObserver` inside the page — no Rust-side polling.
+    /// Resolves immediately if the element is already present. Rejects with
+    /// `VoidCrawlError::Timeout` after `timeout`.
+    pub async fn wait_for_selector(&self, selector: &str, timeout: Duration) -> Result<()> {
+        let sel_lit = serde_json::to_string(selector)
+            .map_err(|e| VoidCrawlError::Other(format!("selector encode: {e}")))?;
+        let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+        let js = format!(
+            "() => new Promise((resolve, reject) => {{\
+              const sel = {sel_lit};\
+              if (document.querySelector(sel)) return resolve(true);\
+              const root = document.documentElement || document.body;\
+              const obs = new MutationObserver(() => {{\
+                if (document.querySelector(sel)) {{\
+                  obs.disconnect();\
+                  clearTimeout(t);\
+                  resolve(true);\
+                }}\
+              }});\
+              obs.observe(root, {{ childList: true, subtree: true }});\
+              const t = setTimeout(() => {{\
+                obs.disconnect();\
+                reject(new Error('wait_for_selector timeout: ' + sel));\
+              }}, {timeout_ms});\
+            }})"
+        );
+        match self.inner.evaluate_function(js).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("wait_for_selector timeout") {
+                    Err(VoidCrawlError::Timeout(format!(
+                        "selector {selector:?} did not appear within {timeout_ms}ms"
+                    )))
+                } else {
+                    Err(VoidCrawlError::JsEvalError(msg))
                 }
-            } else {
-                stable_count = 0;
-                previous_size = size;
             }
-
-            time::sleep(poll_interval).await;
         }
-
-        Ok(false)
     }
 
     // ── Content ─────────────────────────────────────────────────────────

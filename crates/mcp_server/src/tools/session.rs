@@ -3,7 +3,7 @@
 //! hold the returned `session_id` across tool calls until
 //! `session_close`.
 
-use std::{sync::Arc, time::Duration};
+use std::{env, sync::Arc, time::Duration};
 
 use rmcp::ErrorData;
 use schemars::JsonSchema;
@@ -19,11 +19,22 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 #[derive(Debug, Deserialize, JsonSchema, Default)]
 pub struct SessionOpenArgs {
     /// Run headful (visible) instead of headless. Default is headless.
+    /// Set this to true if you want to log into a site manually in the
+    /// spawned Chrome window (pair with `user_data_dir` to persist).
     #[serde(default)]
-    pub headful: bool,
+    pub headful:       bool,
     /// Optional proxy URL (e.g. "http://user:pass@host:port").
     #[serde(default)]
-    pub proxy:   Option<String>,
+    pub proxy:         Option<String>,
+    /// Persistent Chrome profile directory. Omit for an ephemeral,
+    /// cookieless profile. Provide a path (e.g.
+    /// `~/.config/voidcrawl-linkedin`) to mount a profile across
+    /// sessions — log in once with `headful=true`, then subsequent
+    /// sessions reuse the cookie. Pick a path DEDICATED to voidcrawl;
+    /// Chrome locks a profile while running, so pointing at your
+    /// daily-driver profile while normal Chrome is open will fail.
+    #[serde(default)]
+    pub user_data_dir: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -35,6 +46,7 @@ pub struct SessionOpenResult {
 pub struct SessionNavigateArgs {
     pub session_id:   String,
     pub url:          String,
+    /// "networkidle" (default) or "selector:<css>". Event-driven.
     #[serde(default)]
     pub wait_for:     Option<String>,
     #[serde(default)]
@@ -73,6 +85,9 @@ pub async fn open(
     builder = if args.headful { builder.headful() } else { builder.headless() };
     if let Some(proxy) = args.proxy {
         builder = builder.proxy(proxy);
+    }
+    if let Some(path) = args.user_data_dir {
+        builder = builder.user_data_dir(expand_tilde(&path));
     }
     let session = builder.launch().await.map_err(map_err)?;
     let page = session.new_blank_page().await.map_err(map_err)?;
@@ -134,4 +149,20 @@ async fn lookup(server: &VoidCrawlServer, id: &str) -> Result<Arc<DedicatedSessi
 /// Shut down the browser backing a session.
 pub async fn close_handle(handle: Arc<DedicatedSession>) -> Result<(), VoidCrawlError> {
     handle.session.close().await
+}
+
+/// Expand a leading `~/` or bare `~` using the `HOME` env var. Returns
+/// the input unchanged if `~` isn't leading or if `HOME` is unset —
+/// callers pass absolute paths, so either behaviour is a no-op in the
+/// common case.
+fn expand_tilde(path: &str) -> String {
+    let Some(rest) = path.strip_prefix('~') else { return path.to_owned() };
+    let Ok(home) = env::var("HOME") else { return path.to_owned() };
+    if rest.is_empty() {
+        home
+    } else if let Some(tail) = rest.strip_prefix('/') {
+        format!("{home}/{tail}")
+    } else {
+        path.to_owned()
+    }
 }

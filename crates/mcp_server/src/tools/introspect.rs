@@ -2,6 +2,7 @@
 
 use schemars::JsonSchema;
 use serde::Serialize;
+use void_crawl_core::Result;
 
 use crate::server::VoidCrawlServer;
 
@@ -15,15 +16,16 @@ pub struct PoolStatus {
     pub sessions_open:     usize,
 }
 
-pub async fn pool_status(server: &VoidCrawlServer) -> PoolStatus {
-    let cfg = server.state().pool.config();
+pub async fn pool_status(server: &VoidCrawlServer) -> Result<PoolStatus> {
+    let pool = server.state().pool().await?;
+    let cfg = pool.config();
     let sessions_open = server.state().sessions.len().await;
-    PoolStatus {
+    Ok(PoolStatus {
         browsers: cfg.browsers,
         tabs_per_browser: cfg.tabs_per_browser,
         max_tabs: cfg.browsers.saturating_mul(cfg.tabs_per_browser),
         tab_max_uses: cfg.tab_max_uses,
         tab_max_idle_secs: cfg.tab_max_idle_secs,
         sessions_open,
-    }
+    })
 }

@@ -35,9 +35,10 @@ Default: if neither side of the decision fits exactly, voidcrawl is the safer pi
 | Check concurrency headroom | `pool_status` | Useful before kicking off a big fan-out. |
 
 ### `wait_for` knob (shared by fetch/screenshot/session_navigate)
-- `"networkidle"` — default; wait for Chrome's network-idle lifecycle event.
-- `"selector:<css>"` — wait until a CSS selector matches.
-- `"ms:<n>"` — fixed duration sleep (coarse fallback).
+- `"networkidle"` — default; driven by Chrome's network-idle lifecycle event.
+- `"selector:<css>"` — driven by an in-page `MutationObserver`.
+
+Both are event-driven — zero Rust-side polling, zero sleep-based fallbacks. If a selector never appears within `timeout_secs`, you get a proper `Timeout` error, not a tight loop.
 
 ### `extract` knob on `fetch`/`fetch_many`
 Pass a JS expression evaluated in the page after the wait. Its return value comes back as `extracted`. Example: `"document.querySelector('h1').innerText"`.

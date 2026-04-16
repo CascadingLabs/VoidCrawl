@@ -156,23 +156,6 @@ class PooledTab:
             path: Cookie path.
         """
         ...
-    async def wait_for_stable_dom(
-        self, timeout: float = 10.0, min_length: int = 5000, stable_checks: int = 5
-    ) -> bool:
-        """Wait until the DOM stabilises (stops changing).
-
-        Polls the HTML length repeatedly and resolves once it stays
-        constant across *stable_checks* consecutive checks.
-
-        Args:
-            timeout: Maximum seconds to wait.
-            min_length: Minimum HTML length before checking stability.
-            stable_checks: Consecutive unchanged polls required.
-
-        Returns:
-            ``True`` if the DOM stabilised, ``False`` on timeout.
-        """
-        ...
     async def wait_for_network_idle(self, timeout: float = 30.0) -> str | None:
         """Wait for network activity to settle.
 
@@ -345,11 +328,6 @@ class Page:
         path: str | None = None,
     ) -> None:
         """Delete a cookie by name, optionally scoped to a domain and path."""
-        ...
-    async def wait_for_stable_dom(
-        self, timeout: float = 10.0, min_length: int = 5000, stable_checks: int = 5
-    ) -> bool:
-        """Wait until the DOM stabilises (stops changing)."""
         ...
     async def wait_for_network_idle(self, timeout: float = 30.0) -> str | None:
         """Wait for network activity to settle."""

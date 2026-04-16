@@ -15,8 +15,8 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 pub struct FetchArgs {
     /// Absolute URL to load.
     pub url:          String,
-    /// Optional wait strategy: "networkidle" (default), "selector:<css>", or
-    /// "ms:<n>".
+    /// Optional wait strategy: "networkidle" (default) or "selector:<css>".
+    /// Both are event-driven — no polling, no sleeps.
     #[serde(default)]
     pub wait_for:     Option<String>,
     /// Optional JavaScript expression evaluated after the wait. Its
@@ -59,7 +59,7 @@ pub struct FetchManyResult {
 }
 
 pub async fn run(server: &VoidCrawlServer, args: FetchArgs) -> Result<FetchResult, VoidCrawlError> {
-    let pool = server.state().pool.clone();
+    let pool = server.state().pool().await?;
     let tab = pool.acquire().await?;
     let result = fetch_on_tab(&tab, args).await;
     pool.release(tab).await;
