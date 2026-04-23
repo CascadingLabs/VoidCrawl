@@ -198,6 +198,85 @@ jobs:
           name: wheels-${{ matrix.target }}
           path: dist/*.whl
 
+  # ── Build voidcrawl-mcp wheels (standalone binary package) ──────────────
+  # Reduced matrix vs the extension — no Claude Code users on ppc64le/riscv.
+  build-mcp-wheels:
+    name: Build MCP (${{ matrix.target }})
+    needs: [rust-checks]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: auto
+          - runner: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            manylinux: auto
+            docker-options: -e "CFLAGS_aarch64_unknown_linux_gnu=-march=armv8-a -D__ARM_ARCH=8"
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            manylinux: musllinux_1_2
+          - runner: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            manylinux: musllinux_1_2
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            manylinux: ""
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            manylinux: ""
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            manylinux: ""
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Build wheels (bin bindings)
+        uses: PyO3/maturin-action@04ac600d27cdf7a9a280dadf7147097c42b757ad # v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          # --manifest-path points at the MCP crate's Cargo.toml. maturin
+          # picks up crates/mcp_server/pyproject.toml alongside it and
+          # ships the `voidcrawl-mcp` binary as a py3-none-<platform> wheel.
+          args: >-
+            --release
+            --manifest-path crates/mcp_server/Cargo.toml
+            --out dist
+          sccache: "true"
+          docker-options: ${{ matrix.docker-options }}
+          working-directory: crates/mcp_server
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
+        with:
+          name: wheels-mcp-${{ matrix.target }}
+          path: crates/mcp_server/dist/*.whl
+
+  build-mcp-sdist:
+    name: Build MCP sdist
+    needs: [rust-checks]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@04ac600d27cdf7a9a280dadf7147097c42b757ad # v1
+        with:
+          command: sdist
+          args: --manifest-path crates/mcp_server/Cargo.toml --out dist
+          working-directory: crates/mcp_server
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
+        with:
+          name: sdist-mcp
+          path: crates/mcp_server/dist/*.tar.gz
+
   # ── Build source distribution ────────────────────────────────────────────
   build-sdist:
     name: Build sdist
@@ -219,30 +298,116 @@ jobs:
           name: sdist
           path: dist/*.tar.gz
 
-  # ── Publish to PyPI ──────────────────────────────────────────────────────
+  # ── Publish voidcrawl to PyPI ───────────────────────────────────────────
   publish-pypi:
-    name: Publish to PyPI
+    name: Publish voidcrawl to PyPI
     runs-on: ubuntu-latest
     needs: [build-wheels, build-sdist]
     environment:
       name: pypi
       url: https://pypi.org/p/voidcrawl
     steps:
-      - name: Download all artifacts
+      - name: Download voidcrawl artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
+          # Only voidcrawl extension wheels + sdist — voidcrawl-mcp has
+          # its own publish job below.
+          pattern: "{wheels-*,sdist}"
           merge-multiple: true
           path: dist
+
+      - name: Strip MCP wheels from dist
+        # download-artifact's pattern matches "wheels-mcp-*" too; exclude
+        # them before publish so PyPI only sees voidcrawl files.
+        run: |
+          ls dist/
+          # Safety net — no-op if none match.
+          find dist/ -name "voidcrawl_mcp-*" -delete || true
+          find dist/ -name "voidcrawl-mcp-*" -delete || true
+          ls dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@76f52bc884231f62b9a034ebfe128415bbaabdfc # v1
         # Uses OIDC trusted publishing — no token needed if configured on PyPI
 
+  # ── Publish voidcrawl-mcp to PyPI ───────────────────────────────────────
+  # First-publish prerequisite: create the `voidcrawl-mcp` project on PyPI
+  # and add a Trusted Publisher entry pointing at this repo + this workflow.
+  # Without that, this job fails with 403 on the very first run and you
+  # need to either do a one-time token-based publish or configure the
+  # publisher before tagging.
+  publish-pypi-mcp:
+    name: Publish voidcrawl-mcp to PyPI
+    runs-on: ubuntu-latest
+    needs: [build-mcp-wheels, build-mcp-sdist]
+    environment:
+      name: pypi-mcp
+      url: https://pypi.org/p/voidcrawl-mcp
+    steps:
+      - name: Download MCP artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: "{wheels-mcp-*,sdist-mcp}"
+          merge-multiple: true
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@76f52bc884231f62b9a034ebfe128415bbaabdfc # v1
+
+  # ── Publish Rust crates to crates.io ────────────────────────────────────
+  # Publishes `void_crawl_core` first, waits briefly for the crates.io
+  # index to propagate, then publishes `voidcrawl-mcp` which depends on it.
+  # Requires a `CARGO_REGISTRY_TOKEN` repo secret.
+  publish-crates-io:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    needs: [rust-checks, python-tests]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Publish void_crawl_core
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        # --no-verify skips a redundant rebuild — rust-checks already
+        # covered that. `|| exit 0` on "already uploaded" lets re-tags
+        # succeed when bumping only voidcrawl-mcp.
+        run: |
+          cargo publish -p void_crawl_core --no-verify \
+            || (cargo search void_crawl_core | grep -q "$(grep '^version' crates/core/Cargo.toml | head -1 | cut -d'"' -f2)" && echo "already published" || exit 1)
+
+      - name: Wait for crates.io index
+        run: sleep 45
+
+      - name: Publish voidcrawl-mcp
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cargo publish -p voidcrawl-mcp --no-verify \
+            || (cargo search voidcrawl-mcp | grep -q "$(grep '^version' crates/mcp_server/Cargo.toml | head -1 | cut -d'"' -f2)" && echo "already published" || exit 1)
+
   # ── Create GitHub Release ────────────────────────────────────────────────
   github-release:
     name: GitHub Release
     runs-on: ubuntu-latest
-    needs: [build-wheels, build-sdist]
+    needs:
+      [
+        build-wheels,
+        build-sdist,
+        build-mcp-wheels,
+        build-mcp-sdist,
+        publish-pypi,
+        publish-pypi-mcp,
+        publish-crates-io,
+      ]
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8

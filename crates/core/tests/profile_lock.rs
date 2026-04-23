@@ -1,10 +1,6 @@
-//! Cross-process profile lock contention. Uses a fake profile dir
-//! (Preferences file) under a tempdir so it doesn't touch a real
-//! Chrome install. Chrome is NOT launched — these tests verify only
-//! the lock-file arbitration layer.
-//!
-//! We exercise the lock layer directly via `fs2` to avoid spawning
-//! Chrome from the test binary.
+//! Profile discovery + lock arbitration. Chrome is NOT launched —
+//! tests exercise only the lock-file layer against fake profile
+//! directories in a tempdir.
 
 #![allow(
     clippy::expect_used,
@@ -15,13 +11,9 @@
     clippy::useless_vec
 )]
 
-use std::{
-    fs::{File, OpenOptions},
-    path::PathBuf,
-    time::Duration,
-};
+use std::{fs::OpenOptions, path::PathBuf, time::Duration};
 
-use fs2::FileExt;
+use fd_lock::RwLock as FileLock;
 use tempfile::TempDir;
 use void_crawl_core::{error::VoidCrawlError, profile};
 
@@ -33,26 +25,22 @@ fn make_fake_profile(base: &TempDir, name: &str) -> PathBuf {
 }
 
 #[test]
-fn list_profiles_returns_names_for_dirs_with_preferences() {
+fn list_profiles_filters_non_profile_dirs() {
     let tmp = tempfile::tempdir().unwrap();
     make_fake_profile(&tmp, "Default");
     make_fake_profile(&tmp, "Profile 1");
-    // Non-profile directory — should be ignored (no Preferences file).
     std::fs::create_dir_all(tmp.path().join("Crashpad")).unwrap();
 
-    let bases = vec![tmp.path().to_path_buf()];
-    let mut names: Vec<String> = std::fs::read_dir(&bases[0])
+    let mut names: Vec<String> = std::fs::read_dir(tmp.path())
         .unwrap()
-        .filter_map(|e| e.ok())
+        .filter_map(Result::ok)
         .filter(|e| e.path().join("Preferences").is_file())
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
     assert_eq!(names, vec!["Default".to_string(), "Profile 1".to_string()]);
 
-    // Also check that `chrome_user_data_dirs()` returns a non-empty
-    // vec on this host (doesn't assert the specific paths — only that
-    // platform detection compiled).
+    // Platform-default dir detection compiles and runs.
     let _ = profile::chrome_user_data_dirs();
 }
 
@@ -66,35 +54,30 @@ fn resolve_profile_returns_not_found_for_unknown() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn lock_file_exclusion_is_exclusive() {
-    // Verify fs2 advisory-lock semantics on this host. Two processes
-    // (simulated via two File handles) can't hold exclusive locks
-    // on the same path simultaneously.
+async fn fd_lock_file_exclusion_is_exclusive() {
+    // Sanity-check fd-lock semantics on this host. Two in-process
+    // locks on the same file path can't both hold the write guard.
     let tmp = tempfile::tempdir().unwrap();
     let dir = make_fake_profile(&tmp, "Default");
     let lock_path = dir.join(".voidcrawl.lock");
 
-    let f1 = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .unwrap();
-    f1.try_lock_exclusive().expect("first lock should succeed");
+    let open = || {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap()
+    };
 
-    let f2: File = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .unwrap();
-    let r = f2.try_lock_exclusive();
-    assert!(r.is_err(), "second lock should fail while first is held");
+    let mut lock1 = FileLock::new(open());
+    let guard1 = lock1.try_write().expect("first lock should succeed");
 
-    drop(f1);
-    // Small pause so the OS releases; then second acquire should succeed.
+    let mut lock2 = FileLock::new(open());
+    assert!(lock2.try_write().is_err(), "second lock should fail while first is held");
+
+    drop(guard1);
     tokio::time::sleep(Duration::from_millis(20)).await;
-    f2.try_lock_exclusive().expect("after release, second lock should succeed");
+    lock2.try_write().expect("after release, second lock should succeed");
 }

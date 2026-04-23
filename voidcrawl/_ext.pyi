@@ -287,6 +287,26 @@ class Page:
     async def screenshot_png(self) -> bytes:
         """Capture a full-page screenshot as PNG bytes."""
         ...
+    async def screenshot(
+        self,
+        path: str | None = None,
+        bbox: tuple[int, int, int, int] | None = None,
+    ) -> bytes | str:
+        """Capture a PNG screenshot with optional disk output and/or crop.
+
+        Args:
+            path: If set, writes PNG to this path and returns the path.
+                If omitted, returns raw bytes.
+            bbox: Optional ``(x, y, width, height)`` in CSS pixels.
+        """
+        ...
+    async def detect_captcha(self) -> str | None:
+        """Probe DOM for captcha / bot-wall markers.
+
+        Returns one of ``"recaptcha"``, ``"hcaptcha"``, ``"turnstile"``,
+        ``"cloudflare_challenge"``, ``"datadome"`` — or ``None``.
+        """
+        ...
     async def pdf_bytes(self) -> bytes:
         """Render the page as a PDF and return the raw bytes."""
         ...
@@ -384,3 +404,47 @@ class BrowserSession:
     async def __aexit__(
         self, exc_type: object = None, exc_val: object = None, exc_tb: object = None
     ) -> bool: ...
+
+# ── Profiles ────────────────────────────────────────────────────────────
+
+class ProfileHandle:
+    """Live lease on a Chrome profile.
+
+    Use as an async context manager, or call :meth:`release` explicitly.
+    Obtain one via :func:`voidcrawl.acquire_profile` or
+    :func:`voidcrawl.with_profile`.
+    """
+
+    name: str
+    async def path(self) -> str: ...
+    async def new_page(self, url: str) -> Page: ...
+    async def release(self) -> None: ...
+    async def __aenter__(self) -> ProfileHandle: ...
+    async def __aexit__(
+        self, exc_type: object, exc_val: object, exc_tb: object
+    ) -> None: ...
+
+def py_list_profiles() -> list[tuple[str, str]]: ...
+async def py_acquire_profile(
+    name: str,
+    lease_timeout: float = 300.0,
+    headless: bool = True,
+) -> ProfileHandle: ...
+
+# ── Exceptions ──────────────────────────────────────────────────────────
+# ruff: noqa: N818  — these are the public exception names, preserved for API compat
+
+class VoidCrawlError(Exception):
+    """Base class for all voidcrawl errors raised from the native extension."""
+
+class ProfileBusy(VoidCrawlError):
+    """Another voidcrawl process holds the profile lock (non-blocking acquire)."""
+
+class ProfileLeaseExpired(VoidCrawlError):
+    """Timed out waiting for the profile lock."""
+
+class ProfileNotFound(VoidCrawlError):
+    """No matching profile directory in the platform default dirs."""
+
+class CaptchaDetected(VoidCrawlError):
+    """DOM markers indicate a captcha / bot-wall challenge on the page."""

@@ -59,7 +59,12 @@ def list_profiles() -> list[tuple[str, str]]:
     return py_list_profiles()
 
 
-async def acquire_profile(name: str, lease_timeout: float = 300.0) -> ProfileHandle:
+async def acquire_profile(
+    name: str,
+    lease_timeout: float = 300.0,
+    *,
+    headless: bool = True,
+) -> ProfileHandle:
     """Acquire an exclusive lease on a Chrome profile.
 
     Args:
@@ -67,6 +72,9 @@ async def acquire_profile(name: str, lease_timeout: float = 300.0) -> ProfileHan
             ``"Default"``, ``"Profile 1"``).
         lease_timeout: Seconds to poll for the lock before giving up.
             ``0`` means fail immediately if busy.
+        headless: Run Chrome in headless mode (default). Set ``False``
+            for a visible window — useful for a one-time manual login
+            before the profile is used for scraping.
 
     Raises:
         ProfileBusy: Another voidcrawl process holds the lock and the
@@ -75,12 +83,15 @@ async def acquire_profile(name: str, lease_timeout: float = 300.0) -> ProfileHan
         ProfileNotFound: No matching profile directory in the platform
             default dirs.
     """
-    return await py_acquire_profile(name, lease_timeout)
+    return await py_acquire_profile(name, lease_timeout, headless)
 
 
 @asynccontextmanager
 async def with_profile(
-    name: str, lease_timeout: float = 300.0
+    name: str,
+    lease_timeout: float = 300.0,
+    *,
+    headless: bool = True,
 ) -> AsyncIterator[ProfileHandle]:
     """Async context manager: acquire, yield, release.
 
@@ -89,8 +100,11 @@ async def with_profile(
         async with with_profile("Default") as handle:
             page = await handle.new_page("https://linkedin.com/in/me")
             html = await page.content()
+
+    Pass ``headless=False`` to see the Chrome window (e.g. for a
+    manual login flow).
     """
-    handle = await acquire_profile(name, lease_timeout)
+    handle = await acquire_profile(name, lease_timeout, headless=headless)
     try:
         yield handle
     finally:

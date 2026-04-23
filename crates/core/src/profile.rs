@@ -15,7 +15,7 @@ use std::{
     time::Duration,
 };
 
-use fs2::FileExt;
+use fd_lock::{RwLock as FileLock, RwLockWriteGuard};
 use tokio::time::{Instant, sleep};
 
 use crate::{
@@ -39,9 +39,11 @@ pub struct ProfileHandle {
     name:    String,
     path:    PathBuf,
     session: Option<BrowserSession>,
-    // Holding the File keeps the fs2 advisory lock; dropping it
-    // releases via the OS.
-    _lock:   File,
+    // Write guard on a leaked `'static` `FileLock`. Dropping the guard
+    // releases the OS-level advisory lock. We leak one `FileLock` (and
+    // its underlying `File`) per profile lease — profile leases are
+    // long-lived and acquired rarely, so the cost is negligible.
+    _lock:   RwLockWriteGuard<'static, File>,
 }
 
 impl fmt::Debug for ProfileHandle {
@@ -134,8 +136,12 @@ pub fn resolve_profile(name: &str) -> Result<PathBuf> {
 /// with [`VoidCrawlError::ProfileLeaseExpired`]. If another voidcrawl
 /// process holds the lock for the entire duration, this returns
 /// [`VoidCrawlError::ProfileBusy`].
-pub async fn acquire_profile(name: &str, lease_timeout: Duration) -> Result<ProfileHandle> {
-    acquire_profile_in(name, &chrome_user_data_dirs(), lease_timeout).await
+pub async fn acquire_profile(
+    name: &str,
+    lease_timeout: Duration,
+    headless: bool,
+) -> Result<ProfileHandle> {
+    acquire_profile_in(name, &chrome_user_data_dirs(), lease_timeout, headless).await
 }
 
 /// Same as [`acquire_profile`] but searches the caller-supplied base
@@ -144,6 +150,7 @@ pub async fn acquire_profile_in(
     name: &str,
     bases: &[PathBuf],
     lease_timeout: Duration,
+    headless: bool,
 ) -> Result<ProfileHandle> {
     let mut searched = Vec::new();
     let mut path = None;
@@ -167,35 +174,58 @@ pub async fn acquire_profile_in(
         .open(&lock_path)
         .map_err(|e| VoidCrawlError::Other(format!("open {}: {e}", lock_path.display())))?;
 
-    // Poll for an exclusive advisory lock. fs2::try_lock_exclusive
-    // returns immediately; we sleep between attempts so we don't
-    // starve the tokio runtime.
+    // fd-lock's write guard borrows from its RwLock, so we can't store
+    // both in the same struct without self-referential gymnastics.
+    // Instead we leak the RwLock to 'static and stash the guard in the
+    // handle. One leaked File per profile lease — acquired rarely,
+    // held long-term. Polling uses a raw pointer because NLL extends
+    // every mutable reborrow across the loop body back to the successful
+    // iteration's lifetime.
+    // `SendPtr` is a `*mut` wrapper we can carry across `.await` points.
+    // `FileLock<File>` is semantically `Send` (it wraps a `File`), but the
+    // raw-pointer escape hatch we use below strips that automatically, so
+    // we reinstate it explicitly.
+    struct SendPtr(*mut FileLock<File>);
+    // SAFETY: `SendPtr` is only used by the single owning task. No shared
+    // access; the `Send` impl only matters for tokio moving the future
+    // between worker threads.
+    unsafe impl Send for SendPtr {}
+
+    let lock_box: Box<FileLock<File>> = Box::new(FileLock::new(file));
+    let lock_ptr = SendPtr(Box::leak(lock_box));
+
     let deadline = Instant::now() + lease_timeout;
-    loop {
-        match file.try_lock_exclusive() {
-            Ok(()) => break,
-            Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                if Instant::now() >= deadline {
-                    return Err(if lease_timeout.is_zero() {
-                        VoidCrawlError::ProfileBusy { name: name.to_string() }
-                    } else {
-                        VoidCrawlError::ProfileLeaseExpired {
-                            name:         name.to_string(),
-                            timeout_secs: lease_timeout.as_secs(),
-                        }
-                    });
-                }
-                sleep(Duration::from_millis(100)).await;
-            }
+    let guard: RwLockWriteGuard<'static, File> = loop {
+        // SAFETY: `lock_ptr.0` points to a `Box::leak`'d, `'static` allocation
+        // that no one else holds. We create a unique `&'static mut` at most
+        // once per iteration; successful iterations move the guard out and
+        // exit the loop, so only one outstanding borrow ever exists.
+        let attempt = unsafe { (*lock_ptr.0).try_write() };
+        match attempt {
+            Ok(g) => break g,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {}
             Err(e) => {
                 return Err(VoidCrawlError::Other(format!("lock {}: {e}", lock_path.display())));
             }
         }
-    }
+        if Instant::now() >= deadline {
+            return Err(if lease_timeout.is_zero() {
+                VoidCrawlError::ProfileBusy { name: name.to_string() }
+            } else {
+                VoidCrawlError::ProfileLeaseExpired {
+                    name:         name.to_string(),
+                    timeout_secs: lease_timeout.as_secs(),
+                }
+            });
+        }
+        sleep(Duration::from_millis(100)).await;
+    };
 
-    let session = BrowserSessionBuilder::new().headful().user_data_dir(&path).launch().await?;
+    let mut builder = BrowserSessionBuilder::new().user_data_dir(&path);
+    builder = if headless { builder.headless() } else { builder.headful() };
+    let session = builder.launch().await?;
 
-    Ok(ProfileHandle { name: name.to_string(), path, session: Some(session), _lock: file })
+    Ok(ProfileHandle { name: name.to_string(), path, session: Some(session), _lock: guard })
 }
 
 /// Release a profile lease explicitly. Equivalent to dropping the

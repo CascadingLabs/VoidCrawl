@@ -1,10 +1,16 @@
 [package]
-name = "voidcrawl_mcp"
-version = "0.1.0"
+name = "voidcrawl-mcp"
+version = "0.3.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "MCP server exposing void_crawl_core stealth browsing to Claude Code"
+description = "Stdio MCP server exposing voidcrawl stealth headless Chrome to Claude Code and other MCP clients"
+homepage = "https://github.com/CascadingLabs/VoidCrawl"
+repository = "https://github.com/CascadingLabs/VoidCrawl"
+documentation = "https://github.com/CascadingLabs/VoidCrawl/blob/main/docs/mcp-server.md"
+readme = "README.md"
+keywords = ["mcp", "chrome", "cdp", "browser", "automation"]
+categories = ["command-line-utilities", "web-programming"]
 
 [[bin]]
 name = "voidcrawl-mcp"
@@ -14,7 +20,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-void_crawl_core = { path = "../core", version = "0.2.3" }
+void_crawl_core = { path = "../core", version = "0.3.0" }
 rmcp = { version = "1.4", features = ["server", "macros", "transport-io"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

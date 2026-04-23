@@ -51,6 +51,42 @@ cargo test -p void_crawl_core -- --test-threads=1
 
 Tests **must** run serially (`--test-threads=1`) because each test launches a Chromium process that uses a shared profile directory. Parallel launches cause `SingletonLock` conflicts.
 
+### Build the MCP server
+
+`voidcrawl-mcp` is a standalone stdio MCP server that exposes the pool and session API to Claude Code (and any other MCP client).
+
+```bash
+cargo build --release -p voidcrawl_mcp
+# binary at ./target/release/voidcrawl-mcp
+```
+
+Smoke-test it locally:
+
+```bash
+./target/release/voidcrawl-mcp --help 2>/dev/null || true
+VOIDCRAWL_PROFILE="Default" ./target/release/voidcrawl-mcp  # pin to a profile
+```
+
+Wire it into Claude Code by adding a `.mcp.json` in the project you want to use it from:
+
+```json
+{
+  "mcpServers": {
+    "voidcrawl": {
+      "command": "/abs/path/to/target/release/voidcrawl-mcp"
+    }
+  }
+}
+```
+
+Restart Claude Code and the `voidcrawl` MCP server + its tools (`fetch`, `session_open`, `click`, `click_visual_coords`, `detect_captcha`, ...) become available.
+
+### Use the `voidcrawl` Claude Code skill
+
+A skill lives at `.claude/skills/voidcrawl/SKILL.md`. Claude Code auto-discovers skills in any project that has a `.claude/skills/` directory — you don't need to do anything beyond having `.mcp.json` + the built binary on disk. The skill tells Claude when to pick `voidcrawl` over `claude-in-chrome`, how to chain `click_visual_coords` for React forms, and how to react to `CaptchaDetected` errors.
+
+For full protocol + tool reference see [`docs/mcp-server.md`](docs/mcp-server.md).
+
 ### Run Python tests
 
 ```bash

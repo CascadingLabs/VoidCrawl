@@ -1480,15 +1480,18 @@ fn py_list_profiles() -> PyResult<Vec<(String, String)>> {
 /// Args:
 ///     name: Profile directory name (e.g. "Default", "Profile 1").
 ///     `lease_timeout`: Seconds to poll for the lock before giving up.
+///     headless: Run Chrome headless (default). Set False for a visible
+///         window — e.g. for a one-time manual login.
 #[pyfunction]
-#[pyo3(signature = (name, lease_timeout=300.0))]
+#[pyo3(signature = (name, lease_timeout=300.0, headless=true))]
 fn py_acquire_profile(
     py: Python<'_>,
     name: String,
     lease_timeout: f64,
+    headless: bool,
 ) -> PyResult<Bound<'_, PyAny>> {
     future_into_py(py, async move {
-        let handle = acquire_profile(&name, Duration::from_secs_f64(lease_timeout))
+        let handle = acquire_profile(&name, Duration::from_secs_f64(lease_timeout), headless)
             .await
             .map_err(to_py_err)?;
         Ok(PyProfileHandle { inner: Arc::new(Mutex::new(Some(handle))), name })
