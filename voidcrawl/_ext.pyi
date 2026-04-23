@@ -167,6 +167,13 @@ class PooledTab:
             ``None`` on timeout.
         """
         ...
+    async def wait_for_selector(self, selector: str, timeout: float = 30.0) -> None:
+        """Wait until a CSS selector matches. Event-driven — no polling.
+
+        Raises :class:`VoidCrawlError` if *timeout* seconds elapse
+        without a match.
+        """
+        ...
     async def dispatch_mouse_event(
         self,
         event_type: str,
@@ -351,6 +358,9 @@ class Page:
         ...
     async def wait_for_network_idle(self, timeout: float = 30.0) -> str | None:
         """Wait for network activity to settle."""
+        ...
+    async def wait_for_selector(self, selector: str, timeout: float = 30.0) -> None:
+        """Wait until a CSS selector matches. Event-driven — no polling."""
         ...
     async def dispatch_mouse_event(
         self,

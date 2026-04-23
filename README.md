@@ -82,8 +82,22 @@ asyncio.run(main())
 
 `voidcrawl-mcp` is a stdio MCP server that exposes the full pool + session API as tools any MCP-speaking agent can call. Point Claude Code at it and the agent can fetch, screenshot, click, type, eval JS, detect captchas, and drive multi-step sessions — all via the same stealth-patched Chrome pool.
 
+Install (pick one):
+
 ```bash
-cargo build --release -p voidcrawl_mcp
+# Claude Code user — binary only, isolated venv:
+uv tool install voidcrawl-mcp
+# or
+pipx install voidcrawl-mcp
+
+# Python lib + MCP server together:
+pip install 'voidcrawl[mcp]'
+
+# From crates.io (builds from source):
+cargo install voidcrawl-mcp
+
+# From git HEAD (builds from source):
+cargo install --git https://github.com/CascadingLabs/VoidCrawl voidcrawl-mcp
 ```
 
 Wire it into Claude Code via `.mcp.json`:
@@ -92,7 +106,7 @@ Wire it into Claude Code via `.mcp.json`:
 {
   "mcpServers": {
     "voidcrawl": {
-      "command": "/abs/path/to/target/release/voidcrawl-mcp"
+      "command": "voidcrawl-mcp"
     }
   }
 }

@@ -53,29 +53,36 @@ Tests **must** run serially (`--test-threads=1`) because each test launches a Ch
 
 ### Build the MCP server
 
-`voidcrawl-mcp` is a standalone stdio MCP server that exposes the pool and session API to Claude Code (and any other MCP client).
+`voidcrawl-mcp` ships as a standalone package on PyPI (prebuilt binary wheels) and crates.io. Inside this repo it's a workspace member at `crates/mcp_server/` with its own `pyproject.toml` that uses maturin's `bindings = "bin"` mode — the Rust binary becomes a console script in the wheel.
+
+For local dev:
 
 ```bash
-cargo build --release -p voidcrawl_mcp
+cargo build --release -p voidcrawl-mcp
 # binary at ./target/release/voidcrawl-mcp
 ```
 
-Smoke-test it locally:
+Build the standalone wheel locally:
 
 ```bash
-./target/release/voidcrawl-mcp --help 2>/dev/null || true
-VOIDCRAWL_PROFILE="Default" ./target/release/voidcrawl-mcp  # pin to a profile
+maturin build --release --manifest-path crates/mcp_server/Cargo.toml
+# wheel at ./target/wheels/voidcrawl_mcp-*.whl
 ```
 
-Wire it into Claude Code by adding a `.mcp.json` in the project you want to use it from:
+End users install one of:
+
+```bash
+uv tool install voidcrawl-mcp            # binary only
+pipx install voidcrawl-mcp               # binary only
+pip install 'voidcrawl[mcp]'             # Python lib + MCP binary
+cargo install voidcrawl-mcp              # from crates.io, builds from source
+```
+
+Wire it into Claude Code:
 
 ```json
 {
-  "mcpServers": {
-    "voidcrawl": {
-      "command": "/abs/path/to/target/release/voidcrawl-mcp"
-    }
-  }
+  "mcpServers": { "voidcrawl": { "command": "voidcrawl-mcp" } }
 }
 ```
 

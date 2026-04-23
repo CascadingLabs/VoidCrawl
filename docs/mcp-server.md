@@ -4,10 +4,21 @@ Stdio MCP server exposing `voidcrawl` to Claude Code and other MCP-speaking agen
 
 ## Install
 
-If you cloned the repo:
-
 ```bash
-cargo build --release -p voidcrawl_mcp
+# Prebuilt binary wheel (recommended for Claude Code users):
+uv tool install voidcrawl-mcp
+# or: pipx install voidcrawl-mcp
+
+# Python lib + MCP server together:
+pip install 'voidcrawl[mcp]'
+
+# From source via cargo:
+cargo install voidcrawl-mcp
+# or directly from git HEAD:
+cargo install --git https://github.com/CascadingLabs/VoidCrawl voidcrawl-mcp
+
+# Dev / repo clone:
+cargo build --release -p voidcrawl-mcp
 # binary at ./target/release/voidcrawl-mcp
 ```
 
@@ -17,7 +28,7 @@ Wire into Claude Code via `.mcp.json`:
 {
   "mcpServers": {
     "voidcrawl": {
-      "command": "/path/to/target/release/voidcrawl-mcp"
+      "command": "voidcrawl-mcp"
     }
   }
 }

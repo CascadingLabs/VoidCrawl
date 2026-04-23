@@ -1,3 +1,16 @@
+## 0.3.1 (2026-04-23)
+
+### Feat
+
+- `voidcrawl-mcp` now ships as a standalone PyPI + crates.io package at the same version as `voidcrawl`. Install via `uv tool install voidcrawl-mcp`, `pipx install voidcrawl-mcp`, or `cargo install voidcrawl-mcp`. Want the full bundle? `pip install 'voidcrawl[mcp]'`.
+- Rust crate renamed on crates.io from `voidcrawl_mcp` to `voidcrawl-mcp` (matches the binary name). `use voidcrawl_mcp::…` Rust paths still resolve — cargo maps dashes to underscores for library names automatically.
+- `void_crawl_core` published to crates.io so `cargo install voidcrawl-mcp` can resolve dependencies.
+
+### Breaking
+
+- The compiled `voidcrawl-mcp` binary is no longer bundled inside the `voidcrawl` Python wheel. If you were relying on `pip install voidcrawl` putting the binary on PATH, switch to `pip install 'voidcrawl[mcp]'` or install `voidcrawl-mcp` separately.
+- `voidcrawl._mcp_launcher` has been removed.
+
 ## 0.3.0 (2026-04-22)
 
 ### Feat

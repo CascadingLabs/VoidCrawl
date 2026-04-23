@@ -35,7 +35,7 @@ pub async fn run(
     let result = async {
         let timeout = Duration::from_secs(args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
         tab.page.goto_and_wait_for_idle(&args.url, timeout).await?;
-        wait::apply(&tab.page, args.wait_for.as_deref(), timeout).await?;
+        wait::apply_post_navigate(&tab.page, args.wait_for.as_deref(), timeout).await?;
         let bytes = tab.page.screenshot_png().await?;
         // Emit the device-pixel ratio alongside the PNG so agents can
         // translate screenshot-space coordinates to CSS pixels before

@@ -106,7 +106,7 @@ pub async fn navigate(
     let page = handle.page.lock().await;
     let timeout = Duration::from_secs(args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
     let resp = page.goto_and_wait_for_idle(&args.url, timeout).await.map_err(map_err)?;
-    wait::apply(&page, args.wait_for.as_deref(), timeout).await.map_err(map_err)?;
+    wait::apply_post_navigate(&page, args.wait_for.as_deref(), timeout).await.map_err(map_err)?;
     Ok(SessionNavigateResult {
         url:         resp.url,
         status_code: resp.status_code,

@@ -543,6 +543,20 @@ impl PyPage {
         with_page!(self, py, |page| page.wait_for_network_idle(Duration::from_secs_f64(timeout)))
     }
 
+    /// Wait until a CSS selector matches via an in-page MutationObserver.
+    /// Event-driven — no polling. Returns None on match, raises Timeout
+    /// if `timeout` seconds pass without a match.
+    #[pyo3(signature = (selector, timeout=30.0))]
+    fn wait_for_selector<'py>(
+        &self,
+        py: Python<'py>,
+        selector: String,
+        timeout: f64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_page!(self, py, |page| page
+            .wait_for_selector(&selector, Duration::from_secs_f64(timeout)))
+    }
+
     /// Dispatch a mouse event via the CDP Input.dispatchMouseEvent command.
     #[pyo3(signature = (event_type, x, y, button="left", click_count=1, delta_x=None, delta_y=None, modifiers=None))]
     #[allow(clippy::too_many_arguments)]
@@ -1015,6 +1029,19 @@ impl PyPooledTab {
     ) -> PyResult<Bound<'py, PyAny>> {
         with_pooled_page!(self, py, |page| page
             .wait_for_network_idle(Duration::from_secs_f64(timeout)))
+    }
+
+    /// Wait until a CSS selector matches via an in-page MutationObserver.
+    /// Event-driven — no polling.
+    #[pyo3(signature = (selector, timeout=30.0))]
+    fn wait_for_selector<'py>(
+        &self,
+        py: Python<'py>,
+        selector: String,
+        timeout: f64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page!(self, py, |page| page
+            .wait_for_selector(&selector, Duration::from_secs_f64(timeout)))
     }
 
     /// Dispatch a mouse event via the CDP Input.dispatchMouseEvent command.
@@ -1552,8 +1579,13 @@ impl PyProfileHandle {
         })
     }
 
-    fn __aenter__<'py>(slf: Bound<'py, Self>, _py: Python<'py>) -> PyResult<Bound<'py, Self>> {
-        Ok(slf)
+    fn __aenter__<'py>(slf: Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        // `async with` awaits the return value, so __aenter__ must
+        // produce an awaitable — not the pyclass instance directly.
+        // Return a future that resolves to self, matching the pattern
+        // the other context-manager pyclasses in this file use.
+        let slf_ref = slf.into_any().unbind();
+        future_into_py(py, async move { Ok(slf_ref) })
     }
 
     fn __aexit__<'py>(

@@ -116,20 +116,36 @@ impl Page {
             }
         }
 
-        // 2. User-agent override (only if stealth mode didn't already handle it)
-        if !cfg.use_builtin_stealth {
-            if let Some(ua) = &cfg.user_agent {
-                let params = SetUserAgentOverrideParams::builder()
-                    .user_agent(ua.clone())
-                    .accept_language(&cfg.locale)
-                    .platform("Win32")
-                    .build()
-                    .map_err(VoidCrawlError::PageError)?;
-                self.inner
-                    .execute(params)
-                    .await
-                    .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
-            }
+        // 2. User-agent override.
+        //
+        // Three cases, in precedence order:
+        //   a. Caller supplied an explicit `user_agent` — use it verbatim.
+        //   b. No explicit UA, but `use_builtin_stealth` already applied
+        //      its own agent via `enable_stealth_mode_with_agent` — skip.
+        //   c. Default (cfg.user_agent = None, builtin stealth off): probe
+        //      the browser's real UA and strip "HeadlessChrome" →
+        //      "Chrome". Shipping `HeadlessChrome/<ver>` is an instant
+        //      WAF fingerprint; stripping keeps the version accurate
+        //      without hardcoding a stale UA string.
+        let override_ua = if let Some(ua) = cfg.user_agent.clone() {
+            Some(ua)
+        } else if cfg.use_builtin_stealth {
+            None
+        } else {
+            dehead_user_agent(&self.inner).await?
+        };
+
+        if let Some(ua) = override_ua {
+            let params = SetUserAgentOverrideParams::builder()
+                .user_agent(ua)
+                .accept_language(&cfg.locale)
+                .platform("Win32")
+                .build()
+                .map_err(VoidCrawlError::PageError)?;
+            self.inner
+                .execute(params)
+                .await
+                .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
         }
 
         // 3. Viewport / device metrics
@@ -674,5 +690,32 @@ impl Page {
     /// Access the underlying chromiumoxide Page for advanced usage.
     pub fn inner(&self) -> &CdpPage {
         &self.inner
+    }
+}
+
+/// Probe the browser's real User-Agent and strip any "Headless"
+/// qualifier. Returns `Some(stripped_ua)` when the probe finds
+/// `HeadlessChrome` (or similar) and a rewrite is needed; returns
+/// `None` otherwise, signalling "no override necessary".
+///
+/// Headless Chrome advertises itself as `HeadlessChrome/<ver>` — an
+/// instant bot signal. By probing the real UA and rewriting only the
+/// `Headless` substring, we keep the version accurate (no stale
+/// hardcoded UA string) while removing the fingerprint.
+async fn dehead_user_agent(page: &CdpPage) -> Result<Option<String>> {
+    let probe = page
+        .evaluate("navigator.userAgent")
+        .await
+        .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+    let Some(Value::String(ua)) = probe.value().cloned() else {
+        return Ok(None);
+    };
+    if ua.contains("HeadlessChrome") {
+        Ok(Some(ua.replace("HeadlessChrome", "Chrome")))
+    } else if ua.contains("Headless") {
+        // Belt-and-suspenders for other Chromium-based headless flavors.
+        Ok(Some(ua.replace("Headless", "")))
+    } else {
+        Ok(None)
     }
 }

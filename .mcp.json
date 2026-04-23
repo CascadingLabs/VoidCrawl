@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "voidcrawl": {
-      "command": "/home/andrew/Desktop/cl/VoidCrawl/target/release/voidcrawl-mcp",
-      "args": [],
+      "command": "cargo",
+      "args": ["run", "--release", "--quiet", "-p", "voidcrawl-mcp"],
       "env": {
         "BROWSER_COUNT": "1",
         "TABS_PER_BROWSER": "5",

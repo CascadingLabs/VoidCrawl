@@ -1,12 +1,18 @@
 //! `voidcrawl-mcp` binary — stdio MCP server exposing `void_crawl_core`.
 
-use std::{env, io::stderr, sync::Arc, time::Duration};
+use std::{
+    env,
+    io::stderr,
+    sync::{Arc, Mutex as StdMutex},
+    time::Duration,
+};
 
 use rmcp::{ServiceExt, transport::io::stdio};
 use tracing_subscriber::EnvFilter;
-use void_crawl_core::{ProfileHandle, acquire_profile};
+use void_crawl_core::{acquire_profile, chrome_user_data_dirs};
 use voidcrawl_mcp::{
-    AppState, VoidCrawlServer, sessions::SessionRegistry, tools::session::close_handle,
+    AppState, VoidCrawlServer, sessions::SessionRegistry, state::PinnedProfile,
+    tools::session::close_handle,
 };
 
 /// Parse `--profile NAME` / `--profile=NAME` from argv, falling back
@@ -35,24 +41,38 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let profile_name = resolve_profile_arg();
-    let profile_handle: Option<ProfileHandle> = if let Some(name) = profile_name.as_deref() {
+    let sessions = Arc::new(SessionRegistry::default());
+
+    let state = if let Some(name) = profile_name.as_deref() {
         tracing::info!(profile = name, "acquiring Chrome profile");
-        // 30s poll window. Fail loud — if the profile is busy or not
-        // found, there's nothing for the server to do without it.
-        // Server-mode default: headless, matching the rest of the MCP
-        // pool. Users who want a visible profile window can run a
-        // standalone Python script with `with_profile(..., headless=False)`.
-        let handle = acquire_profile(name, Duration::from_secs(30), true).await?;
-        tracing::info!(profile = name, path = %handle.path().display(), "profile acquired");
-        Some(handle)
+        let mut handle = acquire_profile(name, Duration::from_secs(30), true).await?;
+        let session = handle.take_session().ok_or_else(|| {
+            anyhow::anyhow!("profile handle returned without a session — should be unreachable")
+        })?;
+        // Chrome's user-data-dir is the PARENT of the profile folder.
+        // Pick the first platform dir that contains our profile.
+        let user_data_root = chrome_user_data_dirs()
+            .into_iter()
+            .find(|b| b.join(name).is_dir())
+            .unwrap_or_else(|| handle.path().to_path_buf());
+        tracing::info!(
+            profile = name,
+            path = %handle.path().display(),
+            user_data_root = %user_data_root.display(),
+            "profile acquired — pool will inherit its Chrome"
+        );
+        let pinned = PinnedProfile {
+            handle,
+            session: StdMutex::new(Some(session)),
+            name: name.to_string(),
+            user_data_root,
+        };
+        Arc::new(AppState::with_pinned_profile(Arc::clone(&sessions), pinned))
     } else {
-        None
+        Arc::new(AppState::new(Arc::clone(&sessions)))
     };
 
     tracing::info!("voidcrawl-mcp starting");
-
-    let sessions = Arc::new(SessionRegistry::default());
-    let state = Arc::new(AppState::new(Arc::clone(&sessions)));
 
     let server = VoidCrawlServer::new(Arc::clone(&state));
     let service = server.serve(stdio()).await?;
@@ -71,11 +91,14 @@ async fn main() -> anyhow::Result<()> {
             tracing::warn!(error = %e, "failed to close browser pool");
         }
     }
-    if let Some(mut handle) = profile_handle {
-        if let Err(e) = handle.close().await {
-            tracing::warn!(error = %e, "failed to release profile");
-        }
+    // Dropping `state` releases the `Arc<PinnedProfile>` → the
+    // `ProfileHandle` inside → its `fs2` advisory lock guard. Chrome
+    // itself was already shut down via `pool.close()` above (the pool
+    // owns the session that was extracted from the handle).
+    if let Some(ref pinned) = state.pinned {
+        tracing::info!(profile = %pinned.name, "releasing pinned profile");
     }
+    drop(state);
 
     Ok(())
 }

@@ -87,12 +87,32 @@ pub async fn run_many(server: &VoidCrawlServer, args: FetchManyArgs) -> FetchMan
 }
 
 async fn fetch_on_tab(tab: &PooledTab, args: FetchArgs) -> Result<FetchResult, VoidCrawlError> {
-    let timeout = Duration::from_secs(args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
-    let resp = tab.page.goto_and_wait_for_idle(&args.url, timeout).await?;
-    wait::apply(&tab.page, args.wait_for.as_deref(), timeout).await?;
-    let title = tab.page.title().await.ok().flatten();
+    use tokio::time::{Instant, timeout};
+
+    let total_timeout = Duration::from_secs(args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
+    let start = Instant::now();
+    let resp = tab.page.goto_and_wait_for_idle(&args.url, total_timeout).await?;
+    wait::apply_post_navigate(&tab.page, args.wait_for.as_deref(), total_timeout).await?;
+    let remaining = total_timeout.saturating_sub(start.elapsed());
+    // Cap title + extract JS at the remaining budget so a runaway
+    // user-supplied `extract` (e.g. `while(1){}`) can't pin a pool tab
+    // indefinitely — a hung script would otherwise survive every
+    // `release`/`acquire` cycle and eventually drain the pool.
+    let title = timeout(remaining, tab.page.title())
+        .await
+        .map_err(|_| VoidCrawlError::Timeout("title read exceeded timeout_secs".into()))?
+        .ok()
+        .flatten();
     let extracted = match args.extract {
-        Some(js) => Some(tab.page.evaluate_js(&js).await?),
+        Some(js) => {
+            let value = timeout(remaining, tab.page.evaluate_js(&js)).await.map_err(|_| {
+                VoidCrawlError::Timeout(format!(
+                    "extract evaluate_js exceeded {}s",
+                    total_timeout.as_secs()
+                ))
+            })??;
+            Some(value)
+        }
         None => None,
     };
     Ok(FetchResult {

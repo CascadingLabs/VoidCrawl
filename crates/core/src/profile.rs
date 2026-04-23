@@ -79,6 +79,18 @@ impl ProfileHandle {
         }
         Ok(())
     }
+
+    /// Take ownership of the underlying `BrowserSession`, leaving the
+    /// handle in a no-session state. The lock is still held by `self`
+    /// — the caller should keep the handle alive for as long as the
+    /// session is in use, then drop it to release the lock.
+    ///
+    /// Useful when you want the session to drive a `BrowserPool` or
+    /// some other owning structure, but still want voidcrawl's
+    /// advisory lock held for the lifetime of the work.
+    pub fn take_session(&mut self) -> Option<BrowserSession> {
+        self.session.take()
+    }
 }
 
 /// Enumerate Chrome profiles discovered in the platform's default
@@ -152,18 +164,23 @@ pub async fn acquire_profile_in(
     lease_timeout: Duration,
     headless: bool,
 ) -> Result<ProfileHandle> {
+    // We need BOTH the user-data-dir (the parent — where Chrome scans
+    // for `Default/`, `Profile 1/`, etc.) AND the profile sub-directory
+    // name for `--profile-directory`. Passing the resolved profile dir
+    // as `--user-data-dir` is wrong: Chrome then looks for
+    // `<that path>/Default/` and loads none of the real cookies.
     let mut searched = Vec::new();
-    let mut path = None;
+    let mut resolved: Option<(PathBuf, PathBuf)> = None;
     for base in bases {
         searched.push(base.display().to_string());
         let candidate = base.join(name);
         if is_profile_dir(&candidate) {
-            path = Some(candidate);
+            resolved = Some((base.clone(), candidate));
             break;
         }
     }
-    let path =
-        path.ok_or_else(|| VoidCrawlError::ProfileNotFound { name: name.to_string(), searched })?;
+    let (user_data_dir, path) = resolved
+        .ok_or_else(|| VoidCrawlError::ProfileNotFound { name: name.to_string(), searched })?;
 
     let lock_path = path.join(".voidcrawl.lock");
     let file = OpenOptions::new()
@@ -221,7 +238,13 @@ pub async fn acquire_profile_in(
         sleep(Duration::from_millis(100)).await;
     };
 
-    let mut builder = BrowserSessionBuilder::new().user_data_dir(&path);
+    // `--user-data-dir=<parent>` + `--profile-directory=<name>` is the
+    // contract Chrome actually honors. Without the second flag, Chrome
+    // defaults to `"Default"` and the caller's cookies/extensions live
+    // at an unrelated path.
+    let mut builder = BrowserSessionBuilder::new()
+        .user_data_dir(&user_data_dir)
+        .arg(format!("--profile-directory={name}"));
     builder = if headless { builder.headless() } else { builder.headful() };
     let session = builder.launch().await?;
 
