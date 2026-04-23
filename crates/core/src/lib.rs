@@ -11,7 +11,9 @@ pub mod session;
 pub mod stealth;
 
 // Re-export CDP types for downstream crates (pyo3_bindings).
-pub use captcha::{CaptchaKind, detect_captcha};
+pub use captcha::{
+    CaptchaInfo, CaptchaKind, WidgetRect, capture_captcha, detect_captcha, inject_captcha_token,
+};
 pub use chromiumoxide::cdp::browser_protocol::{
     input::{DispatchKeyEventType, DispatchMouseEventType, MouseButton},
     network::{Cookie, CookieParam, DeleteCookiesParams},

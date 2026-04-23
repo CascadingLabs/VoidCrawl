@@ -31,6 +31,19 @@ fn resolve_profile_arg() -> Option<String> {
     env::var("VOIDCRAWL_PROFILE").ok().filter(|s| !s.is_empty())
 }
 
+/// `--headful` flag / `VOIDCRAWL_HEADFUL=1` env. Only meaningful when
+/// paired with `--profile`: makes the pinned-profile Chrome visible.
+/// Useful when the target runs an anti-bot pre-check (Turnstile,
+/// Cloudflare managed challenge) that fingerprints headless Chrome —
+/// warm profile + visible window is the fallback when stealth alone
+/// isn't enough.
+fn resolve_headful_flag() -> bool {
+    if env::args().any(|a| a == "--headful") {
+        return true;
+    }
+    matches!(env::var("VOIDCRAWL_HEADFUL").as_deref(), Ok("1") | Ok("true"))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -41,11 +54,13 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let profile_name = resolve_profile_arg();
+    let headful = resolve_headful_flag();
+    let headless = !headful;
     let sessions = Arc::new(SessionRegistry::default());
 
     let state = if let Some(name) = profile_name.as_deref() {
-        tracing::info!(profile = name, "acquiring Chrome profile");
-        let mut handle = acquire_profile(name, Duration::from_secs(30), true).await?;
+        tracing::info!(profile = name, headful, "acquiring Chrome profile");
+        let mut handle = acquire_profile(name, Duration::from_secs(30), headless).await?;
         let session = handle.take_session().ok_or_else(|| {
             anyhow::anyhow!("profile handle returned without a session — should be unreachable")
         })?;

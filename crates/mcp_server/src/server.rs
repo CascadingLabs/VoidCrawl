@@ -23,9 +23,10 @@ use crate::{
     tools,
     tools::{
         actions::{
-            ClickArgs, ClickVisualCoordsArgs, DetectCaptchaResult, EvalJsArgs, EvalJsResult,
-            ExtractArgs, ExtractResult, NetworkCaptureResult, OkResult,
-            SessionIdArgs as ActionSessionIdArgs, TitleResult, TypeTextArgs, WaitIdleArgs,
+            CaptureCaptchaResult, ClickArgs, ClickVisualCoordsArgs, DetectCaptchaResult,
+            EvalJsArgs, EvalJsResult, ExtractArgs, ExtractResult, InjectCaptchaTokenArgs,
+            NetworkCaptureResult, OkResult, SessionIdArgs as ActionSessionIdArgs, SolveCaptchaArgs,
+            SolveCaptchaResult, TitleResult, TypeTextArgs, WaitIdleArgs,
         },
         fetch::{FetchArgs, FetchManyArgs, FetchManyResult, FetchResult},
         introspect::PoolStatus,
@@ -241,6 +242,23 @@ observed since the session's most recent navigation. Backed by performance.getEn
     }
 
     #[tool(
+        name = "solve_captcha",
+        description = "Click the Turnstile / reCAPTCHA-v2 / hCaptcha checkbox in an open session \
+using real CDP mouse events (not JS click — widgets detect that) and wait for the response \
+token to appear. Returns the kind detected, the coordinates clicked, the token value (once \
+the widget writes it into its hidden input), and a `solved` flag. No-op (solved=true) when \
+the page has no captcha. Only handles widgets whose anchor frame is already visible — if \
+detect_captcha reports `turnstile` because the runtime loaded but no widget mounted, trigger \
+the form submit that mounts the widget first."
+    )]
+    pub async fn solve_captcha(
+        &self,
+        Parameters(args): Parameters<SolveCaptchaArgs>,
+    ) -> Result<Json<SolveCaptchaResult>, ErrorData> {
+        tools::actions::solve_captcha(self, args).await.map(Json)
+    }
+
+    #[tool(
         name = "detect_captcha",
         description = "Probe the DOM for captcha / bot-wall markers. Returns the kind tag \
 (recaptcha, hcaptcha, turnstile, cloudflare_challenge, datadome) or null."
@@ -250,6 +268,35 @@ observed since the session's most recent navigation. Backed by performance.getEn
         Parameters(args): Parameters<ActionSessionIdArgs>,
     ) -> Result<Json<DetectCaptchaResult>, ErrorData> {
         tools::actions::detect_captcha_tool(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "capture_captcha",
+        description = "Deep structured probe of a captcha challenge. Returns kind, sitekey, \
+widget rect + selector, response-field selector, existing token (if already solved), page URL, \
+and Turnstile action/cdata attrs. Use this to hand off to a third-party solver API \
+(2Captcha / CapSolver / Anti-Captcha) or a human-in-the-loop flow, then call \
+`inject_captcha_token` with the resulting token."
+    )]
+    pub async fn capture_captcha(
+        &self,
+        Parameters(args): Parameters<ActionSessionIdArgs>,
+    ) -> Result<Json<CaptureCaptchaResult>, ErrorData> {
+        tools::actions::capture_captcha_tool(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "inject_captcha_token",
+        description = "Write a solved captcha token into the page's hidden response field and \
+fire input/change events so React-controlled forms pick it up. For Turnstile, invokes any \
+registered `data-callback` function. `kind` defaults to whatever is currently detected; pass \
+explicitly ('turnstile'/'recaptcha'/'hcaptcha') to skip re-detection."
+    )]
+    pub async fn inject_captcha_token(
+        &self,
+        Parameters(args): Parameters<InjectCaptchaTokenArgs>,
+    ) -> Result<Json<OkResult>, ErrorData> {
+        tools::actions::inject_captcha_token_tool(self, args).await.map(Json)
     }
 }
 
