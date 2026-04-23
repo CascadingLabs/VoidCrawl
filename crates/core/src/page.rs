@@ -1,6 +1,6 @@
 //! High-level wrapper around a `chromiumoxide::Page`.
 
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, fs, path::PathBuf, time::Duration};
 
 use chromiumoxide::{
     Page as CdpPage,
@@ -16,7 +16,7 @@ use chromiumoxide::{
         },
         page::{
             AddScriptToEvaluateOnNewDocumentParams, CaptureScreenshotFormat, EventLifecycleEvent,
-            PrintToPdfParams, SetBypassCspParams,
+            PrintToPdfParams, SetBypassCspParams, Viewport,
         },
     },
     page::ScreenshotParams,
@@ -46,6 +46,45 @@ pub struct PageResponse {
     pub status_code: Option<u16>,
     /// `true` when at least one HTTP redirect occurred before the final URL.
     pub redirected:  bool,
+}
+
+/// Rectangular crop in CSS pixels for [`ScreenshotOptions::bbox`].
+#[derive(Debug, Clone, Copy)]
+pub struct Bbox {
+    pub x:      u32,
+    pub y:      u32,
+    pub width:  u32,
+    pub height: u32,
+}
+
+/// Options for [`Page::screenshot`].
+#[derive(Debug, Default, Clone)]
+pub struct ScreenshotOptions {
+    /// Write PNG to this path instead of returning bytes.
+    pub path: Option<PathBuf>,
+    /// Crop to this CSS-pixel region. None = full page.
+    pub bbox: Option<Bbox>,
+}
+
+impl ScreenshotOptions {
+    pub fn with_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.path = Some(path.into());
+        self
+    }
+
+    pub fn with_bbox(mut self, bbox: Bbox) -> Self {
+        self.bbox = Some(bbox);
+        self
+    }
+}
+
+/// Return type of [`Page::screenshot`].
+#[derive(Debug)]
+pub enum ScreenshotOutput {
+    /// PNG bytes held in memory (no path supplied).
+    Bytes(Vec<u8>),
+    /// Path the PNG was written to.
+    Path(PathBuf),
 }
 
 /// Thin wrapper over `chromiumoxide::Page` exposing a clean async API.
@@ -365,15 +404,49 @@ impl Page {
     // ── Screenshots & PDF ───────────────────────────────────────────────
 
     /// Capture a full-page PNG screenshot, returned as raw bytes.
+    ///
+    /// Backward-compatible shim around [`Page::screenshot`] with no
+    /// options (full page, no crop, bytes in memory).
     pub async fn screenshot_png(&self) -> Result<Vec<u8>> {
-        let params = ScreenshotParams::builder()
-            .format(CaptureScreenshotFormat::Png)
-            .full_page(true)
-            .build();
-        self.inner
-            .screenshot(params)
+        match self.screenshot(ScreenshotOptions::default()).await? {
+            ScreenshotOutput::Bytes(b) => Ok(b),
+            ScreenshotOutput::Path(_) => unreachable!("no path supplied"),
+        }
+    }
+
+    /// Capture a PNG screenshot with optional cropping and/or writing
+    /// to disk.
+    ///
+    /// * No `path` → returns bytes in memory.
+    /// * `path` set → writes PNG to disk and returns that path.
+    /// * `bbox` crops to a pixel region (CSS pixels, pre-DPR).
+    pub async fn screenshot(&self, opts: ScreenshotOptions) -> Result<ScreenshotOutput> {
+        let mut builder = ScreenshotParams::builder().format(CaptureScreenshotFormat::Png);
+        if let Some(bbox) = opts.bbox {
+            builder = builder.clip(Viewport {
+                x:      f64::from(bbox.x),
+                y:      f64::from(bbox.y),
+                width:  f64::from(bbox.width),
+                height: f64::from(bbox.height),
+                scale:  1.0,
+            });
+        } else {
+            builder = builder.full_page(true);
+        }
+        let bytes = self
+            .inner
+            .screenshot(builder.build())
             .await
-            .map_err(|e| VoidCrawlError::ScreenshotError(e.to_string()))
+            .map_err(|e| VoidCrawlError::ScreenshotError(e.to_string()))?;
+
+        if let Some(path) = opts.path {
+            fs::write(&path, &bytes).map_err(|e| {
+                VoidCrawlError::ScreenshotError(format!("write {}: {e}", path.display()))
+            })?;
+            Ok(ScreenshotOutput::Path(path))
+        } else {
+            Ok(ScreenshotOutput::Bytes(bytes))
+        }
     }
 
     /// Generate a PDF of the page, returned as raw bytes.

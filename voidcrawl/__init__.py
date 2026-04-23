@@ -32,13 +32,20 @@ from voidcrawl._ext import (
     BrowserSession as _BrowserSession,
 )
 from voidcrawl._ext import (
+    CaptchaDetected,
     Page,
     PageResponse,
     PooledTab,
+    ProfileBusy,
+    ProfileHandle,
+    ProfileLeaseExpired,
+    ProfileNotFound,
+    VoidCrawlError,
     _AcquireContext,
     _PoolParamsContext,
 )
 from voidcrawl.actions._protocol import JsTab, Tab
+from voidcrawl.profiles import acquire_profile, list_profiles, with_profile
 from voidcrawl.scale import ScaleProfile, ScaleReport
 from voidcrawl.schema import Attr, Schema, Text, safe_url, strip_tags
 
@@ -49,19 +56,28 @@ __all__ = [
     "BrowserConfig",
     "BrowserPool",
     "BrowserSession",
+    "CaptchaDetected",
     "JsTab",
     "Page",
     "PageResponse",
     "PoolConfig",
     "PooledTab",
+    "ProfileBusy",
+    "ProfileHandle",
+    "ProfileLeaseExpired",
+    "ProfileNotFound",
     "ScaleProfile",
     "ScaleReport",
     "Schema",
     "Selector",
     "Tab",
     "Text",
+    "VoidCrawlError",
+    "acquire_profile",
+    "list_profiles",
     "safe_url",
     "strip_tags",
+    "with_profile",
 ]
 
 

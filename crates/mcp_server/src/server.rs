@@ -22,6 +22,11 @@ use crate::{
     state::AppState,
     tools,
     tools::{
+        actions::{
+            ClickArgs, ClickVisualCoordsArgs, DetectCaptchaResult, EvalJsArgs, EvalJsResult,
+            ExtractArgs, ExtractResult, NetworkCaptureResult, OkResult,
+            SessionIdArgs as ActionSessionIdArgs, TitleResult, TypeTextArgs, WaitIdleArgs,
+        },
         fetch::{FetchArgs, FetchManyArgs, FetchManyResult, FetchResult},
         introspect::PoolStatus,
         screenshot::ScreenshotArgs,
@@ -144,6 +149,107 @@ sessions are open. Useful for sanity-checking concurrency limits before a fan-ou
     )]
     pub async fn pool_status(&self) -> Result<Json<PoolStatus>, ErrorData> {
         tools::introspect::pool_status(self).await.map(Json).map_err(map_err)
+    }
+
+    #[tool(
+        name = "click",
+        description = "Click the first element matching a CSS selector in an open session."
+    )]
+    pub async fn click(
+        &self,
+        Parameters(args): Parameters<ClickArgs>,
+    ) -> Result<Json<OkResult>, ErrorData> {
+        tools::actions::click(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "click_visual_coords",
+        description = "Click at pixel coordinates (x, y) in CSS pixels. Use when selector-based \
+clicks fail silently (React forms that ignore dispatchEvent clicks). Coords are pre-DPR: \
+divide screenshot pixels by devicePixelRatio on HiDPI."
+    )]
+    pub async fn click_visual_coords(
+        &self,
+        Parameters(args): Parameters<ClickVisualCoordsArgs>,
+    ) -> Result<Json<OkResult>, ErrorData> {
+        tools::actions::click_visual_coords(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "type_text",
+        description = "Type text into an input. With `selector`, focuses + types. Without, \
+dispatches keys to whatever currently has focus (pair with click_visual_coords first)."
+    )]
+    pub async fn type_text(
+        &self,
+        Parameters(args): Parameters<TypeTextArgs>,
+    ) -> Result<Json<OkResult>, ErrorData> {
+        tools::actions::type_text(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "eval_js",
+        description = "Evaluate a JS expression in the session's page. Returns the value as JSON."
+    )]
+    pub async fn eval_js(
+        &self,
+        Parameters(args): Parameters<EvalJsArgs>,
+    ) -> Result<Json<EvalJsResult>, ErrorData> {
+        tools::actions::eval_js(self, args).await.map(Json)
+    }
+
+    #[tool(name = "title", description = "Return the current document title of the session.")]
+    pub async fn title(
+        &self,
+        Parameters(args): Parameters<ActionSessionIdArgs>,
+    ) -> Result<Json<TitleResult>, ErrorData> {
+        tools::actions::title(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "extract",
+        description = "Run document.querySelectorAll(selector) and return each element's text content."
+    )]
+    pub async fn extract(
+        &self,
+        Parameters(args): Parameters<ExtractArgs>,
+    ) -> Result<Json<ExtractResult>, ErrorData> {
+        tools::actions::extract(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "wait_for_network_idle",
+        description = "Wait for Chrome's network-idle lifecycle event. Event-driven, no polling."
+    )]
+    pub async fn wait_for_network_idle(
+        &self,
+        Parameters(args): Parameters<WaitIdleArgs>,
+    ) -> Result<Json<OkResult>, ErrorData> {
+        tools::actions::wait_for_network_idle(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "network_capture",
+        description = "Return the Resource Timing entries (URL, initiator type, transfer size, duration) \
+observed since the session's most recent navigation. Backed by performance.getEntriesByType('resource')."
+    )]
+    pub async fn network_capture(
+        &self,
+        Parameters(args): Parameters<ActionSessionIdArgs>,
+    ) -> Result<Json<NetworkCaptureResult>, ErrorData> {
+        tools::actions::network_capture(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "detect_captcha",
+        description = "Probe the DOM for captcha / bot-wall markers. Returns the kind tag \
+(recaptcha, hcaptcha, turnstile, cloudflare_challenge, datadome) or null."
+    )]
+    pub async fn detect_captcha(
+        &self,
+        Parameters(args): Parameters<ActionSessionIdArgs>,
+    ) -> Result<Json<DetectCaptchaResult>, ErrorData> {
+        tools::actions::detect_captcha_tool(self, args).await.map(Json)
     }
 }
 
