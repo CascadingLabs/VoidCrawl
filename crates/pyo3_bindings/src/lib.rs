@@ -440,6 +440,52 @@ impl PyPage {
         with_page_map!(self, py, |page| page.pdf_bytes(), |bytes| PyBytesResult(bytes))
     }
 
+    /// Fetch the browser-computed accessibility (AX) tree.
+    ///
+    /// Returns a flat list of AX node dicts (`Accessibility.getFullAXTree`):
+    /// each has ``role``, computed ``name``, ``properties``, ``childIds`` and
+    /// ``backendDOMNodeId``. Call after the page has rendered. ``depth``
+    /// bounds descendant traversal (``None`` = full tree).
+    #[pyo3(signature = (depth=None))]
+    fn get_full_ax_tree<'py>(
+        &self,
+        py: Python<'py>,
+        depth: Option<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_page_map!(self, py, |page| page.get_full_ax_tree(depth), |val| PyJsonValue(val))
+    }
+
+    /// Query the AX tree for nodes matching ``role`` and/or accessible
+    /// ``name`` (`Accessibility.queryAXTree`). Returns a list of node dicts.
+    #[pyo3(signature = (role=None, name=None))]
+    fn query_ax_tree<'py>(
+        &self,
+        py: Python<'py>,
+        role: Option<String>,
+        name: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_page_map!(
+            self,
+            py,
+            |page| page.query_ax_tree(role.as_deref(), name.as_deref()),
+            |val| PyJsonValue(val)
+        )
+    }
+
+    /// Click the ``nth`` element (0-based) matching accessibility ``role`` and
+    /// accessible ``name`` — the markup-independent analogue of
+    /// ``click_element``. Raises if no such node exists.
+    #[pyo3(signature = (role, name, nth=0))]
+    fn click_by_role<'py>(
+        &self,
+        py: Python<'py>,
+        role: String,
+        name: String,
+        nth: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_page!(self, py, |page| page.click_by_role(&role, &name, nth))
+    }
+
     /// Query for an element by CSS selector, return its inner HTML or None.
     fn query_selector<'py>(
         &self,
@@ -933,6 +979,52 @@ impl PyPooledTab {
 
     fn screenshot_png<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         with_pooled_page_map!(self, py, |page| page.screenshot_png(), |bytes| PyBytesResult(bytes))
+    }
+
+    /// Fetch the browser-computed accessibility (AX) tree.
+    ///
+    /// Returns a flat list of AX node dicts (`Accessibility.getFullAXTree`):
+    /// each has ``role``, computed ``name``, ``properties``, ``childIds`` and
+    /// ``backendDOMNodeId``. Call after the page has rendered. ``depth``
+    /// bounds descendant traversal (``None`` = full tree).
+    #[pyo3(signature = (depth=None))]
+    fn get_full_ax_tree<'py>(
+        &self,
+        py: Python<'py>,
+        depth: Option<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page_map!(self, py, |page| page.get_full_ax_tree(depth), |val| PyJsonValue(val))
+    }
+
+    /// Query the AX tree for nodes matching ``role`` and/or accessible
+    /// ``name`` (`Accessibility.queryAXTree`). Returns a list of node dicts.
+    #[pyo3(signature = (role=None, name=None))]
+    fn query_ax_tree<'py>(
+        &self,
+        py: Python<'py>,
+        role: Option<String>,
+        name: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page_map!(
+            self,
+            py,
+            |page| page.query_ax_tree(role.as_deref(), name.as_deref()),
+            |val| PyJsonValue(val)
+        )
+    }
+
+    /// Click the ``nth`` element (0-based) matching accessibility ``role`` and
+    /// accessible ``name`` — the markup-independent analogue of
+    /// ``click_element``. Raises if no such node exists.
+    #[pyo3(signature = (role, name, nth=0))]
+    fn click_by_role<'py>(
+        &self,
+        py: Python<'py>,
+        role: String,
+        name: String,
+        nth: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page!(self, py, |page| page.click_by_role(&role, &name, nth))
     }
 
     fn query_selector<'py>(

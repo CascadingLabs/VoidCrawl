@@ -77,6 +77,42 @@ class PooledTab:
     async def screenshot_png(self) -> bytes:
         """Capture a full-page screenshot as PNG bytes."""
         ...
+    async def get_full_ax_tree(self, depth: int | None = None) -> list[dict[str, Any]]:
+        """Return the browser-computed accessibility (AX) tree.
+
+        Wraps CDP ``Accessibility.getFullAXTree``. The result is a flat list of
+        AX node dicts linked by ``childIds``/``parentId``; each node carries
+        ``role``, computed ``name``, ``properties`` (state), and
+        ``backendDOMNodeId``. Call after the page has rendered.
+
+        Args:
+            depth: Maximum descendant depth to traverse. ``None`` returns the
+                whole tree.
+        """
+        ...
+    async def query_ax_tree(
+        self, role: str | None = None, name: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Query the AX tree (``Accessibility.queryAXTree``) for matching nodes.
+
+        The semantic analogue of ``query_selector_all``: addresses by computed
+        ``role`` / accessible ``name`` rather than markup. Name matching is
+        exact. Passing neither returns every node under the document root.
+        """
+        ...
+    async def click_by_role(self, role: str, name: str, nth: int = 0) -> None:
+        """Click the *nth* element matching accessibility ``role`` + ``name``.
+
+        Markup-independent analogue of ``click_element``: resolves via the AX
+        tree, bridges to the DOM, scrolls into view, and clicks. Raises if no
+        such node exists.
+
+        Args:
+            role: Computed accessibility role, e.g. ``"button"``, ``"link"``.
+            name: Computed accessible name (exact match).
+            nth: 0-based index when several nodes match.
+        """
+        ...
     async def query_selector(self, selector: str) -> str | None:
         """Return the inner HTML of the first element matching *selector*, or ``None``.
 
@@ -316,6 +352,42 @@ class Page:
         ...
     async def pdf_bytes(self) -> bytes:
         """Render the page as a PDF and return the raw bytes."""
+        ...
+    async def get_full_ax_tree(self, depth: int | None = None) -> list[dict[str, Any]]:
+        """Return the browser-computed accessibility (AX) tree.
+
+        Wraps CDP ``Accessibility.getFullAXTree``. The result is a flat list of
+        AX node dicts linked by ``childIds``/``parentId``; each node carries
+        ``role``, computed ``name``, ``properties`` (state), and
+        ``backendDOMNodeId``. Call after the page has rendered.
+
+        Args:
+            depth: Maximum descendant depth to traverse. ``None`` returns the
+                whole tree.
+        """
+        ...
+    async def query_ax_tree(
+        self, role: str | None = None, name: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Query the AX tree (``Accessibility.queryAXTree``) for matching nodes.
+
+        The semantic analogue of ``query_selector_all``: addresses by computed
+        ``role`` / accessible ``name`` rather than markup. Name matching is
+        exact. Passing neither returns every node under the document root.
+        """
+        ...
+    async def click_by_role(self, role: str, name: str, nth: int = 0) -> None:
+        """Click the *nth* element matching accessibility ``role`` + ``name``.
+
+        Markup-independent analogue of ``click_element``: resolves via the AX
+        tree, bridges to the DOM, scrolls into view, and clicks. Raises if no
+        such node exists.
+
+        Args:
+            role: Computed accessibility role, e.g. ``"button"``, ``"link"``.
+            name: Computed accessible name (exact match).
+            nth: 0-based index when several nodes match.
+        """
         ...
     async def query_selector(self, selector: str) -> str | None:
         """Return inner HTML of the first matching element."""

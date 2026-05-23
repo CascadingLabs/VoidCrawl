@@ -4,20 +4,25 @@ use std::{collections::HashMap, fs, path::PathBuf, time::Duration};
 
 use chromiumoxide::{
     Page as CdpPage,
-    cdp::browser_protocol::{
-        emulation::{SetDeviceMetricsOverrideParams, SetUserAgentOverrideParams},
-        input::{
-            DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams,
-            DispatchMouseEventType, MouseButton,
+    cdp::{
+        browser_protocol::{
+            accessibility::{AxNode, GetFullAxTreeParams, QueryAxTreeParams},
+            dom::{GetDocumentParams, ResolveNodeParams},
+            emulation::{SetDeviceMetricsOverrideParams, SetUserAgentOverrideParams},
+            input::{
+                DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams,
+                DispatchMouseEventType, MouseButton,
+            },
+            network::{
+                Cookie, CookieParam, DeleteCookiesParams, EventResponseReceived, Headers,
+                ResourceType, SetExtraHttpHeadersParams,
+            },
+            page::{
+                AddScriptToEvaluateOnNewDocumentParams, CaptureScreenshotFormat,
+                EventLifecycleEvent, PrintToPdfParams, SetBypassCspParams, Viewport,
+            },
         },
-        network::{
-            Cookie, CookieParam, DeleteCookiesParams, EventResponseReceived, Headers, ResourceType,
-            SetExtraHttpHeadersParams,
-        },
-        page::{
-            AddScriptToEvaluateOnNewDocumentParams, CaptureScreenshotFormat, EventLifecycleEvent,
-            PrintToPdfParams, SetBypassCspParams, Viewport,
-        },
+        js_protocol::runtime::CallFunctionOnParams,
     },
     page::ScreenshotParams,
 };
@@ -469,6 +474,111 @@ impl Page {
     pub async fn pdf_bytes(&self) -> Result<Vec<u8>> {
         let params = PrintToPdfParams::default();
         self.inner.pdf(params).await.map_err(|e| VoidCrawlError::PdfError(e.to_string()))
+    }
+
+    /// Fetch the browser-computed accessibility (AX) tree for the root frame.
+    ///
+    /// Wraps CDP `Accessibility.getFullAXTree`. The result is the raw,
+    /// browser-computed semantic view assistive tech sees: a **flat JSON
+    /// array of nodes** linked by `childIds`/`parentId`, each carrying
+    /// `role`, computed accessible `name`, `properties` (state like
+    /// `focusable`/`expanded`), and `backendDOMNodeId` (the bridge back to
+    /// the DOM). Implicit roles are resolved and `aria-hidden`/`display:none`
+    /// nodes are pruned, so this is far more redesign-durable than markup.
+    ///
+    /// The tree only reflects real content once JavaScript has rendered the
+    /// page — call it after navigation has settled.
+    ///
+    /// `depth` bounds how far descendants are walked; `None` returns the
+    /// whole tree. Nodes are returned verbatim from CDP (no reshaping) so
+    /// callers can address into them however they like.
+    pub async fn get_full_ax_tree(&self, depth: Option<i64>) -> Result<Value> {
+        let params = GetFullAxTreeParams { depth, frame_id: None };
+        let resp = self
+            .inner
+            .execute(params)
+            .await
+            .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        serde_json::to_value(&resp.result.nodes)
+            .map_err(|e| VoidCrawlError::PageError(e.to_string()))
+    }
+
+    /// Query the accessibility tree for nodes matching `role` and/or the
+    /// computed accessible `name`, rooted at the document.
+    ///
+    /// Wraps CDP `Accessibility.queryAXTree`. Name matching is exact (the
+    /// browser's computed accessible name). Returns the matching nodes as
+    /// raw CDP JSON — the AX analogue of `query_selector_all`, but addressing
+    /// by semantics rather than markup. Passing neither `role` nor `name`
+    /// returns every node under the root.
+    pub async fn query_ax_tree(&self, role: Option<&str>, name: Option<&str>) -> Result<Value> {
+        let nodes = self.query_ax_nodes(role, name).await?;
+        serde_json::to_value(&nodes).map_err(|e| VoidCrawlError::PageError(e.to_string()))
+    }
+
+    /// Internal: run `Accessibility.queryAXTree` rooted at the document and
+    /// return the typed matches.
+    async fn query_ax_nodes(&self, role: Option<&str>, name: Option<&str>) -> Result<Vec<AxNode>> {
+        let doc = self
+            .inner
+            .execute(GetDocumentParams::default())
+            .await
+            .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        let params = QueryAxTreeParams {
+            node_id: Some(doc.result.root.node_id),
+            accessible_name: name.map(str::to_string),
+            role: role.map(str::to_string),
+            ..Default::default()
+        };
+        let resp = self
+            .inner
+            .execute(params)
+            .await
+            .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        Ok(resp.result.nodes)
+    }
+
+    /// Click an element addressed by its accessibility `role` and accessible
+    /// `name` — the durable, markup-independent analogue of [`click_element`].
+    ///
+    /// Resolves via `Accessibility.queryAXTree`, picks the `nth` non-ignored
+    /// match (0-based), bridges to the DOM through `backendDOMNodeId`, then
+    /// scrolls it into view and clicks it. Errors if no such node exists.
+    ///
+    /// [`click_element`]: Self::click_element
+    pub async fn click_by_role(&self, role: &str, name: &str, nth: usize) -> Result<()> {
+        let nodes = self.query_ax_nodes(Some(role), Some(name)).await?;
+        let backends: Vec<_> =
+            nodes.iter().filter(|n| !n.ignored).filter_map(|n| n.backend_dom_node_id).collect();
+        let backend_id = backends.get(nth).copied().ok_or_else(|| {
+            VoidCrawlError::PageError(format!(
+                "no AX node with role={role:?} name={name:?} at index {nth} (found {} match(es))",
+                backends.len()
+            ))
+        })?;
+
+        // Bridge AX node → DOM → JS handle, then act on it directly. Using the
+        // element's own click() (rather than coordinate dispatch) avoids the
+        // box-model math and survives elements that are off-screen until
+        // scrolled into view.
+        let resolved = self
+            .inner
+            .execute(ResolveNodeParams { backend_node_id: Some(backend_id), ..Default::default() })
+            .await
+            .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        let object_id = resolved.result.object.object_id.ok_or_else(|| {
+            VoidCrawlError::PageError("AX node could not be resolved to a DOM handle".into())
+        })?;
+        let call = CallFunctionOnParams::builder()
+            .object_id(object_id)
+            .function_declaration(
+                "function(){ this.scrollIntoView({block:'center',inline:'center'}); this.click(); }",
+            )
+            .await_promise(false)
+            .build()
+            .map_err(VoidCrawlError::PageError)?;
+        self.inner.execute(call).await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        Ok(())
     }
 
     // ── DOM Queries ─────────────────────────────────────────────────────
