@@ -22,6 +22,22 @@ use crate::{
     tools::session::DEFAULT_TIMEOUT_SECS,
 };
 
+// ── Schema helpers ───────────────────────────────────────────────────────
+//
+// `serde_json::Value` fields make schemars emit a boolean `true` sub-schema,
+// which Claude Code's tool-output validator rejects — and one bad tool schema
+// fails the ENTIRE `tools/list`, so the client connects but registers zero
+// tools. These emit an explicit permissive object schema (`{}`) instead, which
+// validates cleanly across hosts.
+
+fn any_value_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({})
+}
+
+fn any_value_array_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({ "type": "array", "items": {} })
+}
+
 // ── Click ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, JsonSchema, Default)]
@@ -141,6 +157,7 @@ pub struct EvalJsArgs {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct EvalJsResult {
+    #[schemars(schema_with = "any_value_schema")]
     pub value: Value,
 }
 
@@ -229,6 +246,7 @@ pub struct AxTreeResult {
     /// Indented `role "name"` outline. Populated in compact mode only.
     pub tree:        String,
     /// Raw CDP AX nodes. Populated in raw mode only.
+    #[schemars(schema_with = "any_value_array_schema")]
     pub nodes:       Vec<Value>,
     /// Total AX nodes the browser returned.
     pub node_count:  usize,
