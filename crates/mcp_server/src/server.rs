@@ -23,10 +23,11 @@ use crate::{
     tools,
     tools::{
         actions::{
-            CaptureCaptchaResult, ClickArgs, ClickVisualCoordsArgs, DetectCaptchaResult,
-            EvalJsArgs, EvalJsResult, ExtractArgs, ExtractResult, InjectCaptchaTokenArgs,
-            NetworkCaptureResult, OkResult, SessionIdArgs as ActionSessionIdArgs, SolveCaptchaArgs,
-            SolveCaptchaResult, TitleResult, TypeTextArgs, WaitIdleArgs,
+            AxTreeArgs, AxTreeResult, CaptureCaptchaResult, ClickArgs, ClickByRoleArgs,
+            ClickVisualCoordsArgs, DetectCaptchaResult, EvalJsArgs, EvalJsResult, ExtractArgs,
+            ExtractResult, InjectCaptchaTokenArgs, NetworkCaptureResult, OkResult,
+            SessionIdArgs as ActionSessionIdArgs, SolveCaptchaArgs, SolveCaptchaResult,
+            TitleResult, TypeTextArgs, WaitIdleArgs,
         },
         fetch::{FetchArgs, FetchManyArgs, FetchManyResult, FetchResult},
         introspect::PoolStatus,
@@ -216,6 +217,35 @@ dispatches keys to whatever currently has focus (pair with click_visual_coords f
         Parameters(args): Parameters<ExtractArgs>,
     ) -> Result<Json<ExtractResult>, ErrorData> {
         tools::actions::extract(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "session_ax_tree",
+        description = "Return the page's accessibility (AX) tree — the semantic view assistive \
+tech sees, with implicit roles resolved, accessible names computed, and hidden nodes pruned. \
+Default `mode=compact` gives a pruned, indented role/name outline for reading; `mode=raw` gives \
+full CDP nodes. `named_count` vs `node_count` signals AX richness: when low, fall back to HTML, \
+screenshot, or CSS selectors. Complements (does not replace) the DOM/visual tools."
+    )]
+    pub async fn session_ax_tree(
+        &self,
+        Parameters(args): Parameters<AxTreeArgs>,
+    ) -> Result<Json<AxTreeResult>, ErrorData> {
+        tools::actions::ax_tree(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "click_by_role",
+        description = "Click an element by its accessibility role + accessible name (e.g. \
+role=\"button\", name=\"Load more\") instead of a CSS selector. More durable across redesigns, \
+but flakier when names are ambiguous, localized, or duplicated — pair with session_ax_tree to \
+see available roles/names, and fall back to `click` (CSS) or `click_visual_coords` when it fails."
+    )]
+    pub async fn click_by_role(
+        &self,
+        Parameters(args): Parameters<ClickByRoleArgs>,
+    ) -> Result<Json<OkResult>, ErrorData> {
+        tools::actions::click_by_role(self, args).await.map(Json)
     }
 
     #[tool(

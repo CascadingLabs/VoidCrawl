@@ -5,7 +5,7 @@
 //! and runs one action against its page. These are the Claude-Code-facing
 //! primitives — small, composable, no hidden state.
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, fmt::Write as _, sync::Arc, time::Duration};
 
 use rmcp::ErrorData;
 use schemars::JsonSchema;
@@ -208,6 +208,140 @@ pub async fn extract(
         _ => Vec::new(),
     };
     Ok(ExtractResult { texts })
+}
+
+// ── Accessibility tree ────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema, Default)]
+pub struct AxTreeArgs {
+    pub session_id: String,
+    /// "compact" (default): a pruned, indented role/name outline meant for an
+    /// agent to read. "raw": the full CDP AX nodes for programmatic use.
+    #[serde(default)]
+    pub mode:       Option<String>,
+    /// Maximum descendant depth to traverse; omit for the whole tree.
+    #[serde(default)]
+    pub depth:      Option<i64>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AxTreeResult {
+    /// Indented `role "name"` outline. Populated in compact mode only.
+    pub tree:        String,
+    /// Raw CDP AX nodes. Populated in raw mode only.
+    pub nodes:       Vec<Value>,
+    /// Total AX nodes the browser returned.
+    pub node_count:  usize,
+    /// Non-ignored nodes carrying a non-empty accessible name. A low ratio of
+    /// `named_count` to `node_count` signals a thin/poor AX tree — prefer
+    /// falling back to HTML, screenshot, or CSS selectors on such pages.
+    pub named_count: usize,
+}
+
+pub async fn ax_tree(
+    server: &VoidCrawlServer,
+    args: AxTreeArgs,
+) -> Result<AxTreeResult, ErrorData> {
+    let handle = lookup(server, &args.session_id).await?;
+    let page = handle.page.lock().await;
+    let value = page.get_full_ax_tree(args.depth).await.map_err(map_err)?;
+    let nodes = match value {
+        Value::Array(arr) => arr,
+        _ => Vec::new(),
+    };
+    let node_count = nodes.len();
+    let named_count =
+        nodes.iter().filter(|n| !ax_ignored(n) && !ax_value(n, "name").is_empty()).count();
+
+    let raw = args.mode.as_deref() == Some("raw");
+    let (tree, nodes) =
+        if raw { (String::new(), nodes) } else { (render_compact_ax(&nodes), Vec::new()) };
+    Ok(AxTreeResult { tree, nodes, node_count, named_count })
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Default)]
+pub struct ClickByRoleArgs {
+    pub session_id: String,
+    /// Computed accessibility role, e.g. "button", "link", "checkbox".
+    pub role:       String,
+    /// Computed accessible name (exact match).
+    pub name:       String,
+    /// 0-based index when several nodes match the same role + name.
+    #[serde(default)]
+    pub nth:        Option<usize>,
+}
+
+pub async fn click_by_role(
+    server: &VoidCrawlServer,
+    args: ClickByRoleArgs,
+) -> Result<OkResult, ErrorData> {
+    let handle = lookup(server, &args.session_id).await?;
+    let page = handle.page.lock().await;
+    page.click_by_role(&args.role, &args.name, args.nth.unwrap_or(0)).await.map_err(map_err)?;
+    Ok(OkResult { ok: true })
+}
+
+/// Pull the inner `.value` string out of an AXValue-wrapped field, or "".
+fn ax_value<'a>(node: &'a Value, key: &str) -> &'a str {
+    node.get(key).and_then(|v| v.get("value")).and_then(Value::as_str).unwrap_or("")
+}
+
+fn ax_ignored(node: &Value) -> bool {
+    node.get("ignored").and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// Roles that carry no standalone meaning — collapsed out of the compact
+/// outline (their text folds into an ancestor's accessible name).
+fn ax_is_noise(role: &str, name: &str) -> bool {
+    matches!(role, "StaticText" | "InlineTextBox" | "LineBreak" | "none" | "presentation")
+        || (role == "generic" && name.is_empty())
+}
+
+/// Reconstruct the hierarchy from the flat node list and render a pruned,
+/// indented `role "name"` outline. Skipped nodes don't consume an indent
+/// level, keeping the outline tight.
+fn render_compact_ax(nodes: &[Value]) -> String {
+    let by_id: HashMap<&str, &Value> = nodes
+        .iter()
+        .filter_map(|n| n.get("nodeId").and_then(Value::as_str).map(|id| (id, n)))
+        .collect();
+    let mut out = String::new();
+    for node in nodes {
+        let is_root =
+            node.get("parentId").and_then(Value::as_str).is_none_or(|p| !by_id.contains_key(p));
+        if is_root {
+            if let Some(id) = node.get("nodeId").and_then(Value::as_str) {
+                walk_ax(id, 0, &by_id, &mut out);
+            }
+        }
+    }
+    out
+}
+
+fn walk_ax(id: &str, depth: usize, by_id: &HashMap<&str, &Value>, out: &mut String) {
+    let Some(node) = by_id.get(id) else { return };
+    let role = ax_value(node, "role");
+    let name = ax_value(node, "name");
+    let emit = !ax_ignored(node) && !ax_is_noise(role, name);
+    let child_depth = if emit {
+        for _ in 0..depth {
+            out.push_str("  ");
+        }
+        if name.is_empty() {
+            out.push_str(role);
+        } else {
+            let _ = write!(out, "{role} {name:?}");
+        }
+        out.push('\n');
+        depth + 1
+    } else {
+        depth
+    };
+    if let Some(children) = node.get("childIds").and_then(Value::as_array) {
+        for child in children.iter().filter_map(Value::as_str) {
+            walk_ax(child, child_depth, by_id, out);
+        }
+    }
 }
 
 // ── Wait for network idle ───────────────────────────────────────────────
