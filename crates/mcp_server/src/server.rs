@@ -342,11 +342,29 @@ impl ServerHandler for VoidCrawlServer {
             imp.version = env!("CARGO_PKG_VERSION").into();
             imp
         };
+        // Shipped to EVERY MCP client on connect (Claude, opencode, Codex,
+        // Cursor, Cline, Zed, …), so the AX-first workflow + gotchas reach
+        // hosts that have no skill-file mechanism. Keep this condensed; the
+        // full guide is .claude/skills/voidcrawl/SKILL.md.
         info.instructions = Some(
-            "Stealthy headless browser automation over a shared Chrome pool. \
-Use `fetch` / `fetch_many` for stateless scrapes; `session_open` + `session_navigate` + \
-`session_content` + `session_close` for login/pagination flows. Sessions are isolated \
-(each gets its own Chrome profile), so subagents never share cookies."
+            "Stealthy headless Chrome over a shared, fingerprint-patched tab pool — a drop-in \
+replacement for Playwright / Chromium MCP.\n\n\
+WORKFLOW. Stateless scrape: `fetch` (one URL) or `fetch_many` (parallel; returns \
+{results:[{ok,result,error}]} in input order — per-item errors don't abort the batch, and \
+status_code is nested under each item's `result`). Stateful flows (login, pagination, clicking): \
+`session_open` → `session_navigate` → … → `session_close`. ALWAYS session_close; sessions are \
+cookie-isolated.\n\n\
+PERCEIVE → ACT → EXTRACT. To see a page, call `session_ax_tree` — a compact role/name outline, \
+far cheaper than HTML (don't dump raw HTML to reason over a page). If `named_count` is low vs \
+`node_count` the accessibility tree is thin; fall back to `screenshot`. To click: `click` (CSS \
+selector) or `click_by_role` (accessibility role + accessible name — durable across redesigns); \
+last resort `click_visual_coords` for React forms that ignore synthetic clicks. To extract data, \
+run `extract` / `eval_js` with a JS expression and return data, not markup.\n\n\
+GOTCHAS. `click_by_role` name matching is EXACT (case + whitespace) — read the exact name from \
+`session_ax_tree` first; use `nth` for duplicates. After an in-page (SPA) click, \
+`wait_for_network_idle` may run to its full timeout — pass a short `timeout_secs` or use \
+`wait_for:\"selector:<css>\"`. On a captcha error, surface it and rotate proxy/profile; don't \
+retry the same URL and don't try to solve."
                 .into(),
         );
         info
