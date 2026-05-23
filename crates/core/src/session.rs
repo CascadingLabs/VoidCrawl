@@ -22,6 +22,115 @@ use crate::{
     stealth::StealthConfig,
 };
 
+/// VoidCrawl's default Chrome command-line flags, applied to every launched
+/// (non-remote) session.
+///
+/// Two groups:
+/// 1. **Anti-automation hygiene** — re-adds the safe flags we want after
+///    `disable_default_args()` (which strips chromiumoxide's
+///    `--enable-automation` / `--disable-extensions`, both instant WAF
+///    giveaways), plus the zendriver/nodriver flags known to pass real bot
+///    walls.
+/// 2. **Hardware GPU / WebGL** — new headless disables the GPU and falls back
+///    to SwiftShader software WebGL, which `WEBGL_debug_renderer_info` reports
+///    as "SwiftShader" — a strong bot signal Cloudflare Turnstile weighs. These
+///    force hardware acceleration through ANGLE. (`--disable-gpu-sandbox` lets
+///    the GPU process reach the DRI render node; on boxes with a stale Vulkan
+///    ICD you may also need to steer `VK_DRIVER_FILES` in the launch
+///    environment.) Harmless under headful — a real display already has a GPU.
+///
+/// Flags are stored **without** the leading `--`: chromiumoxide's
+/// `BrowserConfig::arg` prepends `--` itself (it treats the whole string as a
+/// switch key and emits `--{key}`), so passing `"--foo"` would yield the
+/// inert `----foo`. Caller `extra_args` are normalized the same way (a leading
+/// `--` is stripped) — see [`assemble_chrome_args`].
+///
+/// These are merged *before* caller `extra_args`; a caller value for the same
+/// switch replaces the default (see [`assemble_chrome_args`]).
+pub(crate) const DEFAULT_CHROME_ARGS: &[&str] = &[
+    // ── Anti-automation core ────────────────────────────────────────
+    "disable-blink-features=AutomationControlled",
+    "disable-infobars",
+    "disable-features=IsolateOrigins,site-per-process,TranslateUI",
+    // ── Safe defaults from chromiumoxide we keep ────────────────────
+    "disable-background-networking",
+    "disable-background-timer-throttling",
+    "disable-backgrounding-occluded-windows",
+    "disable-breakpad",
+    "disable-client-side-phishing-detection",
+    "disable-component-extensions-with-background-pages",
+    "disable-default-apps",
+    "disable-dev-shm-usage",
+    "disable-hang-monitor",
+    "disable-ipc-flooding-protection",
+    "disable-popup-blocking",
+    "disable-prompt-on-repost",
+    "disable-renderer-backgrounding",
+    "disable-sync",
+    "force-color-profile=srgb",
+    "metrics-recording-only",
+    "no-first-run",
+    "password-store=basic",
+    "use-mock-keychain",
+    // ── Extra zendriver flags ───────────────────────────────────────
+    "no-service-autorun",
+    "no-default-browser-check",
+    "no-pings",
+    "disable-component-update",
+    "disable-session-crashed-bubble",
+    "disable-search-engine-choice-screen",
+    "homepage=about:blank",
+    // ── Hardware GPU / WebGL ────────────────────────────────────────
+    "enable-gpu",
+    "ignore-gpu-blocklist",
+    // ANGLE backend selector — the single GPU-backend knob a caller overrides
+    // (e.g. `use-angle=swiftshader` / `=gl`). Note: do NOT also pass
+    // `enable-features=Vulkan` here; that force-enables Vulkan independently
+    // and would silently defeat a caller's `use-angle` override.
+    "use-angle=vulkan",
+    "disable-gpu-sandbox",
+];
+
+/// Normalize a Chrome flag to the form chromiumoxide wants: strip a single
+/// leading `--` if present, so both `"--use-angle=gl"` (how a human/Python
+/// caller writes it) and `"use-angle=gl"` end up as `use-angle=gl`.
+fn normalize_flag(arg: &str) -> &str {
+    arg.strip_prefix("--").unwrap_or(arg)
+}
+
+/// The switch key of a (normalized) Chrome flag: the part before `=`, or the
+/// whole flag if it takes no value. `use-angle=vulkan` → `use-angle`.
+fn switch_key(arg: &str) -> &str {
+    arg.split_once('=').map_or(arg, |(k, _)| k)
+}
+
+/// Assemble the final Chrome flag list from VoidCrawl's [`DEFAULT_CHROME_ARGS`]
+/// merged with the caller's `extra_args`. Output is in chromiumoxide form (no
+/// leading `--`).
+///
+/// **Override contract (directional control):** caller args are normalized
+/// (leading `--` stripped) and merged by switch key — for each caller arg that
+/// shares a key with a default (e.g. `--use-angle=gl` vs the default
+/// `use-angle=vulkan`), the caller's value *replaces* the default in place,
+/// leaving a single occurrence; novel caller args are appended. We deliberately
+/// do **not** emit duplicate switches and hope Chrome picks the right one — its
+/// precedence is per-switch and inconsistent (`use-angle` takes the *first*
+/// value). Dedup-by-key makes the PyO3/Python override
+/// (`BrowserConfig(extra_args=...)`) deterministic.
+pub(crate) fn assemble_chrome_args(extra_args: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = DEFAULT_CHROME_ARGS.iter().map(|s| (*s).to_string()).collect();
+    for arg in extra_args {
+        let flag = normalize_flag(arg);
+        let key = switch_key(flag);
+        if let Some(slot) = out.iter_mut().find(|d| switch_key(d) == key) {
+            *slot = flag.to_string(); // caller overrides the default for this switch
+        } else {
+            out.push(flag.to_string());
+        }
+    }
+    out
+}
+
 /// How the browser should be acquired.
 #[derive(Debug, Clone, Default)]
 pub enum BrowserMode {
@@ -288,6 +397,15 @@ impl BrowserSession {
 
                 if matches!(mode, BrowserMode::Headful) {
                     builder = builder.with_head();
+                } else {
+                    // Use the *new* headless mode. chromiumoxide defaults to
+                    // `HeadlessMode::True`, which emits the legacy `--headless`
+                    // flag — and legacy headless forces SwiftShader software
+                    // rendering, so `WEBGL_debug_renderer_info` reports
+                    // "SwiftShader", a glaring bot signal that WAFs like
+                    // Cloudflare Turnstile weigh heavily. `--headless=new` runs
+                    // the full browser stack and can drive a real GPU.
+                    builder = builder.new_headless_mode();
                 }
 
                 if let Some(ref exe) = chrome_executable {
@@ -313,51 +431,14 @@ impl BrowserSession {
                     builder = builder.arg(format!("--proxy-server={p}"));
                 }
 
-                for a in extra_args {
+                // VoidCrawl's default Chrome flags merged with the caller's
+                // `extra_args` (dedup-by-switch-key; caller value replaces the
+                // default). Lets the PyO3/Python client override any default
+                // deterministically via `BrowserConfig(extra_args=...)`. See
+                // `assemble_chrome_args` and its unit tests.
+                for a in assemble_chrome_args(&extra_args) {
                     builder = builder.arg(a);
                 }
-
-                // Stealth-first Chrome flags.
-                //
-                // We disabled chromiumoxide's DEFAULT_ARGS above because
-                // they include `--enable-automation` and `--disable-extensions`,
-                // both of which are instant giveaways to Akamai / Cloudflare.
-                //
-                // Below we re-add the safe defaults we still want, plus the
-                // zendriver / nodriver flags that are known to pass real WAFs.
-                builder = builder
-                    // ── Anti-automation core ────────────────────────────
-                    .arg("--disable-blink-features=AutomationControlled")
-                    .arg("--disable-infobars")
-                    .arg("--disable-features=IsolateOrigins,site-per-process,TranslateUI")
-                    // ── Safe defaults from chromiumoxide we keep ────────
-                    .arg("--disable-background-networking")
-                    .arg("--disable-background-timer-throttling")
-                    .arg("--disable-backgrounding-occluded-windows")
-                    .arg("--disable-breakpad")
-                    .arg("--disable-client-side-phishing-detection")
-                    .arg("--disable-component-extensions-with-background-pages")
-                    .arg("--disable-default-apps")
-                    .arg("--disable-dev-shm-usage")
-                    .arg("--disable-hang-monitor")
-                    .arg("--disable-ipc-flooding-protection")
-                    .arg("--disable-popup-blocking")
-                    .arg("--disable-prompt-on-repost")
-                    .arg("--disable-renderer-backgrounding")
-                    .arg("--disable-sync")
-                    .arg("--force-color-profile=srgb")
-                    .arg("--metrics-recording-only")
-                    .arg("--no-first-run")
-                    .arg("--password-store=basic")
-                    .arg("--use-mock-keychain")
-                    // ── Extra zendriver flags ───────────────────────────
-                    .arg("--no-service-autorun")
-                    .arg("--no-default-browser-check")
-                    .arg("--no-pings")
-                    .arg("--disable-component-update")
-                    .arg("--disable-session-crashed-bubble")
-                    .arg("--disable-search-engine-choice-screen")
-                    .arg("--homepage=about:blank");
 
                 let config = builder.build().map_err(VoidCrawlError::LaunchFailed)?;
 
@@ -501,4 +582,79 @@ async fn resolve_ws_url(url: &str) -> Result<String> {
             )
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DEFAULT_CHROME_ARGS, assemble_chrome_args};
+
+    /// Flags are stored WITHOUT a leading `--` (chromiumoxide adds it; a `--`
+    /// here would become the inert `----flag`). Guards the double-dash bug.
+    #[test]
+    fn defaults_have_no_leading_double_dash() {
+        for f in DEFAULT_CHROME_ARGS {
+            assert!(!f.starts_with("--"), "default flag must not start with --: {f}");
+        }
+    }
+
+    /// Hardware-GPU defaults are present (so headless doesn't fall back to
+    /// SwiftShader), alongside the anti-automation core. Forms are un-prefixed.
+    #[test]
+    fn defaults_enable_hardware_gpu_and_antiautomation() {
+        let args = assemble_chrome_args(&[]);
+        for expected in [
+            "use-angle=vulkan",
+            "enable-gpu",
+            "ignore-gpu-blocklist",
+            "disable-gpu-sandbox",
+            "disable-blink-features=AutomationControlled",
+        ] {
+            assert!(args.iter().any(|a| a == expected), "missing default flag: {expected}");
+        }
+    }
+
+    /// Novel caller `extra_args` (no matching default switch) are normalized
+    /// and appended.
+    #[test]
+    fn novel_extra_args_are_normalized_and_appended() {
+        let extra = vec!["--proxy-bypass-list=*".to_string(), "lang=fr".to_string()];
+        let args = assemble_chrome_args(&extra);
+        // Both forms (with/without `--`) land un-prefixed and last.
+        assert_eq!(
+            &args[args.len() - 2..],
+            &["proxy-bypass-list=*".to_string(), "lang=fr".to_string()][..]
+        );
+        assert_eq!(args.len(), DEFAULT_CHROME_ARGS.len() + extra.len());
+    }
+
+    /// The override contract: a caller value for a switch that already has a
+    /// default *replaces* it — exactly one occurrence, default value gone — and
+    /// the caller's `--` is normalized away. (Critical for `use-angle`, which
+    /// Chrome reads first-occurrence-wins, so a duplicate would not override.)
+    #[test]
+    fn caller_value_replaces_default_same_switch() {
+        let args = assemble_chrome_args(&["--use-angle=swiftshader".to_string()]);
+        let angle: Vec<&String> = args.iter().filter(|a| a.starts_with("use-angle")).collect();
+        assert_eq!(angle.len(), 1, "exactly one use-angle flag");
+        assert_eq!(angle[0], "use-angle=swiftshader");
+        assert!(!args.iter().any(|a| a == "use-angle=vulkan"), "default value must be gone");
+        // Length unchanged: replacement, not addition.
+        assert_eq!(args.len(), DEFAULT_CHROME_ARGS.len());
+    }
+
+    /// Replacement happens in place, so unrelated defaults are untouched.
+    #[test]
+    fn override_is_in_place_and_leaves_other_defaults() {
+        let args = assemble_chrome_args(&["--use-angle=gl".to_string()]);
+        assert!(args.iter().any(|a| a == "enable-gpu"));
+        assert!(args.iter().any(|a| a == "disable-blink-features=AutomationControlled"));
+    }
+
+    /// No `extra_args` => exactly the defaults, unchanged order.
+    #[test]
+    fn no_extra_args_is_just_defaults() {
+        let args = assemble_chrome_args(&[]);
+        let defaults: Vec<String> = DEFAULT_CHROME_ARGS.iter().map(|s| s.to_string()).collect();
+        assert_eq!(args, defaults);
+    }
 }
