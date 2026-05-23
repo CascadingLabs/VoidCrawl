@@ -5,11 +5,16 @@ Playwright MCP / Chromium MCP server in Claude Code, opencode, and Codex.
 
 ## 1. Install the server binary (once)
 
-Put `voidcrawl-mcp` on your `PATH`:
+Put `voidcrawl-mcp` on your `PATH`. Pick whichever matches your toolchain — both
+pull published releases, so the skill is drop-in on any machine:
 
 ```bash
-cargo install --path crates/mcp_server
-# → installs `voidcrawl-mcp` to ~/.cargo/bin (must be on PATH)
+# Prebuilt binary, no Rust toolchain needed (recommended):
+uvx voidcrawl-mcp --help          # run on demand, or:
+pipx install voidcrawl-mcp        # install to PATH
+
+# Or build from source (needs a Rust toolchain):
+cargo install voidcrawl-mcp       # → ~/.cargo/bin (must be on PATH)
 ```
 
 Requires Chrome/Chromium installed. Verify:
@@ -18,9 +23,9 @@ Requires Chrome/Chromium installed. Verify:
 voidcrawl-mcp --help   # or: which voidcrawl-mcp
 ```
 
-(Alternatively, after `./build.sh` the binary is at
-`target/release/voidcrawl-mcp` — use that absolute path in the configs below
-if you'd rather not `cargo install`.)
+(From a clone instead of a release: `cargo install --path crates/mcp_server`,
+or after `./build.sh` use the absolute `target/release/voidcrawl-mcp` path in
+the configs below.)
 
 ## 2. Wire it into your host
 

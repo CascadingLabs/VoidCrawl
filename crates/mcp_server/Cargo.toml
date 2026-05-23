@@ -11,6 +11,9 @@ documentation = "https://github.com/CascadingLabs/VoidCrawl/blob/main/docs/mcp-s
 readme = "README.md"
 keywords = ["mcp", "chrome", "cdp", "browser", "automation"]
 categories = ["command-line-utilities", "web-programming"]
+# pyproject.toml is maturin's config for the PyPI wheel build; it has no
+# meaning to cargo, so keep it out of the crates.io source tarball.
+exclude = ["pyproject.toml"]
 
 [[bin]]
 name = "voidcrawl-mcp"

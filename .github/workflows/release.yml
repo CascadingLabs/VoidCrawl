@@ -377,12 +377,21 @@ jobs:
       - name: Publish void_crawl_core
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        # --no-verify skips a redundant rebuild — rust-checks already
-        # covered that. `|| exit 0` on "already uploaded" lets re-tags
-        # succeed when bumping only voidcrawl-mcp.
+        # --no-verify skips a redundant rebuild — rust-checks already covered
+        # that. On failure, only swallow the "this exact version is already on
+        # crates.io" case (lets a re-tag that bumps only voidcrawl-mcp succeed);
+        # any other publish failure is fatal.
         run: |
-          cargo publish -p void_crawl_core --no-verify \
-            || (cargo search void_crawl_core | grep -q "$(grep '^version' crates/core/Cargo.toml | head -1 | cut -d'"' -f2)" && echo "already published" || exit 1)
+          version="$(grep '^version' crates/core/Cargo.toml | head -1 | cut -d'"' -f2)"
+          if cargo publish -p void_crawl_core --no-verify; then
+            echo "published void_crawl_core $version"
+          elif curl -fsS -H 'User-Agent: voidcrawl-ci (contact@cascadinglabs.com)' \
+            "https://crates.io/api/v1/crates/void_crawl_core/$version" >/dev/null; then
+            echo "void_crawl_core $version already on crates.io — skipping"
+          else
+            echo "::error::void_crawl_core publish failed and $version is not on crates.io"
+            exit 1
+          fi
 
       - name: Wait for crates.io index
         run: sleep 45
@@ -391,8 +400,16 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          cargo publish -p voidcrawl-mcp --no-verify \
-            || (cargo search voidcrawl-mcp | grep -q "$(grep '^version' crates/mcp_server/Cargo.toml | head -1 | cut -d'"' -f2)" && echo "already published" || exit 1)
+          version="$(grep '^version' crates/mcp_server/Cargo.toml | head -1 | cut -d'"' -f2)"
+          if cargo publish -p voidcrawl-mcp --no-verify; then
+            echo "published voidcrawl-mcp $version"
+          elif curl -fsS -H 'User-Agent: voidcrawl-ci (contact@cascadinglabs.com)' \
+            "https://crates.io/api/v1/crates/voidcrawl-mcp/$version" >/dev/null; then
+            echo "voidcrawl-mcp $version already on crates.io — skipping"
+          else
+            echo "::error::voidcrawl-mcp publish failed and $version is not on crates.io"
+            exit 1
+          fi
 
   # ── Create GitHub Release ────────────────────────────────────────────────
   github-release:
