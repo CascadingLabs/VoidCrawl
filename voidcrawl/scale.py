@@ -478,10 +478,18 @@ def generate_supervisord_conf(report: ScaleReport, base_port: int | None = None)
     if base_port is None:
         base_port = _default_base_port()
     chrome = "/usr/bin/chromium"
+    # Hardware GPU via ANGLE/Vulkan (NOT --disable-gpu, which forces SwiftShader
+    # software WebGL — a strong bot signal). Requires Mesa drivers in the image
+    # + /dev/dri passthrough (see docker/Dockerfile and docker-compose.yml).
+    # Mirrors the GPU group of `DEFAULT_CHROME_ARGS` in crates/core/src/session.rs;
+    # keep the two in sync.
     base_flags = (
         "--no-sandbox"
         " --no-zygote"
-        " --disable-gpu"
+        " --enable-gpu"
+        " --ignore-gpu-blocklist"
+        " --use-angle=vulkan"
+        " --disable-gpu-sandbox"
         " --disable-dev-shm-usage"
         " --disable-background-networking"
         " --disable-component-update"

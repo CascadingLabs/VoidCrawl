@@ -4,7 +4,7 @@ use std::{
     fmt,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Once,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -13,6 +13,7 @@ use chromiumoxide::{
     browser::{Browser, BrowserConfig},
     handler::Handler,
 };
+use rustls::crypto::ring::default_provider as ring_crypto_provider;
 use serde_json::Value;
 use tokio::{sync::Mutex, task::JoinHandle};
 
@@ -565,6 +566,16 @@ async fn resolve_ws_url(url: &str) -> Result<String> {
     if url.starts_with("ws://") || url.starts_with("wss://") {
         return Ok(url.to_string());
     }
+
+    // reqwest is built with `rustls-no-provider`, so we must install a rustls
+    // CryptoProvider before the first request or reqwest panics "No provider
+    // set" (even for this plain-HTTP localhost fetch). Install the `ring`
+    // provider exactly once; `install_default` errors if already set, so the
+    // `Once` + ignored result is idempotent.
+    static CRYPTO_INIT: Once = Once::new();
+    CRYPTO_INIT.call_once(|| {
+        let _ = ring_crypto_provider().install_default();
+    });
 
     // Treat as an HTTP endpoint, fetch /json/version
     let version_url = format!("{}/json/version", url.trim_end_matches('/'));

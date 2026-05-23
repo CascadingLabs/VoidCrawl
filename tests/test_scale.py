@@ -372,11 +372,29 @@ class TestGenerateSupervisordConf:
         for flag in [
             "--no-sandbox",
             "--no-zygote",
-            "--disable-gpu",
             "--disable-dev-shm-usage",
             "--disable-blink-features=AutomationControlled",
         ]:
             assert flag in conf
+
+    def test_chrome_uses_hardware_gpu_not_swiftshader(
+        self, snapshot_server: ResourceSnapshot
+    ) -> None:
+        # Hardware GPU via ANGLE, not `--disable-gpu` (which forces SwiftShader
+        # software WebGL — a bot signal). See CAS-64.
+        report = compute_scale("balanced", snapshot=snapshot_server)
+        conf = generate_supervisord_conf(report)
+        for flag in [
+            "--enable-gpu",
+            "--ignore-gpu-blocklist",
+            "--use-angle=vulkan",
+            "--disable-gpu-sandbox",
+        ]:
+            assert flag in conf
+        # The software-rendering flag must be gone (guard against the substring
+        # match with --disable-gpu-sandbox by checking for a flag boundary).
+        assert "--disable-gpu " not in conf
+        assert not conf.rstrip().endswith("--disable-gpu")
 
 
 # ── Edge cases ───────────────────────────────────────────────────────────

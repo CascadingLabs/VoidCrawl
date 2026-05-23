@@ -26,6 +26,16 @@ services:
     # — host networking works around this.
     network_mode: host
     shm_size: "2gb"
+    # Hardware GPU/WebGL: pass the DRM render node so the Chrome farm uses the
+    # host's Intel/AMD GPU via Mesa (ANGLE/Vulkan) instead of SwiftShader.
+    # Harmless if absent — Chrome falls back to software rendering. For NVIDIA,
+    # drop this and use the nvidia-container-toolkit (`gpus: all`) instead.
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      # Grant access to the render node (its group GID varies by host;
+      # `render` is the common name on Debian/Ubuntu/Arch).
+      - "render"
     healthcheck:
       test: >
         curl -sf http://localhost:${CDP_PORT_1:-9222}/json/version &&

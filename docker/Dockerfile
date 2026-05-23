@@ -17,6 +17,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libasound2 \
         libpangocairo-1.0-0 \
         libgtk-3-0 \
+        # Hardware GPU/WebGL via ANGLE: Mesa Vulkan drivers for Intel (ANV) +
+        # AMD (RADV) and Mesa GL, plus the Vulkan loader. Without these the
+        # Chrome farm renders with SwiftShader (software) — a strong bot
+        # signal. Requires /dev/dri passthrough at runtime (compose `devices`).
+        # NVIDIA instead needs the host nvidia-container-toolkit + `--gpus all`.
+        mesa-vulkan-drivers \
+        libgl1-mesa-dri \
+        libvulkan1 \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
               /usr/share/doc/* /usr/share/man/* /usr/share/locale/* \
     && mkdir -p /tmp/chrome-profile-1 /tmp/chrome-profile-2
