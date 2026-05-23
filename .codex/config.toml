@@ -1,0 +1,12 @@
+# Project-scoped Codex config. Registers the voidcrawl MCP server so Codex can
+# drive stealth headless Chrome in this repo. Requires the `voidcrawl-mcp`
+# binary on PATH (see .claude/skills/voidcrawl/SETUP.md). Codex has no "skills"
+# mechanism, so the usage guidance is pointed to from AGENTS.md.
+[mcp_servers.voidcrawl]
+command = "voidcrawl-mcp"
+args = []
+
+[mcp_servers.voidcrawl.env]
+BROWSER_COUNT = "1"
+TABS_PER_BROWSER = "5"
+CHROME_HEADLESS = "1"
