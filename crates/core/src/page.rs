@@ -7,8 +7,12 @@ use chromiumoxide::{
     cdp::{
         browser_protocol::{
             accessibility::{AxNode, GetFullAxTreeParams, QueryAxTreeParams},
+            browser::{PermissionDescriptor, PermissionSetting, SetPermissionParams},
             dom::{GetDocumentParams, ResolveNodeParams},
-            emulation::{SetDeviceMetricsOverrideParams, SetUserAgentOverrideParams},
+            emulation::{
+                SetDeviceMetricsOverrideParams, SetGeolocationOverrideParams,
+                SetLocaleOverrideParams, SetTimezoneOverrideParams, SetUserAgentOverrideParams,
+            },
             input::{
                 DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams,
                 DispatchMouseEventType, MouseButton,
@@ -31,6 +35,7 @@ use serde_json::Value;
 use tokio::time;
 
 use crate::{
+    ax::compact_outline,
     error::{Result, VoidCrawlError},
     stealth::StealthConfig,
 };
@@ -503,6 +508,15 @@ impl Page {
             .map_err(|e| VoidCrawlError::PageError(e.to_string()))
     }
 
+    /// Fetch the AX tree and render it as a compact, indented `role "name"`
+    /// outline — the readable view, with text-noise and hidden nodes pruned.
+    /// See [`crate::ax::compact_outline`] for the raw-nodes → string helper.
+    pub async fn ax_tree_outline(&self, depth: Option<i64>) -> Result<String> {
+        let tree = self.get_full_ax_tree(depth).await?;
+        let nodes = tree.as_array().map_or(&[][..], Vec::as_slice);
+        Ok(compact_outline(nodes))
+    }
+
     /// Query the accessibility tree for nodes matching `role` and/or the
     /// computed accessible `name`, rooted at the document.
     ///
@@ -578,6 +592,63 @@ impl Page {
             .build()
             .map_err(VoidCrawlError::PageError)?;
         self.inner.execute(call).await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        Ok(())
+    }
+
+    // ── Emulation ───────────────────────────────────────────────────────
+
+    /// Override the page's geolocation. Geo-aware sites (maps, "near me"
+    /// search, store locators) will behave as if the browser is at these
+    /// coordinates. `accuracy` defaults to 50 metres.
+    ///
+    /// Note: sites that read `navigator.geolocation` still gate on the
+    /// geolocation *permission* (granted here) and require a secure context
+    /// (https / localhost), not `data:` URLs. Header/IP-driven geo (e.g.
+    /// Google Maps) keys off [`set_locale`] and the request URL more than this.
+    ///
+    /// [`set_locale`]: Self::set_locale
+    pub async fn set_geolocation(
+        &self,
+        latitude: f64,
+        longitude: f64,
+        accuracy: Option<f64>,
+    ) -> Result<()> {
+        // Grant the geolocation permission first, otherwise headless Chrome
+        // auto-denies `navigator.geolocation` and the override is never read.
+        // Origin omitted → applies to every origin (incl. opaque `data:`).
+        let grant = SetPermissionParams {
+            permission:         PermissionDescriptor::new("geolocation"),
+            setting:            PermissionSetting::Granted,
+            origin:             None,
+            embedded_origin:    None,
+            browser_context_id: None,
+        };
+        self.inner.execute(grant).await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+
+        let params = SetGeolocationOverrideParams {
+            latitude: Some(latitude),
+            longitude: Some(longitude),
+            accuracy: Some(accuracy.unwrap_or(50.0)),
+            ..Default::default()
+        };
+        self.inner.execute(params).await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Override the JS locale and `Accept-Language` (e.g. `"en-US"`,
+    /// `"fr-FR"`). This is the lever that shifts region-aware content like
+    /// Google Maps results or localized pricing.
+    pub async fn set_locale(&self, locale: &str) -> Result<()> {
+        let params = SetLocaleOverrideParams { locale: Some(locale.to_string()) };
+        self.inner.execute(params).await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Override the timezone by IANA id (e.g. `"America/New_York"`). Affects
+    /// `Date`, `Intl`, and any server probes that read the rendered clock.
+    pub async fn set_timezone(&self, timezone_id: &str) -> Result<()> {
+        let params = SetTimezoneOverrideParams::new(timezone_id.to_string());
+        self.inner.execute(params).await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
         Ok(())
     }
 

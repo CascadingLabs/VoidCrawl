@@ -2,6 +2,7 @@
 //!
 //! This crate provides `BrowserSession` and `Page` as the primary API.
 
+pub mod ax;
 pub mod captcha;
 pub mod error;
 pub mod page;

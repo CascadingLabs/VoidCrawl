@@ -455,6 +455,18 @@ impl PyPage {
         with_page_map!(self, py, |page| page.get_full_ax_tree(depth), |val| PyJsonValue(val))
     }
 
+    /// Fetch the AX tree as a compact, indented ``role "name"`` outline string
+    /// (text-noise and hidden nodes pruned) — the readable counterpart to
+    /// ``get_full_ax_tree``.
+    #[pyo3(signature = (depth=None))]
+    fn ax_tree_outline<'py>(
+        &self,
+        py: Python<'py>,
+        depth: Option<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_page!(self, py, |page| page.ax_tree_outline(depth))
+    }
+
     /// Query the AX tree for nodes matching ``role`` and/or accessible
     /// ``name`` (`Accessibility.queryAXTree`). Returns a list of node dicts.
     #[pyo3(signature = (role=None, name=None))]
@@ -484,6 +496,33 @@ impl PyPage {
         nth: usize,
     ) -> PyResult<Bound<'py, PyAny>> {
         with_page!(self, py, |page| page.click_by_role(&role, &name, nth))
+    }
+
+    /// Override geolocation (and grant the permission). `accuracy` defaults
+    /// to 50 metres. `navigator.geolocation` reads require a secure context.
+    #[pyo3(signature = (latitude, longitude, accuracy=None))]
+    fn set_geolocation<'py>(
+        &self,
+        py: Python<'py>,
+        latitude: f64,
+        longitude: f64,
+        accuracy: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_page!(self, py, |page| page.set_geolocation(latitude, longitude, accuracy))
+    }
+
+    /// Override the locale (Intl + Accept-Language), e.g. "en-US", "fr-FR".
+    fn set_locale<'py>(&self, py: Python<'py>, locale: String) -> PyResult<Bound<'py, PyAny>> {
+        with_page!(self, py, |page| page.set_locale(&locale))
+    }
+
+    /// Override the timezone by IANA id, e.g. `America/New_York`.
+    fn set_timezone<'py>(
+        &self,
+        py: Python<'py>,
+        timezone_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_page!(self, py, |page| page.set_timezone(&timezone_id))
     }
 
     /// Query for an element by CSS selector, return its inner HTML or None.
@@ -996,6 +1035,18 @@ impl PyPooledTab {
         with_pooled_page_map!(self, py, |page| page.get_full_ax_tree(depth), |val| PyJsonValue(val))
     }
 
+    /// Fetch the AX tree as a compact, indented ``role "name"`` outline string
+    /// (text-noise and hidden nodes pruned) — the readable counterpart to
+    /// ``get_full_ax_tree``.
+    #[pyo3(signature = (depth=None))]
+    fn ax_tree_outline<'py>(
+        &self,
+        py: Python<'py>,
+        depth: Option<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page!(self, py, |page| page.ax_tree_outline(depth))
+    }
+
     /// Query the AX tree for nodes matching ``role`` and/or accessible
     /// ``name`` (`Accessibility.queryAXTree`). Returns a list of node dicts.
     #[pyo3(signature = (role=None, name=None))]
@@ -1025,6 +1076,33 @@ impl PyPooledTab {
         nth: usize,
     ) -> PyResult<Bound<'py, PyAny>> {
         with_pooled_page!(self, py, |page| page.click_by_role(&role, &name, nth))
+    }
+
+    /// Override geolocation (and grant the permission). `accuracy` defaults
+    /// to 50 metres. `navigator.geolocation` reads require a secure context.
+    #[pyo3(signature = (latitude, longitude, accuracy=None))]
+    fn set_geolocation<'py>(
+        &self,
+        py: Python<'py>,
+        latitude: f64,
+        longitude: f64,
+        accuracy: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page!(self, py, |page| page.set_geolocation(latitude, longitude, accuracy))
+    }
+
+    /// Override the locale (Intl + Accept-Language), e.g. "en-US", "fr-FR".
+    fn set_locale<'py>(&self, py: Python<'py>, locale: String) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page!(self, py, |page| page.set_locale(&locale))
+    }
+
+    /// Override the timezone by IANA id, e.g. `America/New_York`.
+    fn set_timezone<'py>(
+        &self,
+        py: Python<'py>,
+        timezone_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page!(self, py, |page| page.set_timezone(&timezone_id))
     }
 
     fn query_selector<'py>(

@@ -5,7 +5,7 @@
 //! and runs one action against its page. These are the Claude-Code-facing
 //! primitives — small, composable, no hidden state.
 
-use std::{collections::HashMap, fmt::Write as _, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use rmcp::ErrorData;
 use schemars::JsonSchema;
@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::time::{Instant, sleep};
 use void_crawl_core::{
-    CaptchaInfo, CaptchaKind, DispatchMouseEventType, MouseButton, capture_captcha, detect_captcha,
-    inject_captcha_token,
+    CaptchaInfo, CaptchaKind, DispatchMouseEventType, MouseButton, ax, capture_captcha,
+    detect_captcha, inject_captcha_token,
 };
 
 use crate::{
@@ -249,13 +249,11 @@ pub async fn ax_tree(
         Value::Array(arr) => arr,
         _ => Vec::new(),
     };
-    let node_count = nodes.len();
-    let named_count =
-        nodes.iter().filter(|n| !ax_ignored(n) && !ax_value(n, "name").is_empty()).count();
+    let (node_count, named_count) = ax::richness(&nodes);
 
     let raw = args.mode.as_deref() == Some("raw");
     let (tree, nodes) =
-        if raw { (String::new(), nodes) } else { (render_compact_ax(&nodes), Vec::new()) };
+        if raw { (String::new(), nodes) } else { (ax::compact_outline(&nodes), Vec::new()) };
     Ok(AxTreeResult { tree, nodes, node_count, named_count })
 }
 
@@ -279,69 +277,6 @@ pub async fn click_by_role(
     let page = handle.page.lock().await;
     page.click_by_role(&args.role, &args.name, args.nth.unwrap_or(0)).await.map_err(map_err)?;
     Ok(OkResult { ok: true })
-}
-
-/// Pull the inner `.value` string out of an AXValue-wrapped field, or "".
-fn ax_value<'a>(node: &'a Value, key: &str) -> &'a str {
-    node.get(key).and_then(|v| v.get("value")).and_then(Value::as_str).unwrap_or("")
-}
-
-fn ax_ignored(node: &Value) -> bool {
-    node.get("ignored").and_then(Value::as_bool).unwrap_or(false)
-}
-
-/// Roles that carry no standalone meaning — collapsed out of the compact
-/// outline (their text folds into an ancestor's accessible name).
-fn ax_is_noise(role: &str, name: &str) -> bool {
-    matches!(role, "StaticText" | "InlineTextBox" | "LineBreak" | "none" | "presentation")
-        || (role == "generic" && name.is_empty())
-}
-
-/// Reconstruct the hierarchy from the flat node list and render a pruned,
-/// indented `role "name"` outline. Skipped nodes don't consume an indent
-/// level, keeping the outline tight.
-fn render_compact_ax(nodes: &[Value]) -> String {
-    let by_id: HashMap<&str, &Value> = nodes
-        .iter()
-        .filter_map(|n| n.get("nodeId").and_then(Value::as_str).map(|id| (id, n)))
-        .collect();
-    let mut out = String::new();
-    for node in nodes {
-        let is_root =
-            node.get("parentId").and_then(Value::as_str).is_none_or(|p| !by_id.contains_key(p));
-        if is_root {
-            if let Some(id) = node.get("nodeId").and_then(Value::as_str) {
-                walk_ax(id, 0, &by_id, &mut out);
-            }
-        }
-    }
-    out
-}
-
-fn walk_ax(id: &str, depth: usize, by_id: &HashMap<&str, &Value>, out: &mut String) {
-    let Some(node) = by_id.get(id) else { return };
-    let role = ax_value(node, "role");
-    let name = ax_value(node, "name");
-    let emit = !ax_ignored(node) && !ax_is_noise(role, name);
-    let child_depth = if emit {
-        for _ in 0..depth {
-            out.push_str("  ");
-        }
-        if name.is_empty() {
-            out.push_str(role);
-        } else {
-            let _ = write!(out, "{role} {name:?}");
-        }
-        out.push('\n');
-        depth + 1
-    } else {
-        depth
-    };
-    if let Some(children) = node.get("childIds").and_then(Value::as_array) {
-        for child in children.iter().filter_map(Value::as_str) {
-            walk_ax(child, child_depth, by_id, out);
-        }
-    }
 }
 
 // ── Wait for network idle ───────────────────────────────────────────────
@@ -757,88 +692,4 @@ async fn lookup(server: &VoidCrawlServer, id: &str) -> Result<Arc<DedicatedSessi
         .get(id)
         .await
         .ok_or_else(|| ErrorData::invalid_params(format!("unknown session_id: {id}"), None))
-}
-
-#[cfg(test)]
-mod tests {
-    //! Pure-logic tests for the compact AX-tree renderer — no browser. These
-    //! exercise hierarchy reconstruction and noise-pruning over synthetic CDP
-    //! node lists, which is where the rendering bugs would actually live.
-    use serde_json::json;
-
-    use super::{Value, ax_is_noise, render_compact_ax};
-
-    /// Build a CDP-shaped AX node. `role`/`name` are wrapped in the AXValue
-    /// `{type,value}` envelope the browser emits.
-    fn node(id: &str, parent: Option<&str>, role: &str, name: &str, children: &[&str]) -> Value {
-        json!({
-            "nodeId": id,
-            "ignored": false,
-            "role": { "type": "role", "value": role },
-            "name": { "type": "computedString", "value": name },
-            "parentId": parent,
-            "childIds": children,
-        })
-    }
-
-    #[test]
-    fn renders_role_and_name_indented_by_depth() {
-        let nodes = vec![
-            node("1", None, "RootWebArea", "Doc", &["2"]),
-            node("2", Some("1"), "button", "Load more", &[]),
-        ];
-        let out = render_compact_ax(&nodes);
-        assert_eq!(out, "RootWebArea \"Doc\"\n  button \"Load more\"\n");
-    }
-
-    #[test]
-    fn collapses_text_noise_without_consuming_indent() {
-        // StaticText/InlineTextBox carry no standalone meaning: they should be
-        // dropped, and dropping them must NOT push their siblings deeper.
-        let nodes = vec![
-            node("1", None, "RootWebArea", "", &["2"]),
-            node("2", Some("1"), "button", "Click me", &["3", "4"]),
-            node("3", Some("2"), "StaticText", "Click me", &[]),
-            node("4", Some("2"), "InlineTextBox", "Click me", &[]),
-        ];
-        let out = render_compact_ax(&nodes);
-        assert_eq!(out, "RootWebArea\n  button \"Click me\"\n");
-    }
-
-    #[test]
-    fn skips_ignored_nodes_but_keeps_descendants() {
-        // An ignored wrapper should vanish while its meaningful child survives
-        // and is hoisted to the wrapper's indent level.
-        let nodes = vec![
-            node("1", None, "RootWebArea", "", &["2"]),
-            json!({
-                "nodeId": "2", "ignored": true,
-                "role": { "type": "role", "value": "generic" },
-                "parentId": "1", "childIds": ["3"],
-            }),
-            node("3", Some("2"), "link", "Home", &[]),
-        ];
-        let out = render_compact_ax(&nodes);
-        assert_eq!(out, "RootWebArea\n  link \"Home\"\n");
-    }
-
-    #[test]
-    fn unnamed_generic_is_noise_named_generic_is_not() {
-        assert!(ax_is_noise("generic", ""));
-        assert!(!ax_is_noise("generic", "Sidebar"));
-        assert!(ax_is_noise("StaticText", "anything"));
-        assert!(!ax_is_noise("button", ""));
-    }
-
-    #[test]
-    fn handles_orphans_as_additional_roots() {
-        // A node whose parent isn't in the list is treated as a root, so no
-        // content silently disappears.
-        let nodes = vec![
-            node("1", None, "RootWebArea", "", &[]),
-            node("99", Some("missing"), "button", "Orphan", &[]),
-        ];
-        let out = render_compact_ax(&nodes);
-        assert!(out.contains("button \"Orphan\""), "orphan node must still render: {out:?}");
-    }
 }

@@ -90,6 +90,13 @@ class PooledTab:
                 whole tree.
         """
         ...
+    async def ax_tree_outline(self, depth: int | None = None) -> str:
+        """Return the AX tree as a compact, indented ``role "name"`` outline.
+
+        Readable counterpart to :meth:`get_full_ax_tree`: text-noise and hidden
+        nodes are pruned. Same output the MCP ``session_ax_tree`` tool renders.
+        """
+        ...
     async def query_ax_tree(
         self, role: str | None = None, name: str | None = None
     ) -> list[dict[str, Any]]:
@@ -112,6 +119,21 @@ class PooledTab:
             name: Computed accessible name (exact match).
             nth: 0-based index when several nodes match.
         """
+        ...
+    async def set_geolocation(
+        self, latitude: float, longitude: float, accuracy: float | None = None
+    ) -> None:
+        """Override geolocation and grant the geolocation permission.
+
+        ``navigator.geolocation`` reads require a secure context (https /
+        localhost), not ``data:`` URLs. ``accuracy`` defaults to 50 metres.
+        """
+        ...
+    async def set_locale(self, locale: str) -> None:
+        """Override the locale (Intl + ``Accept-Language``), e.g. ``"fr-FR"``."""
+        ...
+    async def set_timezone(self, timezone_id: str) -> None:
+        """Override the timezone by IANA id, e.g. ``"America/New_York"``."""
         ...
     async def query_selector(self, selector: str) -> str | None:
         """Return the inner HTML of the first element matching *selector*, or ``None``.
@@ -366,6 +388,13 @@ class Page:
                 whole tree.
         """
         ...
+    async def ax_tree_outline(self, depth: int | None = None) -> str:
+        """Return the AX tree as a compact, indented ``role "name"`` outline.
+
+        Readable counterpart to :meth:`get_full_ax_tree`: text-noise and hidden
+        nodes are pruned. Same output the MCP ``session_ax_tree`` tool renders.
+        """
+        ...
     async def query_ax_tree(
         self, role: str | None = None, name: str | None = None
     ) -> list[dict[str, Any]]:
@@ -388,6 +417,21 @@ class Page:
             name: Computed accessible name (exact match).
             nth: 0-based index when several nodes match.
         """
+        ...
+    async def set_geolocation(
+        self, latitude: float, longitude: float, accuracy: float | None = None
+    ) -> None:
+        """Override geolocation and grant the geolocation permission.
+
+        ``navigator.geolocation`` reads require a secure context (https /
+        localhost), not ``data:`` URLs. ``accuracy`` defaults to 50 metres.
+        """
+        ...
+    async def set_locale(self, locale: str) -> None:
+        """Override the locale (Intl + ``Accept-Language``), e.g. ``"fr-FR"``."""
+        ...
+    async def set_timezone(self, timezone_id: str) -> None:
+        """Override the timezone by IANA id, e.g. ``"America/New_York"``."""
         ...
     async def query_selector(self, selector: str) -> str | None:
         """Return inner HTML of the first matching element."""
