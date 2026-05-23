@@ -758,3 +758,87 @@ async fn lookup(server: &VoidCrawlServer, id: &str) -> Result<Arc<DedicatedSessi
         .await
         .ok_or_else(|| ErrorData::invalid_params(format!("unknown session_id: {id}"), None))
 }
+
+#[cfg(test)]
+mod tests {
+    //! Pure-logic tests for the compact AX-tree renderer — no browser. These
+    //! exercise hierarchy reconstruction and noise-pruning over synthetic CDP
+    //! node lists, which is where the rendering bugs would actually live.
+    use serde_json::json;
+
+    use super::{Value, ax_is_noise, render_compact_ax};
+
+    /// Build a CDP-shaped AX node. `role`/`name` are wrapped in the AXValue
+    /// `{type,value}` envelope the browser emits.
+    fn node(id: &str, parent: Option<&str>, role: &str, name: &str, children: &[&str]) -> Value {
+        json!({
+            "nodeId": id,
+            "ignored": false,
+            "role": { "type": "role", "value": role },
+            "name": { "type": "computedString", "value": name },
+            "parentId": parent,
+            "childIds": children,
+        })
+    }
+
+    #[test]
+    fn renders_role_and_name_indented_by_depth() {
+        let nodes = vec![
+            node("1", None, "RootWebArea", "Doc", &["2"]),
+            node("2", Some("1"), "button", "Load more", &[]),
+        ];
+        let out = render_compact_ax(&nodes);
+        assert_eq!(out, "RootWebArea \"Doc\"\n  button \"Load more\"\n");
+    }
+
+    #[test]
+    fn collapses_text_noise_without_consuming_indent() {
+        // StaticText/InlineTextBox carry no standalone meaning: they should be
+        // dropped, and dropping them must NOT push their siblings deeper.
+        let nodes = vec![
+            node("1", None, "RootWebArea", "", &["2"]),
+            node("2", Some("1"), "button", "Click me", &["3", "4"]),
+            node("3", Some("2"), "StaticText", "Click me", &[]),
+            node("4", Some("2"), "InlineTextBox", "Click me", &[]),
+        ];
+        let out = render_compact_ax(&nodes);
+        assert_eq!(out, "RootWebArea\n  button \"Click me\"\n");
+    }
+
+    #[test]
+    fn skips_ignored_nodes_but_keeps_descendants() {
+        // An ignored wrapper should vanish while its meaningful child survives
+        // and is hoisted to the wrapper's indent level.
+        let nodes = vec![
+            node("1", None, "RootWebArea", "", &["2"]),
+            json!({
+                "nodeId": "2", "ignored": true,
+                "role": { "type": "role", "value": "generic" },
+                "parentId": "1", "childIds": ["3"],
+            }),
+            node("3", Some("2"), "link", "Home", &[]),
+        ];
+        let out = render_compact_ax(&nodes);
+        assert_eq!(out, "RootWebArea\n  link \"Home\"\n");
+    }
+
+    #[test]
+    fn unnamed_generic_is_noise_named_generic_is_not() {
+        assert!(ax_is_noise("generic", ""));
+        assert!(!ax_is_noise("generic", "Sidebar"));
+        assert!(ax_is_noise("StaticText", "anything"));
+        assert!(!ax_is_noise("button", ""));
+    }
+
+    #[test]
+    fn handles_orphans_as_additional_roots() {
+        // A node whose parent isn't in the list is treated as a root, so no
+        // content silently disappears.
+        let nodes = vec![
+            node("1", None, "RootWebArea", "", &[]),
+            node("99", Some("missing"), "button", "Orphan", &[]),
+        ];
+        let out = render_compact_ax(&nodes);
+        assert!(out.contains("button \"Orphan\""), "orphan node must still render: {out:?}");
+    }
+}
