@@ -12,6 +12,7 @@ use chromiumoxide::{
             emulation::{
                 SetDeviceMetricsOverrideParams, SetGeolocationOverrideParams,
                 SetLocaleOverrideParams, SetTimezoneOverrideParams, SetUserAgentOverrideParams,
+                UserAgentBrandVersion, UserAgentMetadata,
             },
             input::{
                 DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams,
@@ -126,32 +127,40 @@ impl Page {
             }
         }
 
-        // 2. User-agent override.
+        // 2. User-agent override + matching Client Hints.
         //
         // Three cases, in precedence order:
         //   a. Caller supplied an explicit `user_agent` — use it verbatim.
         //   b. No explicit UA, but `use_builtin_stealth` already applied
         //      its own agent via `enable_stealth_mode_with_agent` — skip.
         //   c. Default (cfg.user_agent = None, builtin stealth off): probe
-        //      the browser's real UA and strip "HeadlessChrome" →
-        //      "Chrome". Shipping `HeadlessChrome/<ver>` is an instant
-        //      WAF fingerprint; stripping keeps the version accurate
-        //      without hardcoding a stale UA string.
+        //      the browser's *real* UA and strip any "Headless" token. We
+        //      override even when nothing was stripped, because the override
+        //      is also what makes `navigator.platform` and
+        //      `navigator.userAgentData` (Client Hints) CONSISTENT with the
+        //      UA — a UA that says Linux while `navigator.platform` says
+        //      "Win32" or `userAgentData.brands` is empty is itself a strong
+        //      bot signal.
         let override_ua = if let Some(ua) = cfg.user_agent.clone() {
             Some(ua)
         } else if cfg.use_builtin_stealth {
             None
         } else {
-            dehead_user_agent(&self.inner).await?
+            probe_user_agent(&self.inner).await?.map(|ua| dehead(&ua))
         };
 
         if let Some(ua) = override_ua {
-            let params = SetUserAgentOverrideParams::builder()
+            // Derive a coherent navigator.platform + Client-Hints metadata
+            // from the UA so all three agree.
+            let (nav_platform, metadata) = client_hints_for_ua(&ua);
+            let mut builder = SetUserAgentOverrideParams::builder()
                 .user_agent(ua)
                 .accept_language(&cfg.locale)
-                .platform("Win32")
-                .build()
-                .map_err(VoidCrawlError::PageError)?;
+                .platform(nav_platform);
+            if let Some(metadata) = metadata {
+                builder = builder.user_agent_metadata(metadata);
+            }
+            let params = builder.build().map_err(VoidCrawlError::PageError)?;
             self.inner
                 .execute(params)
                 .await
@@ -883,20 +892,138 @@ impl Page {
 /// instant bot signal. By probing the real UA and rewriting only the
 /// `Headless` substring, we keep the version accurate (no stale
 /// hardcoded UA string) while removing the fingerprint.
-async fn dehead_user_agent(page: &CdpPage) -> Result<Option<String>> {
+async fn probe_user_agent(page: &CdpPage) -> Result<Option<String>> {
     let probe = page
         .evaluate("navigator.userAgent")
         .await
         .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
-    let Some(Value::String(ua)) = probe.value().cloned() else {
-        return Ok(None);
-    };
+    match probe.value().cloned() {
+        Some(Value::String(ua)) => Ok(Some(ua)),
+        _ => Ok(None),
+    }
+}
+
+/// Strip any "Headless" token from a UA. Headless Chrome advertises
+/// `HeadlessChrome/<ver>` — an instant bot signal. Rewriting only the
+/// `Headless` substring keeps the version accurate (no stale hardcoded UA).
+fn dehead(ua: &str) -> String {
     if ua.contains("HeadlessChrome") {
-        Ok(Some(ua.replace("HeadlessChrome", "Chrome")))
+        ua.replace("HeadlessChrome", "Chrome")
     } else if ua.contains("Headless") {
-        // Belt-and-suspenders for other Chromium-based headless flavors.
-        Ok(Some(ua.replace("Headless", "")))
+        ua.replace("Headless", "")
     } else {
-        Ok(None)
+        ua.to_string()
+    }
+}
+
+/// Derive a coherent `navigator.platform` value and Client-Hints
+/// [`UserAgentMetadata`] from a UA string, so the UA, `navigator.platform`,
+/// and `navigator.userAgentData` all agree. A mismatch between them (e.g. a
+/// Linux UA with `navigator.platform == "Win32"`, or empty `brands`) is a
+/// strong bot signal. Best-effort: an unrecognized UA gets a generic
+/// Linux/x86_64 identity, and a missing Chrome version yields empty brands
+/// rather than a wrong one.
+fn client_hints_for_ua(ua: &str) -> (String, Option<UserAgentMetadata>) {
+    // (navigator.platform, Sec-CH-UA-Platform, platformVersion)
+    let (nav_platform, ch_platform, platform_version) = if ua.contains("Windows") {
+        ("Win32", "Windows", "15.0.0")
+    } else if ua.contains("Mac OS X") || ua.contains("Macintosh") {
+        ("MacIntel", "macOS", "14.5.0")
+    } else {
+        ("Linux x86_64", "Linux", "6.8.0")
+    };
+
+    // Chrome version from the UA: "…Chrome/148.0.0.0 …" → major "148", full
+    // "148.0.0.0". `None` when absent (non-Chrome UA) → no brands.
+    let chrome_ver: Option<&str> =
+        ua.split("Chrome/").nth(1).and_then(|s| s.split_whitespace().next());
+    let major: Option<&str> = chrome_ver.and_then(|v| v.split('.').next());
+
+    let mut builder = UserAgentMetadata::builder()
+        .platform(ch_platform)
+        .platform_version(platform_version)
+        .architecture("x86")
+        .model("")
+        .mobile(false)
+        .bitness("64")
+        .wow64(false);
+
+    if let (Some(major), Some(full)) = (major, chrome_ver) {
+        // Low-entropy `brands` (major only) + `fullVersionList` (full), each
+        // with a GREASE entry, mirroring what real Chrome emits.
+        builder = builder
+            .brands([
+                UserAgentBrandVersion::new("Chromium", major),
+                UserAgentBrandVersion::new("Google Chrome", major),
+                UserAgentBrandVersion::new("Not_A Brand", "24"),
+            ])
+            .full_version_lists([
+                UserAgentBrandVersion::new("Chromium", full),
+                UserAgentBrandVersion::new("Google Chrome", full),
+                UserAgentBrandVersion::new("Not_A Brand", "24.0.0.0"),
+            ]);
+    }
+
+    // build() only errors if a mandatory field is unset; platform,
+    // platform_version, architecture, model, and mobile are all set above, so
+    // this is `Some` in practice. `None` (unreachable) simply skips metadata.
+    (nav_platform.to_string(), builder.build().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{client_hints_for_ua, dehead};
+
+    const LINUX_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
+    const WIN_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
+    const MAC_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
+
+    #[test]
+    fn dehead_strips_headless_token() {
+        assert_eq!(
+            dehead("Mozilla/5.0 HeadlessChrome/148.0.0.0 Safari"),
+            "Mozilla/5.0 Chrome/148.0.0.0 Safari"
+        );
+        // No Headless token → unchanged.
+        assert_eq!(dehead(LINUX_UA), LINUX_UA);
+    }
+
+    /// navigator.platform + Sec-CH-UA-Platform must match the UA's OS — the
+    /// mismatch (Linux UA + "Win32") was the bug.
+    #[test]
+    fn platform_matches_ua_os() {
+        assert_eq!(client_hints_for_ua(LINUX_UA).0, "Linux x86_64");
+        assert_eq!(client_hints_for_ua(WIN_UA).0, "Win32");
+        assert_eq!(client_hints_for_ua(MAC_UA).0, "MacIntel");
+
+        let md = client_hints_for_ua(LINUX_UA).1.unwrap();
+        assert_eq!(md.platform, "Linux");
+        assert!(!md.mobile);
+        assert_eq!(md.architecture, "x86");
+    }
+
+    /// Client-Hints brands are populated and carry the UA's Chrome major
+    /// version (empty brands was the other half of the bug).
+    #[test]
+    fn brands_carry_chrome_major_version() {
+        let md = client_hints_for_ua(LINUX_UA).1.unwrap();
+        let brands = md.brands.unwrap();
+        assert!(brands.iter().any(|b| b.brand == "Google Chrome" && b.version == "148"));
+        assert!(brands.iter().any(|b| b.brand == "Chromium" && b.version == "148"));
+        // A GREASE entry is present (3 brands total).
+        assert_eq!(brands.len(), 3);
+        // fullVersionList carries the full version.
+        let full = md.full_version_list.unwrap();
+        assert!(full.iter().any(|b| b.brand == "Google Chrome" && b.version == "148.0.0.0"));
+    }
+
+    /// A non-Chrome UA yields no brands rather than a wrong/fabricated one,
+    /// but still gets a coherent platform.
+    #[test]
+    fn non_chrome_ua_has_no_brands() {
+        let firefox = "Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0";
+        let (nav_platform, md) = client_hints_for_ua(firefox);
+        assert_eq!(nav_platform, "Linux x86_64");
+        assert!(md.unwrap().brands.is_none());
     }
 }
