@@ -7,45 +7,57 @@ use std::{
     time::Duration,
 };
 
+use clap::{Parser, Subcommand};
 use rmcp::{ServiceExt, transport::io::stdio};
 use tracing_subscriber::EnvFilter;
 use void_crawl_core::{acquire_profile, chrome_user_data_dirs};
 use voidcrawl_mcp::{
-    AppState, VoidCrawlServer, sessions::SessionRegistry, state::PinnedProfile,
+    AppState, VoidCrawlServer,
+    install::{self, InstallArgs},
+    sessions::SessionRegistry,
+    state::PinnedProfile,
     tools::session::close_handle,
 };
 
-/// Parse `--profile NAME` / `--profile=NAME` from argv, falling back
-/// to the `VOIDCRAWL_PROFILE` env var. Returns `None` if neither is
-/// set — the server then runs in its regular pool-from-env mode.
-fn resolve_profile_arg() -> Option<String> {
-    let mut args = env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--profile" {
-            return args.next();
-        }
-        if let Some(rest) = arg.strip_prefix("--profile=") {
-            return Some(rest.to_string());
-        }
-    }
-    env::var("VOIDCRAWL_PROFILE").ok().filter(|s| !s.is_empty())
+/// Stdio MCP server for stealth headless Chrome.
+///
+/// With no subcommand it runs the server over stdio — how MCP hosts launch
+/// it. `install`/`uninstall` wire it into Claude Code, Codex, and opencode.
+#[derive(Parser, Debug)]
+#[command(name = "voidcrawl-mcp", version, about, long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// Pin the server to a warm Chrome profile (else $VOIDCRAWL_PROFILE).
+    #[arg(long)]
+    profile: Option<String>,
+
+    /// Run the pinned-profile Chrome visible (else $VOIDCRAWL_HEADFUL=1).
+    /// Only meaningful with `--profile`: lets a warm, visible window clear
+    /// anti-bot pre-checks (Turnstile, Cloudflare) that fingerprint headless.
+    #[arg(long)]
+    headful: bool,
 }
 
-/// `--headful` flag / `VOIDCRAWL_HEADFUL=1` env. Only meaningful when
-/// paired with `--profile`: makes the pinned-profile Chrome visible.
-/// Useful when the target runs an anti-bot pre-check (Turnstile,
-/// Cloudflare managed challenge) that fingerprints headless Chrome —
-/// warm profile + visible window is the fallback when stealth alone
-/// isn't enough.
-fn resolve_headful_flag() -> bool {
-    if env::args().any(|a| a == "--headful") {
-        return true;
-    }
-    matches!(env::var("VOIDCRAWL_HEADFUL").as_deref(), Ok("1" | "true"))
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Wire voidcrawl into Claude Code, Codex, and opencode.
+    Install(InstallArgs),
+    /// Remove that wiring.
+    Uninstall(InstallArgs),
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    match &cli.command {
+        Some(Command::Install(args)) => return install::run(false, args),
+        Some(Command::Uninstall(args)) => return install::run(true, args),
+        None => {}
+    }
+
+    // No subcommand → run the stdio MCP server (the default mode hosts launch).
     tracing_subscriber::fmt()
         .with_writer(stderr)
         .with_env_filter(
@@ -53,8 +65,12 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let profile_name = resolve_profile_arg();
-    let headful = resolve_headful_flag();
+    let profile_name = cli
+        .profile
+        .clone()
+        .or_else(|| env::var("VOIDCRAWL_PROFILE").ok().filter(|s| !s.is_empty()));
+    let headful =
+        cli.headful || matches!(env::var("VOIDCRAWL_HEADFUL").as_deref(), Ok("1" | "true"));
     let headless = !headful;
     let sessions = Arc::new(SessionRegistry::default());
 

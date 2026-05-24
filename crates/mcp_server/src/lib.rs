@@ -5,6 +5,7 @@
 //! binary (`voidcrawl-mcp`) that wires the library up over stdio.
 
 pub mod errors;
+pub mod install;
 pub mod server;
 pub mod sessions;
 pub mod state;
