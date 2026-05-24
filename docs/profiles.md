@@ -70,3 +70,77 @@ Chrome itself locks a profile via `SingletonLock` when it runs. If your **real**
 ```bash
 voidcrawl-mcp --profile "Default"
 ```
+
+## Ephemeral vs. persistent profiles
+
+A session can run against either:
+
+- **Ephemeral** (default): a fresh, cookieless `TempDir`, deleted on session
+  close. Maximum isolation — no shared cookies, history, or fingerprint state.
+  Right for parallel fan-out where tasks must not see each other.
+- **Persistent** (`user_data_dir` / `with_profile`): a directory that survives
+  across sessions, so cookies, `localStorage`, and a logged-in state carry
+  over. Right for authenticated scraping or banking a warm browsing history.
+
+```python
+from voidcrawl import BrowserSession
+
+# ephemeral (default)
+async with BrowserSession() as s:
+    ...
+
+# persistent — reuse a dedicated voidcrawl profile dir
+async with BrowserSession() as s:
+    page = await s.builder().user_data_dir("~/.config/voidcrawl-acme").new_page(url)
+```
+
+> Pick a directory **dedicated** to voidcrawl. Chrome locks a profile while
+> running, so pointing at your live daily-driver profile while normal Chrome is
+> open fails with a `SingletonLock` conflict.
+
+## Profile & proxy rotation (bot-wall hygiene)
+
+Hitting a bot-managed domain repeatedly from one identity raises its risk
+score — one block makes the next likelier. The levers, in order of impact:
+
+1. **Residential / rotating proxy** — the single biggest lever for IP
+   reputation. Pass `proxy` per session and rotate the exit per task or per N
+   requests:
+
+   ```python
+   cfg = BrowserConfig(proxy="http://user:pass@residential-pool:port")
+   ```
+
+2. **Rotate the profile** — give each "identity" its own persistent
+   `user_data_dir` and round-robin across a small pool, so cookies/history
+   don't all accrue against one fingerprint. Don't fan a single profile across
+   concurrent sessions (Chrome locks it).
+3. **Pace and reuse** — reuse one session for same-origin work (realistic
+   cookies + pacing); space `fetch_many` batches against managed domains rather
+   than firing them back-to-back.
+
+There is no built-in rotator — rotation is a caller/pipeline pattern: keep a
+pool of `(proxy, user_data_dir)` identities and pick one per task.
+
+## Warm profiles & Cloudflare `cf_clearance` — what they do and don't fix
+
+A "warm" profile (one that's browsed a Cloudflare-fronted site) carries a
+`cf_clearance` cookie. Useful to understand precisely what that buys you,
+because it's easy to over-rely on:
+
+- ✅ **`cf_clearance` satisfies the Cloudflare *edge* challenge** — the
+  interstitial "checking your browser" gate for a domain. A warm profile skips
+  that on revisits.
+- ❌ **It does NOT satisfy an inline managed-Turnstile widget.** A site's
+  embedded Turnstile issues a *separate* `cf-turnstile-response` token, scored
+  **fresh per request** on live fingerprint/IP/behavior. A banked
+  `cf_clearance` cookie does nothing for it.
+
+So a warm profile helps you *reach* a page behind Cloudflare, but to clear an
+on-page Turnstile you still need a good live score — which means **headful +
+hardware GPU + consistent UA** (see [stealth.md](stealth.md)), and, if the IP
+is flagged, a cleaner exit (proxy). `cf_clearance` is also bound to the UA, so a
+warm profile only helps if the session presents the *same* UA that earned it.
+
+To persist `cf_clearance` across runs, mount a persistent `user_data_dir` (or,
+in Docker, a volume over the profile dir — see [docker-mcp.md](docker-mcp.md)).

@@ -5,10 +5,15 @@ description: Stealthy, concurrent headless browsing via the voidcrawl-mcp MCP se
 
 # voidcrawl — stealthy, concurrent browsing
 
-`voidcrawl-mcp` drives headless Chrome through a stealth-patched, recycled tab
-pool exposed over the Model Context Protocol. The pool has real concurrency —
-ten tabs in parallel is normal, not a stretch — and every tab is fingerprint-
-and `navigator.webdriver`-patched.
+`voidcrawl-mcp` drives Chrome through a stealth-patched, recycled tab pool
+exposed over the Model Context Protocol. The pool has real concurrency — ten
+tabs in parallel is normal, not a stretch. Stealth is via **clean launch flags
++ a consistent real browser**, not JS spoofing: `navigator.webdriver` is a
+native `false` (from `--disable-blink-features=AutomationControlled`), the UA /
+`navigator.platform` / Client-Hints all agree, WebGL is **hardware** (not
+SwiftShader), and **no page-world JS is injected**. Headless by default;
+**headful** clears managed Cloudflare Turnstile and tough WAFs (headless does
+not — see Captcha contract).
 
 This skill is harness-neutral: it works the same whether the MCP server is wired
 into opencode, Codex, Claude Code, or a Yosoi pipeline. Nothing here assumes a
@@ -150,7 +155,8 @@ context stays clean. Two rules that keep token cost sane:
 
 ## Operational notes
 - **Always `session_close`** when done — an open session keeps its Chrome alive until the server exits.
-- **Pool sizing** comes from server env (`BROWSER_COUNT`, `TABS_PER_BROWSER`, `TAB_MAX_USES`, `TAB_MAX_IDLE_SECS`). If `pool_status` shows `max_tabs` too low for your fan-out, ask the user to raise them in the MCP config.
+- **Pool sizing** comes from server env (`BROWSER_COUNT`, `TABS_PER_BROWSER`, `TAB_MAX_USES`, `TAB_MAX_IDLE_SECS`). `pool_status` reports `max_tabs`, `available`, and `in_flight` — read it before a big fan-out. `fetch_many` returns a `PoolMeta` summary (`queued` count + worst queue wait) so you can tell when you oversubscribed and should cap the next batch at `max_tabs`. If `max_tabs` is too low, ask the user to raise it.
+- **Driving via Docker:** the MCP can attach to a containerized Chromium farm instead of launching Chrome — set `CHROME_WS_URLS` to the farm's CDP endpoints. Used for a reproducible GPU/driver stack; see the docker guide.
 - **Stateless vs. stateful:** `fetch*` reuses recycled (non-isolated) pool tabs — right for one-shot grabs. Use **sessions** when isolation or multi-step state matters; don't open a session just to read one URL.
 - **Errors:** `invalid_params` ≈ bad selector/URL/JS. `internal_error` ≈ a timeout or a browser crash — retrying once is reasonable. Typed errors (captcha, profile lease) carry `data.exception` — dispatch on it.
 - **Ports:** the MCP transport is stdio (no port). Launched Chromes bind ephemeral loopback ports. For a pinned port (firewall/container), set `CDP_PORT_BASE=<n>`; browser *i* binds `n+i`.
@@ -168,20 +174,47 @@ Coordinates are **CSS pixels, pre-DPR**. On HiDPI the screenshot may be 2× — 
 ## Captcha contract
 `detect_captcha` and navigation-time detection are **DOM-only** — false negatives
 happen (visual-only captchas, novel markers). Default agent contract:
-- On a `CaptchaDetected` error (check `data.exception`), **surface the failure**.
-  Don't re-hit the same URL — upstream rotation (proxy/profile) must happen first.
-- **Don't try to solve.** voidcrawl rotates *around* captchas by design.
+- **Don't try to solve.** voidcrawl passes or rotates *around* captchas; it does
+  not solve them.
+- **Managed Cloudflare Turnstile passes headful, not headless.** The hardened
+  fingerprint (GPU + consistent UA, no JS injection) clears managed Turnstile
+  **non-interactively when headful** (verified via `siteverify`). Headless
+  stalls at `before-interactive`. So for a Turnstile/WAF wall: **go headful**
+  first (`CHROME_HEADLESS=0`, or the headful Docker container). Don't keep
+  re-hitting headless.
+- On a `CaptchaDetected` error (check `data.exception`), **surface it**. Don't
+  re-hit the same URL on the same fingerprint — change something first (headful,
+  then a cleaner IP via proxy).
+- IP reputation is a separate axis from fingerprint: a flagged/datacenter IP can
+  still get challenged even when headful + clean. Lever = residential proxy.
 - `capture_captcha` / `solve_captcha` / `inject_captcha_token` exist for
-  pipeline flows that integrate an external solver — they are not the default
-  path and shouldn't be reached for during ordinary scraping.
+  pipeline flows that integrate an external solver — not the default path,
+  don't reach for them in ordinary scraping.
+
+## GPU & headful
+- WebGL runs on the **real GPU** by default (`--headless=new` + ANGLE +
+  `--disable-gpu-sandbox`). SwiftShader (software) WebGL is a bot tell; voidcrawl
+  avoids it. In Docker this needs `/dev/dri` passthrough + Mesa in the image
+  (headful container) — otherwise it falls back to SwiftShader.
+- Go **headful** for managed Turnstile / Akamai / Cloudflare WAFs; headless is
+  fine (and faster) for everything else.
+- Override any flag via `extra_args` (e.g. `--use-angle=swiftshader` to force
+  software); caller values replace the matching default.
 
 ## Bot-wall hygiene
 - Don't hammer identical URLs — one block makes the next likelier.
 - Reuse a single session for same-origin work (cookies, realistic pacing).
 - Space requests: back-to-back `fetch_many` against a bot-managed domain is a fast way to taint the IP. Throttle and, if available, rotate proxies/profiles.
 
-## Profile pinning (pipeline use only)
+## Profiles & rotation (pipeline use only)
 `voidcrawl-mcp --profile NAME` (or `VOIDCRAWL_PROFILE=NAME`) pins the whole
-server to a warm Chrome profile. This is a launch-time/pipeline concern — agents
-don't acquire profiles themselves and there are no profile MCP tools. If another
-process already holds that profile, startup fails with `ProfileBusy`.
+server to a warm Chrome profile. Launch-time/pipeline concern — agents don't
+acquire profiles and there are no profile MCP tools. If another process holds
+that profile, startup fails with `ProfileBusy`.
+- **Warm profiles** carry a Cloudflare `cf_clearance` cookie, which satisfies
+  the Cloudflare *edge* challenge — but **not** an inline managed-Turnstile
+  widget (that token is scored fresh per request). Don't expect a warm profile
+  to unlock an on-page Turnstile; that's the headful/GPU job above.
+- **Rotation** (proxy + profile) is a pipeline pattern for IP/fingerprint
+  hygiene, not an agent action. Keep a pool of `(proxy, profile)` identities;
+  don't fan one profile across concurrent sessions (Chrome locks it).
