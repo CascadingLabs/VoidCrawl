@@ -38,9 +38,11 @@ impl StealthConfig {
     /// (it fires multiple `addScriptToEvaluateOnNewDocument` CDP calls
     /// that sophisticated WAFs can fingerprint).
     ///
-    /// Only a minimal JS payload is injected: `navigator.webdriver`
-    /// removal and forced-open shadow DOMs (needed for Cloudflare
-    /// Turnstile interaction).
+    /// No JS is injected at all: `navigator.webdriver` comes out `false` from
+    /// the launch flag, and the old force-open-shadow-DOM patch is gone (it
+    /// broke Cloudflare Turnstile's closed-shadow tamper check). UA / platform
+    /// / Client-Hints consistency is applied via CDP `setUserAgentOverride`
+    /// (see `Page::apply_stealth`), not page-world JS.
     pub fn chrome_like() -> Self {
         Self {
             // None = keep the browser's real UA, preventing version
@@ -49,7 +51,16 @@ impl StealthConfig {
             viewport_width:      1920,
             viewport_height:     1080,
             locale:              "en-US,en;q=0.9".into(),
-            inject_js:           Some(Self::default_stealth_js().into()),
+            // No JS injection. We previously force-opened all shadow DOMs to
+            // "reach Turnstile iframes" — but that tripped Turnstile's
+            // closed-shadow-root tamper check (ERROR 600010) and FAILED the
+            // challenge. Interacting with a challenge widget works via real
+            // compositor clicks at pixel coordinates regardless of shadow
+            // mode, so the patch was unnecessary and harmful. Dropping it also
+            // removes the `addScriptToEvaluateOnNewDocument` fingerprint
+            // entirely. (Verified: managed Turnstile auto-passes,
+            // siteverify success=true, interactive=false.)
+            inject_js:           None,
             // Disabled: chromiumoxide's stealth sends detectable CDP patterns.
             use_builtin_stealth: false,
             // false: `Page.setBypassCSP` is itself a bot signal (rebrowser
@@ -72,32 +83,5 @@ impl StealthConfig {
             use_builtin_stealth: false,
             bypass_csp:          false,
         }
-    }
-
-    /// Minimal JS payload — zendriver-philosophy.
-    ///
-    /// We intentionally keep this light.  Heavy JS patching (plugins,
-    /// mimeTypes, WebGL, permissions) is counter-productive: each
-    /// `addScriptToEvaluateOnNewDocument` CDP call is itself a
-    /// fingerprint, and poorly-matched fakes (e.g. wrong GPU string)
-    /// are worse than the defaults from a real Chrome install.
-    ///
-    /// We deliberately do NOT patch `navigator.webdriver` here. Deleting it
-    /// (→ `undefined`) is itself a bot tell — real Chrome reports
-    /// `navigator.webdriver === false`. We instead rely on the launch flag
-    /// `--disable-blink-features=AutomationControlled`, which yields a native
-    /// `false` with no JS footprint. (Verified against the rebrowser
-    /// `navigatorWebdriver` test.)
-    ///
-    /// The only patch we keep is forcing Shadow DOMs open, needed to reach
-    /// into Cloudflare Turnstile and similar challenge iframes.
-    fn default_stealth_js() -> &'static str {
-        r"
-// Force shadow DOMs open for challenge iframe interaction.
-Element.prototype._attachShadow = Element.prototype.attachShadow;
-Element.prototype.attachShadow = function(init) {
-    return this._attachShadow({ ...init, mode: 'open' });
-};
-"
     }
 }
