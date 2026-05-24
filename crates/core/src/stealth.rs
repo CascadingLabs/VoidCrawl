@@ -52,7 +52,12 @@ impl StealthConfig {
             inject_js:           Some(Self::default_stealth_js().into()),
             // Disabled: chromiumoxide's stealth sends detectable CDP patterns.
             use_builtin_stealth: false,
-            bypass_csp:          true,
+            // false: `Page.setBypassCSP` is itself a bot signal (rebrowser
+            // `bypassCsp` test flags it as "invalid behavior for a normal
+            // browser"). Our `addScriptToEvaluateOnNewDocument` injection runs
+            // via CDP and is not subject to page CSP anyway, so we don't need
+            // it. Flip to true only if a specific site's CSP blocks injection.
+            bypass_csp:          false,
         }
     }
 
@@ -77,19 +82,17 @@ impl StealthConfig {
     /// fingerprint, and poorly-matched fakes (e.g. wrong GPU string)
     /// are worse than the defaults from a real Chrome install.
     ///
-    /// We only patch the two things that are universally needed:
-    /// 1. `navigator.webdriver` — set by Chrome when run via CDP
-    /// 2. Shadow DOM mode — force open so we can interact with Cloudflare
-    ///    Turnstile and similar challenge iframes.
+    /// We deliberately do NOT patch `navigator.webdriver` here. Deleting it
+    /// (→ `undefined`) is itself a bot tell — real Chrome reports
+    /// `navigator.webdriver === false`. We instead rely on the launch flag
+    /// `--disable-blink-features=AutomationControlled`, which yields a native
+    /// `false` with no JS footprint. (Verified against the rebrowser
+    /// `navigatorWebdriver` test.)
+    ///
+    /// The only patch we keep is forcing Shadow DOMs open, needed to reach
+    /// into Cloudflare Turnstile and similar challenge iframes.
     fn default_stealth_js() -> &'static str {
         r"
-// Remove navigator.webdriver (set to true by CDP automation).
-delete Object.getPrototypeOf(navigator).webdriver;
-Object.defineProperty(navigator, 'webdriver', {
-    get: () => undefined,
-    configurable: true,
-});
-
 // Force shadow DOMs open for challenge iframe interaction.
 Element.prototype._attachShadow = Element.prototype.attachShadow;
 Element.prototype.attachShadow = function(init) {
