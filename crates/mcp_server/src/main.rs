@@ -41,7 +41,7 @@ fn resolve_headful_flag() -> bool {
     if env::args().any(|a| a == "--headful") {
         return true;
     }
-    matches!(env::var("VOIDCRAWL_HEADFUL").as_deref(), Ok("1") | Ok("true"))
+    matches!(env::var("VOIDCRAWL_HEADFUL").as_deref(), Ok("1" | "true"))
 }
 
 #[tokio::main]

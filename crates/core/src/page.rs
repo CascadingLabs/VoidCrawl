@@ -971,6 +971,7 @@ fn client_hints_for_ua(ua: &str) -> (String, Option<UserAgentMetadata>) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, reason = "test harness")]
 mod tests {
     use super::{client_hints_for_ua, dehead};
 

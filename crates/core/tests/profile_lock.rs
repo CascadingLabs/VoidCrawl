@@ -79,5 +79,5 @@ async fn fd_lock_file_exclusion_is_exclusive() {
 
     drop(guard1);
     tokio::time::sleep(Duration::from_millis(20)).await;
-    lock2.try_write().expect("after release, second lock should succeed");
+    let _guard = lock2.try_write().expect("after release, second lock should succeed");
 }

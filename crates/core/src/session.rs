@@ -665,7 +665,7 @@ mod tests {
     #[test]
     fn no_extra_args_is_just_defaults() {
         let args = assemble_chrome_args(&[]);
-        let defaults: Vec<String> = DEFAULT_CHROME_ARGS.iter().map(|s| s.to_string()).collect();
+        let defaults: Vec<String> = DEFAULT_CHROME_ARGS.iter().map(ToString::to_string).collect();
         assert_eq!(args, defaults);
     }
 }

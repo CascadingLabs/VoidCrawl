@@ -3,7 +3,7 @@
 //! Require a real Chromium/Chrome binary. Run serially:
 //!
 //!     cargo test -p void_crawl_core --test emulation -- --test-threads=1
-#![allow(clippy::expect_used, clippy::unwrap_used)]
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::absolute_paths)]
 
 use std::time::Duration;
 
