@@ -345,8 +345,7 @@ fn status_cli(out: &mut impl io::Write, label: &str, prog: &str) -> Result<()> {
     let configured = Command::new(prog)
         .args(["mcp", "get", SERVER_NAME])
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+        .is_ok_and(|o| o.status.success());
     writeln!(out, "[{label}] {}", if configured { "configured" } else { "not configured" })?;
     Ok(())
 }
