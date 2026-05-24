@@ -5,15 +5,23 @@ Chrome is healthy, and exercise PoolConfig.from_docker() against a real
 container.
 
 Requires: Docker daemon running, network access to pull base image on
-first run. Skipped automatically when Docker is unavailable.
+first run, and a host that satisfies docker-compose.yml (it passes the GPU
+through via ``/dev/dri`` + ``group_add: ["render"]``).
+
+These are heavy and host-specific, and the container is validated
+independently by the dedicated ``docker-build`` CI job — so they are
+*opt-in*: set ``VOIDCRAWL_DOCKER_TESTS=1`` to run them. This keeps them out
+of the per-Python-version pytest matrix, where they would otherwise rebuild
+the image once per interpreter and fail on GPU-less runners.
 
 Run with:
-    uv run pytest tests/test_docker_integration.py -v --timeout=120
+    VOIDCRAWL_DOCKER_TESTS=1 uv run pytest tests/test_docker_integration.py -v
 """
 
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 import urllib.error
@@ -28,21 +36,28 @@ import pytest
 
 from voidcrawl import PoolConfig
 
-# Skip the entire module if Docker isn't available.
+# Opt-in: these tests only run when explicitly enabled. We still verify Docker
+# is actually reachable so an enabled-but-unavailable environment skips with a
+# clear reason rather than erroring.
+_docker_tests_enabled = os.environ.get("VOIDCRAWL_DOCKER_TESTS", "") not in ("", "0")
+
 _docker_available = False
-try:
-    result = subprocess.run(
-        ["docker", "info"],
-        capture_output=True,
-        timeout=5,
-        check=False,
-    )
-    _docker_available = result.returncode == 0
-except (FileNotFoundError, subprocess.TimeoutExpired):
-    pass
+if _docker_tests_enabled:
+    try:
+        result = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        _docker_available = result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
 
 pytestmark = pytest.mark.skipif(
-    not _docker_available, reason="Docker daemon not available"
+    not (_docker_tests_enabled and _docker_available),
+    reason="Docker integration tests are opt-in (set VOIDCRAWL_DOCKER_TESTS=1 "
+    "with a reachable Docker daemon)",
 )
 
 

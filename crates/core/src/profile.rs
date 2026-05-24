@@ -8,7 +8,7 @@
 //! voidcrawl consumers.
 
 use std::{
-    fmt,
+    env, fmt,
     fs::{self, File, OpenOptions},
     io::ErrorKind,
     path::{Path, PathBuf},
@@ -270,7 +270,12 @@ pub fn chrome_user_data_dirs() -> Vec<PathBuf> {
     let mut out = Vec::new();
     #[cfg(target_os = "linux")]
     {
-        if let Some(config) = dirs::config_dir() {
+        // $XDG_CONFIG_HOME (absolute) or ~/.config — matches the XDG base-dir spec.
+        let config = env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
+        if let Some(config) = config {
             out.push(config.join("google-chrome"));
             out.push(config.join("chromium"));
             out.push(config.join("google-chrome-beta"));
@@ -279,7 +284,7 @@ pub fn chrome_user_data_dirs() -> Vec<PathBuf> {
     }
     #[cfg(target_os = "macos")]
     {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
             let app_sup = home.join("Library").join("Application Support");
             out.push(app_sup.join("Google").join("Chrome"));
             out.push(app_sup.join("Chromium"));
@@ -288,7 +293,8 @@ pub fn chrome_user_data_dirs() -> Vec<PathBuf> {
     }
     #[cfg(target_os = "windows")]
     {
-        if let Some(local) = dirs::data_local_dir() {
+        // %LOCALAPPDATA% — Chrome's per-user data root on Windows.
+        if let Some(local) = env::var_os("LOCALAPPDATA").map(PathBuf::from) {
             out.push(local.join("Google").join("Chrome").join("User Data"));
             out.push(local.join("Chromium").join("User Data"));
         }
