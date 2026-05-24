@@ -51,6 +51,49 @@ cargo test -p void_crawl_core -- --test-threads=1
 
 Tests **must** run serially (`--test-threads=1`) because each test launches a Chromium process that uses a shared profile directory. Parallel launches cause `SingletonLock` conflicts.
 
+### Build the MCP server
+
+`voidcrawl-mcp` ships as a standalone package on PyPI (prebuilt binary wheels) and crates.io. Inside this repo it's a workspace member at `crates/mcp_server/` with its own `pyproject.toml` that uses maturin's `bindings = "bin"` mode — the Rust binary becomes a console script in the wheel.
+
+For local dev:
+
+```bash
+cargo build --release -p voidcrawl-mcp
+# binary at ./target/release/voidcrawl-mcp
+```
+
+Build the standalone wheel locally:
+
+```bash
+maturin build --release --manifest-path crates/mcp_server/Cargo.toml
+# wheel at ./target/wheels/voidcrawl_mcp-*.whl
+```
+
+End users install one of:
+
+```bash
+uv tool install voidcrawl-mcp            # binary only
+pipx install voidcrawl-mcp               # binary only
+pip install 'voidcrawl[mcp]'             # Python lib + MCP binary
+cargo install voidcrawl-mcp              # from crates.io, builds from source
+```
+
+Wire it into Claude Code:
+
+```json
+{
+  "mcpServers": { "voidcrawl": { "command": "voidcrawl-mcp" } }
+}
+```
+
+Restart Claude Code and the `voidcrawl` MCP server + its tools (`fetch`, `session_open`, `click`, `click_visual_coords`, `detect_captcha`, ...) become available.
+
+### Use the `voidcrawl` Claude Code skill
+
+A skill lives at `.claude/skills/voidcrawl/SKILL.md`. Claude Code auto-discovers skills in any project that has a `.claude/skills/` directory — you don't need to do anything beyond having `.mcp.json` + the built binary on disk. The skill tells Claude when to pick `voidcrawl` over `claude-in-chrome`, how to chain `click_visual_coords` for React forms, and how to react to `CaptchaDetected` errors.
+
+For full protocol + tool reference see [`docs/mcp-server.md`](docs/mcp-server.md).
+
 ### Run Python tests
 
 ```bash

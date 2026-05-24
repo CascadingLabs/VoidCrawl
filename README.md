@@ -78,6 +78,51 @@ async def main():
 asyncio.run(main())
 ```
 
+## MCP server for Claude Code
+
+`voidcrawl-mcp` is a stdio MCP server that exposes the full pool + session API as tools any MCP-speaking agent can call. Point Claude Code at it and the agent can fetch, screenshot, click, type, eval JS, detect captchas, and drive multi-step sessions — all via the same stealth-patched Chrome pool.
+
+Install (pick one):
+
+```bash
+# Claude Code user — binary only, isolated venv:
+uv tool install voidcrawl-mcp
+# or
+pipx install voidcrawl-mcp
+
+# Python lib + MCP server together:
+pip install 'voidcrawl[mcp]'
+
+# From crates.io (builds from source):
+cargo install voidcrawl-mcp
+
+# From git HEAD (builds from source):
+cargo install --git https://github.com/CascadingLabs/VoidCrawl voidcrawl-mcp
+```
+
+Wire it into Claude Code via `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "voidcrawl": {
+      "command": "voidcrawl-mcp"
+    }
+  }
+}
+```
+
+Optional: pin the whole server to a warm Chrome profile (so every session inherits its cookies/logins):
+
+```bash
+voidcrawl-mcp --profile "Default"
+# or: VOIDCRAWL_PROFILE="Default" voidcrawl-mcp
+```
+
+A ready-made Claude Code skill at `.claude/skills/voidcrawl/SKILL.md` teaches the agent when to pick voidcrawl over manual browsing, the `click_visual_coords` recipe for React forms, and how to react to typed `CaptchaDetected` errors. Claude Code picks it up automatically.
+
+See [`docs/mcp-server.md`](docs/mcp-server.md) for the full tool list and [`docs/profiles.md`](docs/profiles.md) for profile leasing.
+
 ## Docker
 
 Pre-built multi-arch images (`linux/amd64`, `linux/arm64`) are published to GHCR on every push to `main` and every tagged release:

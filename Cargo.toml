@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/pyo3_bindings"]
+members = ["crates/core", "crates/mcp_server", "crates/pyo3_bindings"]
 resolver = "2"
 
 [workspace.package]
@@ -29,3 +29,13 @@ must_use_candidate = "allow"
 missing_errors_doc = "allow"
 module_name_repetitions = "allow"
 missing_docs_in_private_items = "allow"
+# Stylistic pedantic noise: doc backticks on proper nouns (SwiftShader, RADV,
+# Cloudflare…), #[must_use] on builder methods returning Self, and local
+# items declared after statements are all fine in this codebase.
+doc_markdown = "allow"
+return_self_not_must_use = "allow"
+items_after_statements = "allow"
+similar_names = "allow"
+doc_lazy_continuation = "allow"
+needless_raw_string_hashes = "allow"
+too_many_lines = "allow"

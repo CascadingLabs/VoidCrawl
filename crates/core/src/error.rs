@@ -39,6 +39,18 @@ pub enum VoidCrawlError {
     #[error("chromium fetch failed: {0}")]
     FetchChromiumError(String),
 
+    #[error("profile {name:?} is already leased by another process")]
+    ProfileBusy { name: String },
+
+    #[error("profile lease for {name:?} expired after {timeout_secs}s")]
+    ProfileLeaseExpired { name: String, timeout_secs: u64 },
+
+    #[error("profile {name:?} not found (looked in {searched:?})")]
+    ProfileNotFound { name: String, searched: Vec<String> },
+
+    #[error("captcha detected: {kind}")]
+    CaptchaDetected { kind: String },
+
     #[error("{0}")]
     Other(String),
 }

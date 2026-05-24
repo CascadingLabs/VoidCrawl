@@ -6,9 +6,20 @@
 # Environment variables:
 #   SCALE_PROFILE   — minimal | balanced (default) | advanced
 #   CHROME_WS_URLS  — if already set, skip scale computation (passthrough mode)
+#   CDP_PORT_BASE   — first Chrome --remote-debugging-port (default 9222).
+#                     Browser N listens on base+N. Override when 9222/9223
+#                     are taken on the host — they're not privileged ports.
+#   CDP_PORT_1/2    — static-mode fallbacks used by supervisord.conf when
+#                     scale mode is skipped; default to base+0 / base+1.
 set -euo pipefail
 
 SCALE_PROFILE="${SCALE_PROFILE:-balanced}"
+CDP_PORT_BASE="${CDP_PORT_BASE:-9222}"
+# Backfill CDP_PORT_1/2 from CDP_PORT_BASE so `supervisord.conf` always
+# resolves `%(ENV_CDP_PORT_1)s` / `%(ENV_CDP_PORT_2)s`, even on the
+# static-config fast paths below.
+export CDP_PORT_1="${CDP_PORT_1:-${CDP_PORT_BASE}}"
+export CDP_PORT_2="${CDP_PORT_2:-$((CDP_PORT_BASE + 1))}"
 CONF_PATH=/tmp/supervisord-dynamic.conf
 
 # Fast path: caller set CHROME_WS_URLS (e.g. PoolConfig.from_docker, or the
@@ -27,7 +38,7 @@ if ! python3 -c "import voidcrawl.scale" >/dev/null 2>&1; then
     exec supervisord -c /etc/supervisor/conf.d/supervisord.conf
 fi
 
-echo "[entrypoint] Scale profile: ${SCALE_PROFILE}"
+echo "[entrypoint] Scale profile: ${SCALE_PROFILE} (CDP base port: ${CDP_PORT_BASE})"
 
 python3 - <<'PYEOF'
 import os, sys
@@ -35,6 +46,7 @@ from voidcrawl.scale import compute_scale, generate_supervisord_conf, Insufficie
 
 profile = os.environ.get("SCALE_PROFILE", "balanced")
 conf_path = os.environ.get("_VC_CONF_PATH", "/tmp/supervisord-dynamic.conf")
+base_port = int(os.environ.get("CDP_PORT_BASE", "9222"))
 
 try:
     report = compute_scale(profile=profile)
@@ -44,11 +56,11 @@ except InsufficientResourcesError as exc:
 
 report.print_report()
 
-conf = generate_supervisord_conf(report)
+conf = generate_supervisord_conf(report, base_port=base_port)
 open(conf_path, "w").write(conf)
 
 ws_urls = ",".join(
-    f"http://localhost:{9222 + i}" for i in range(report.browsers)
+    f"http://localhost:{base_port + i}" for i in range(report.browsers)
 )
 # Write env vars to a file so the shell can source them
 with open("/tmp/vc-env.sh", "w") as fh:

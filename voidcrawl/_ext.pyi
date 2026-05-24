@@ -77,6 +77,64 @@ class PooledTab:
     async def screenshot_png(self) -> bytes:
         """Capture a full-page screenshot as PNG bytes."""
         ...
+    async def get_full_ax_tree(self, depth: int | None = None) -> list[dict[str, Any]]:
+        """Return the browser-computed accessibility (AX) tree.
+
+        Wraps CDP ``Accessibility.getFullAXTree``. The result is a flat list of
+        AX node dicts linked by ``childIds``/``parentId``; each node carries
+        ``role``, computed ``name``, ``properties`` (state), and
+        ``backendDOMNodeId``. Call after the page has rendered.
+
+        Args:
+            depth: Maximum descendant depth to traverse. ``None`` returns the
+                whole tree.
+        """
+        ...
+    async def ax_tree_outline(self, depth: int | None = None) -> str:
+        """Return the AX tree as a compact, indented ``role "name"`` outline.
+
+        Readable counterpart to :meth:`get_full_ax_tree`: text-noise and hidden
+        nodes are pruned. Same output the MCP ``session_ax_tree`` tool renders.
+        """
+        ...
+    async def query_ax_tree(
+        self, role: str | None = None, name: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Query the AX tree (``Accessibility.queryAXTree``) for matching nodes.
+
+        The semantic analogue of ``query_selector_all``: addresses by computed
+        ``role`` / accessible ``name`` rather than markup. Name matching is
+        exact. Passing neither returns every node under the document root.
+        """
+        ...
+    async def click_by_role(self, role: str, name: str, nth: int = 0) -> None:
+        """Click the *nth* element matching accessibility ``role`` + ``name``.
+
+        Markup-independent analogue of ``click_element``: resolves via the AX
+        tree, bridges to the DOM, scrolls into view, and clicks. Raises if no
+        such node exists.
+
+        Args:
+            role: Computed accessibility role, e.g. ``"button"``, ``"link"``.
+            name: Computed accessible name (exact match).
+            nth: 0-based index when several nodes match.
+        """
+        ...
+    async def set_geolocation(
+        self, latitude: float, longitude: float, accuracy: float | None = None
+    ) -> None:
+        """Override geolocation and grant the geolocation permission.
+
+        ``navigator.geolocation`` reads require a secure context (https /
+        localhost), not ``data:`` URLs. ``accuracy`` defaults to 50 metres.
+        """
+        ...
+    async def set_locale(self, locale: str) -> None:
+        """Override the locale (Intl + ``Accept-Language``), e.g. ``"fr-FR"``."""
+        ...
+    async def set_timezone(self, timezone_id: str) -> None:
+        """Override the timezone by IANA id, e.g. ``"America/New_York"``."""
+        ...
     async def query_selector(self, selector: str) -> str | None:
         """Return the inner HTML of the first element matching *selector*, or ``None``.
 
@@ -156,23 +214,6 @@ class PooledTab:
             path: Cookie path.
         """
         ...
-    async def wait_for_stable_dom(
-        self, timeout: float = 10.0, min_length: int = 5000, stable_checks: int = 5
-    ) -> bool:
-        """Wait until the DOM stabilises (stops changing).
-
-        Polls the HTML length repeatedly and resolves once it stays
-        constant across *stable_checks* consecutive checks.
-
-        Args:
-            timeout: Maximum seconds to wait.
-            min_length: Minimum HTML length before checking stability.
-            stable_checks: Consecutive unchanged polls required.
-
-        Returns:
-            ``True`` if the DOM stabilised, ``False`` on timeout.
-        """
-        ...
     async def wait_for_network_idle(self, timeout: float = 30.0) -> str | None:
         """Wait for network activity to settle.
 
@@ -182,6 +223,13 @@ class PooledTab:
         Returns:
             ``"networkIdle"`` or ``"networkAlmostIdle"`` on success,
             ``None`` on timeout.
+        """
+        ...
+    async def wait_for_selector(self, selector: str, timeout: float = 30.0) -> None:
+        """Wait until a CSS selector matches. Event-driven — no polling.
+
+        Raises :class:`VoidCrawlError` if *timeout* seconds elapse
+        without a match.
         """
         ...
     async def dispatch_mouse_event(
@@ -304,8 +352,86 @@ class Page:
     async def screenshot_png(self) -> bytes:
         """Capture a full-page screenshot as PNG bytes."""
         ...
+    async def screenshot(
+        self,
+        path: str | None = None,
+        bbox: tuple[int, int, int, int] | None = None,
+    ) -> bytes | str:
+        """Capture a PNG screenshot with optional disk output and/or crop.
+
+        Args:
+            path: If set, writes PNG to this path and returns the path.
+                If omitted, returns raw bytes.
+            bbox: Optional ``(x, y, width, height)`` in CSS pixels.
+        """
+        ...
+    async def detect_captcha(self) -> str | None:
+        """Probe DOM for captcha / bot-wall markers.
+
+        Returns one of ``"recaptcha"``, ``"hcaptcha"``, ``"turnstile"``,
+        ``"cloudflare_challenge"``, ``"datadome"`` — or ``None``.
+        """
+        ...
     async def pdf_bytes(self) -> bytes:
         """Render the page as a PDF and return the raw bytes."""
+        ...
+    async def get_full_ax_tree(self, depth: int | None = None) -> list[dict[str, Any]]:
+        """Return the browser-computed accessibility (AX) tree.
+
+        Wraps CDP ``Accessibility.getFullAXTree``. The result is a flat list of
+        AX node dicts linked by ``childIds``/``parentId``; each node carries
+        ``role``, computed ``name``, ``properties`` (state), and
+        ``backendDOMNodeId``. Call after the page has rendered.
+
+        Args:
+            depth: Maximum descendant depth to traverse. ``None`` returns the
+                whole tree.
+        """
+        ...
+    async def ax_tree_outline(self, depth: int | None = None) -> str:
+        """Return the AX tree as a compact, indented ``role "name"`` outline.
+
+        Readable counterpart to :meth:`get_full_ax_tree`: text-noise and hidden
+        nodes are pruned. Same output the MCP ``session_ax_tree`` tool renders.
+        """
+        ...
+    async def query_ax_tree(
+        self, role: str | None = None, name: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Query the AX tree (``Accessibility.queryAXTree``) for matching nodes.
+
+        The semantic analogue of ``query_selector_all``: addresses by computed
+        ``role`` / accessible ``name`` rather than markup. Name matching is
+        exact. Passing neither returns every node under the document root.
+        """
+        ...
+    async def click_by_role(self, role: str, name: str, nth: int = 0) -> None:
+        """Click the *nth* element matching accessibility ``role`` + ``name``.
+
+        Markup-independent analogue of ``click_element``: resolves via the AX
+        tree, bridges to the DOM, scrolls into view, and clicks. Raises if no
+        such node exists.
+
+        Args:
+            role: Computed accessibility role, e.g. ``"button"``, ``"link"``.
+            name: Computed accessible name (exact match).
+            nth: 0-based index when several nodes match.
+        """
+        ...
+    async def set_geolocation(
+        self, latitude: float, longitude: float, accuracy: float | None = None
+    ) -> None:
+        """Override geolocation and grant the geolocation permission.
+
+        ``navigator.geolocation`` reads require a secure context (https /
+        localhost), not ``data:`` URLs. ``accuracy`` defaults to 50 metres.
+        """
+        ...
+    async def set_locale(self, locale: str) -> None:
+        """Override the locale (Intl + ``Accept-Language``), e.g. ``"fr-FR"``."""
+        ...
+    async def set_timezone(self, timezone_id: str) -> None:
+        """Override the timezone by IANA id, e.g. ``"America/New_York"``."""
         ...
     async def query_selector(self, selector: str) -> str | None:
         """Return inner HTML of the first matching element."""
@@ -346,13 +472,11 @@ class Page:
     ) -> None:
         """Delete a cookie by name, optionally scoped to a domain and path."""
         ...
-    async def wait_for_stable_dom(
-        self, timeout: float = 10.0, min_length: int = 5000, stable_checks: int = 5
-    ) -> bool:
-        """Wait until the DOM stabilises (stops changing)."""
-        ...
     async def wait_for_network_idle(self, timeout: float = 30.0) -> str | None:
         """Wait for network activity to settle."""
+        ...
+    async def wait_for_selector(self, selector: str, timeout: float = 30.0) -> None:
+        """Wait until a CSS selector matches. Event-driven — no polling."""
         ...
     async def dispatch_mouse_event(
         self,
@@ -406,3 +530,47 @@ class BrowserSession:
     async def __aexit__(
         self, exc_type: object = None, exc_val: object = None, exc_tb: object = None
     ) -> bool: ...
+
+# ── Profiles ────────────────────────────────────────────────────────────
+
+class ProfileHandle:
+    """Live lease on a Chrome profile.
+
+    Use as an async context manager, or call :meth:`release` explicitly.
+    Obtain one via :func:`voidcrawl.acquire_profile` or
+    :func:`voidcrawl.with_profile`.
+    """
+
+    name: str
+    async def path(self) -> str: ...
+    async def new_page(self, url: str) -> Page: ...
+    async def release(self) -> None: ...
+    async def __aenter__(self) -> ProfileHandle: ...
+    async def __aexit__(
+        self, exc_type: object, exc_val: object, exc_tb: object
+    ) -> None: ...
+
+def py_list_profiles() -> list[tuple[str, str]]: ...
+async def py_acquire_profile(
+    name: str,
+    lease_timeout: float = 300.0,
+    headless: bool = True,
+) -> ProfileHandle: ...
+
+# ── Exceptions ──────────────────────────────────────────────────────────
+# ruff: noqa: N818  — these are the public exception names, preserved for API compat
+
+class VoidCrawlError(Exception):
+    """Base class for all voidcrawl errors raised from the native extension."""
+
+class ProfileBusy(VoidCrawlError):
+    """Another voidcrawl process holds the profile lock (non-blocking acquire)."""
+
+class ProfileLeaseExpired(VoidCrawlError):
+    """Timed out waiting for the profile lock."""
+
+class ProfileNotFound(VoidCrawlError):
+    """No matching profile directory in the platform default dirs."""
+
+class CaptchaDetected(VoidCrawlError):
+    """DOM markers indicate a captcha / bot-wall challenge on the page."""

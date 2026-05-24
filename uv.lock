@@ -2,6 +2,12 @@ version = 1
 revision = 3
 requires-python = ">=3.10"
 
+[manifest]
+members = [
+    "voidcrawl",
+    "voidcrawl-mcp",
+]
+
 [[package]]
 name = "annotated-types"
 version = "0.7.0"
@@ -1149,7 +1155,7 @@ wheels = [
 
 [[package]]
 name = "voidcrawl"
-version = "0.2.3"
+version = "0.3.1"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
@@ -1159,6 +1165,9 @@ dependencies = [
 [package.optional-dependencies]
 debug = [
     { name = "rich" },
+]
+mcp = [
+    { name = "voidcrawl-mcp" },
 ]
 
 [package.dev-dependencies]
@@ -1182,8 +1191,9 @@ requires-dist = [
     { name = "click", specifier = ">=8.3.2" },
     { name = "pydantic", specifier = ">=2" },
     { name = "rich", marker = "extra == 'debug'", specifier = ">=14.3.3" },
+    { name = "voidcrawl-mcp", marker = "extra == 'mcp'", editable = "crates/mcp_server" },
 ]
-provides-extras = ["debug"]
+provides-extras = ["debug", "mcp"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1200,6 +1210,11 @@ dev = [
     { name = "ruff", specifier = ">=0.9" },
     { name = "testcontainers", specifier = ">=4.14.2" },
 ]
+
+[[package]]
+name = "voidcrawl-mcp"
+version = "0.3.1"
+source = { editable = "crates/mcp_server" }
 
 [[package]]
 name = "wcwidth"

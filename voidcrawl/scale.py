@@ -442,13 +442,31 @@ def compute_scale(
     )
 
 
-def generate_supervisord_conf(report: ScaleReport, base_port: int = 9222) -> str:
+def _default_base_port() -> int:
+    """Resolve the default CDP base port from env, falling back to 9222.
+
+    Honors the ``CDP_PORT_BASE`` env var so blocked / taken ports can be
+    worked around without editing config. Invalid values silently fall
+    back to 9222 — an unparseable override shouldn't brick the container.
+    """
+    raw = os.environ.get("CDP_PORT_BASE")
+    if raw is None:
+        return 9222
+    try:
+        return int(raw)
+    except ValueError:
+        return 9222
+
+
+def generate_supervisord_conf(report: ScaleReport, base_port: int | None = None) -> str:
     """Build a supervisord.conf string launching *report.browsers* Chrome instances.
 
     Args:
         report: A :class:`ScaleReport` from :func:`compute_scale`.
         base_port: First CDP debugging port. Subsequent browsers use
-            ``base_port + 1``, ``base_port + 2``, etc.
+            ``base_port + 1``, ``base_port + 2``, etc. When ``None``
+            (default), reads the ``CDP_PORT_BASE`` env var and falls back
+            to ``9222``.
 
     Returns:
         A complete supervisord.conf file as a string, ready to write to disk.
@@ -457,11 +475,21 @@ def generate_supervisord_conf(report: ScaleReport, base_port: int = 9222) -> str
         >>> conf = generate_supervisord_conf(report)
         >>> Path("/tmp/supervisord.conf").write_text(conf)
     """
+    if base_port is None:
+        base_port = _default_base_port()
     chrome = "/usr/bin/chromium"
+    # Hardware GPU via ANGLE/Vulkan (NOT --disable-gpu, which forces SwiftShader
+    # software WebGL — a strong bot signal). Requires Mesa drivers in the image
+    # + /dev/dri passthrough (see docker/Dockerfile and docker-compose.yml).
+    # Mirrors the GPU group of `DEFAULT_CHROME_ARGS` in crates/core/src/session.rs;
+    # keep the two in sync.
     base_flags = (
         "--no-sandbox"
         " --no-zygote"
-        " --disable-gpu"
+        " --enable-gpu"
+        " --ignore-gpu-blocklist"
+        " --use-angle=vulkan"
+        " --disable-gpu-sandbox"
         " --disable-dev-shm-usage"
         " --disable-background-networking"
         " --disable-component-update"
@@ -505,7 +533,10 @@ def generate_supervisord_conf(report: ScaleReport, base_port: int = 9222) -> str
 
 def _report_to_dict(report: ScaleReport) -> dict[str, object]:
     s = report.snapshot
-    ws_urls = ",".join(f"http://localhost:{9222 + i}" for i in range(report.browsers))
+    base_port = _default_base_port()
+    ws_urls = ",".join(
+        f"http://localhost:{base_port + i}" for i in range(report.browsers)
+    )
     return {
         "detected_env": report.detected_env,
         "profile": report.profile,

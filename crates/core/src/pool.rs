@@ -179,6 +179,7 @@ impl BrowserPool {
     /// | `ACQUIRE_TIMEOUT_SECS` | Max seconds to wait in acquire() | `30` |
     /// | `VIEWPORT_WIDTH` | Stealth viewport width | `1920` |
     /// | `VIEWPORT_HEIGHT` | Stealth viewport height | `1080` |
+    /// | `CDP_PORT_BASE` | Pin Chrome's `--remote-debugging-port` for launched browsers. Browser `i` uses `base + i`. Unset = OS-assigned (recommended; can't conflict). | — |
     pub async fn from_env() -> Result<Self> {
         let tabs_per_browser: usize =
             env::var("TABS_PER_BROWSER").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
@@ -194,6 +195,11 @@ impl BrowserPool {
             env::var("VIEWPORT_WIDTH").ok().and_then(|v| v.parse().ok());
         let viewport_height: Option<u32> =
             env::var("VIEWPORT_HEIGHT").ok().and_then(|v| v.parse().ok());
+        // Leave `None` to use chromiumoxide's default (port 0 = OS-assigned),
+        // which avoids every port-conflict failure mode. Only set this when
+        // a firewall / container only exposes specific ports.
+        let cdp_port_base: Option<u16> =
+            env::var("CDP_PORT_BASE").ok().and_then(|v| v.parse().ok());
 
         let sessions = if let Ok(urls) = env::var("CHROME_WS_URLS") {
             // Connect mode: attach to pre-existing Chrome instances **in parallel**
@@ -218,7 +224,7 @@ impl BrowserPool {
                 env::var("BROWSER_COUNT").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
 
             let futs: Vec<_> = (0..browser_count)
-                .map(|_| {
+                .map(|i| {
                     let mut builder = if headless {
                         BrowserSession::builder().headless()
                     } else {
@@ -233,6 +239,14 @@ impl BrowserPool {
                         builder = builder.viewport(w, 1080);
                     } else if let Some(h) = viewport_height {
                         builder = builder.viewport(1920, h);
+                    }
+                    // Browser N gets base+N so launching multiple browsers
+                    // with a pinned base doesn't collide. `base + i` can
+                    // overflow `u16::MAX`; clamp via `saturating_add` and
+                    // let the OS reject it rather than wrap silently.
+                    if let Some(base) = cdp_port_base {
+                        builder =
+                            builder.port(base.saturating_add(u16::try_from(i).unwrap_or(u16::MAX)));
                     }
                     builder.launch()
                 })
@@ -331,6 +345,18 @@ impl BrowserPool {
     /// The semaphore permit is returned on every error path so that
     /// failures never permanently shrink pool concurrency.
     pub async fn acquire(&self) -> Result<PooledTab> {
+        self.acquire_timed().await.map(|(tab, _waited_ms)| tab)
+    }
+
+    /// Like [`acquire`](Self::acquire), but also returns the milliseconds
+    /// spent blocked on the concurrency semaphore — the *pure queueing wait*,
+    /// excluding any lazy tab-creation latency that happens after a permit is
+    /// granted. A near-zero value means a slot was free immediately; a
+    /// non-trivial value means the caller queued behind other in-flight work.
+    /// Surfaced to MCP clients so an agent can tell when it has oversubscribed
+    /// the pool and should throttle or cap a batch at `max_tabs`.
+    pub async fn acquire_timed(&self) -> Result<(PooledTab, u64)> {
+        let wait_start = Instant::now();
         let permit = if self.config.acquire_timeout_secs == 0 {
             // No timeout — wait indefinitely (legacy behaviour).
             self.semaphore
@@ -353,6 +379,10 @@ impl BrowserPool {
                 }
             }
         };
+        // Pure semaphore queueing time — captured before the ready-queue pop
+        // and any lazy `create_tab()` round-trip, so tab-creation latency is
+        // never misreported as contention.
+        let waited_ms = u64::try_from(wait_start.elapsed().as_millis()).unwrap_or(u64::MAX);
         // Don't auto-return the permit on drop — release() will add it back
         // on the success path. Error paths below must add_permits(1) manually.
         permit.forget();
@@ -381,12 +411,10 @@ impl BrowserPool {
             let _ = tab.page.close().await;
             match self.sessions[browser_idx].new_blank_page().await {
                 Ok(page) => {
-                    return Ok(PooledTab {
-                        page,
-                        use_count: 0,
-                        last_used: Instant::now(),
-                        browser_idx,
-                    });
+                    return Ok((
+                        PooledTab { page, use_count: 0, last_used: Instant::now(), browser_idx },
+                        waited_ms,
+                    ));
                 }
                 Err(e) => {
                     self.semaphore.add_permits(1);
@@ -398,7 +426,7 @@ impl BrowserPool {
         // No about:blank cleanup — the caller's navigate(url) will replace
         // the prior page content, and stealth scripts persist across navigations.
         // This saves 50-200ms of CDP round-trip per reused tab.
-        Ok(tab)
+        Ok((tab, waited_ms))
     }
 
     /// Return a tab to the pool after use.
@@ -494,6 +522,15 @@ impl BrowserPool {
     /// Access the pool configuration.
     pub fn config(&self) -> &PoolConfig {
         &self.config
+    }
+
+    /// Free concurrency permits right now — how many more tabs could be
+    /// acquired without queueing. `max_tabs - available_permits()` is the
+    /// count currently checked out (in-flight fetches plus any held session
+    /// tabs). A live snapshot an agent can read via `pool_status` to size a
+    /// fan-out before submitting it.
+    pub fn available_permits(&self) -> usize {
+        self.semaphore.available_permits()
     }
 
     /// Start a background Tokio task that periodically calls

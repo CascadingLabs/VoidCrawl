@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from voidcrawl._ext import (
+    CaptchaDetected as CaptchaDetected,
+)
+from voidcrawl._ext import (
     Page as Page,
 )
 from voidcrawl._ext import (
@@ -12,6 +15,21 @@ from voidcrawl._ext import (
     PooledTab as PooledTab,
 )
 from voidcrawl._ext import (
+    ProfileBusy as ProfileBusy,
+)
+from voidcrawl._ext import (
+    ProfileHandle as ProfileHandle,
+)
+from voidcrawl._ext import (
+    ProfileLeaseExpired as ProfileLeaseExpired,
+)
+from voidcrawl._ext import (
+    ProfileNotFound as ProfileNotFound,
+)
+from voidcrawl._ext import (
+    VoidCrawlError as VoidCrawlError,
+)
+from voidcrawl._ext import (
     _AcquireContext as _AcquireContext,
 )
 from voidcrawl.actions._protocol import (
@@ -19,6 +37,15 @@ from voidcrawl.actions._protocol import (
 )
 from voidcrawl.actions._protocol import (
     Tab as Tab,
+)
+from voidcrawl.profiles import (
+    acquire_profile as acquire_profile,
+)
+from voidcrawl.profiles import (
+    list_profiles as list_profiles,
+)
+from voidcrawl.profiles import (
+    with_profile as with_profile,
 )
 from voidcrawl.scale import (
     ScaleProfile as ScaleProfile,
@@ -49,19 +76,28 @@ __all__ = [
     "BrowserConfig",
     "BrowserPool",
     "BrowserSession",
+    "CaptchaDetected",
     "JsTab",
     "Page",
     "PageResponse",
     "PoolConfig",
     "PooledTab",
+    "ProfileBusy",
+    "ProfileHandle",
+    "ProfileLeaseExpired",
+    "ProfileNotFound",
     "ScaleProfile",
     "ScaleReport",
     "Schema",
     "Selector",
     "Tab",
     "Text",
+    "VoidCrawlError",
+    "acquire_profile",
+    "list_profiles",
     "safe_url",
     "strip_tags",
+    "with_profile",
 ]
 
 class BrowserConfig:

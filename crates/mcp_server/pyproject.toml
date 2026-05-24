@@ -1,0 +1,43 @@
+[build-system]
+build-backend = "maturin"
+requires = [ "maturin>=1.7,<2" ]
+
+[project]
+name = "voidcrawl-mcp"
+version = "0.3.1"
+description = "Stdio MCP server for stealthy headless Chrome via voidcrawl — expose the voidcrawl Chrome pool to Claude Code"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [
+  { name = "Cascading Labs" },
+]
+keywords = [ "mcp", "chrome", "cdp", "browser", "automation", "claude-code" ]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: MacOS :: MacOS X",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Rust",
+  "Topic :: Internet :: WWW/HTTP :: Browsers",
+  "Topic :: Software Development :: Libraries",
+]
+
+[project.urls]
+Homepage = "https://github.com/CascadingLabs/VoidCrawl"
+Documentation = "https://github.com/CascadingLabs/VoidCrawl/blob/main/docs/mcp-server.md"
+Repository = "https://github.com/CascadingLabs/VoidCrawl"
+Issues = "https://github.com/CascadingLabs/VoidCrawl/issues"
+Changelog = "https://github.com/CascadingLabs/VoidCrawl/blob/main/CHANGELOG.md"
+
+# maturin's `bin` bindings mode builds the Rust `[[bin]]` targets and
+# installs each binary as a console script in the resulting wheel.
+# The binary lands on PATH automatically after `pip install`.
+[tool.maturin]
+bindings = "bin"
+manifest-path = "Cargo.toml"
+# Bundle LICENSE in the sdist (PyPI validates License-File).
+include = [ { path = "../../LICENSE.md", format = "sdist" } ]

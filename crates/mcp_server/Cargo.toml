@@ -1,0 +1,46 @@
+[package]
+name = "voidcrawl-mcp"
+version = "0.3.1"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Stdio MCP server exposing voidcrawl stealth headless Chrome to Claude Code and other MCP clients"
+homepage = "https://github.com/CascadingLabs/VoidCrawl"
+repository = "https://github.com/CascadingLabs/VoidCrawl"
+documentation = "https://github.com/CascadingLabs/VoidCrawl/blob/main/docs/mcp-server.md"
+readme = "README.md"
+keywords = ["mcp", "chrome", "cdp", "browser", "automation"]
+categories = ["command-line-utilities", "web-programming"]
+# pyproject.toml is maturin's config for the PyPI wheel build; it has no
+# meaning to cargo, so keep it out of the crates.io source tarball.
+exclude = ["pyproject.toml"]
+
+[[bin]]
+name = "voidcrawl-mcp"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+void_crawl_core = { path = "../core", version = "0.3.1" }
+rmcp = { version = "1.4", features = ["server", "macros", "transport-io"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+thiserror = "2"
+anyhow = "1"
+futures = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "macros", "test-util"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "server"] }
+http-body-util = "0.1"
+bytes = "1"

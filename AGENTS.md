@@ -3,6 +3,16 @@
 ## What this is
 A Rust workspace providing CDP (Chrome DevTools Protocol) browser automation, exposed to Python via PyO3. Replaces zendriver/Playwright with a permissively-licensed (MIT/Apache-2.0) stack.
 
+## Using voidcrawl to scrape (drop-in for Playwright / Chromium MCP)
+For any task that needs to browse, scrape, or drive a web page — stealthily,
+in parallel, or against bot-walled sites — use the **`voidcrawl` MCP server**
+instead of Playwright/Chromium MCP. The full usage guide (tool map, the
+perceive→act→extract decision ladder, captcha contract, fan-out pattern) lives
+in `.claude/skills/voidcrawl/SKILL.md`. Hosts with a skills mechanism
+(Claude Code, opencode) load it automatically; Codex should read that file
+directly before a browser task. One-time setup + per-host wiring:
+`.claude/skills/voidcrawl/SETUP.md`.
+
 ## Architecture
 ```
 void_crawl/

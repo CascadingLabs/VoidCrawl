@@ -17,18 +17,54 @@ use tokio::sync::Mutex;
 use void_crawl_core::{
     BrowserMode, BrowserPool, BrowserSession, CookieParam, DeleteCookiesParams,
     DispatchKeyEventType, DispatchMouseEventType, MouseButton, Page, PageResponse, PoolConfig,
-    PooledTab, StealthConfig, VoidCrawlError,
+    PooledTab, ProfileHandle, ProfileInfo, StealthConfig, acquire_profile, list_profiles,
 };
 
 // ── Error conversion ────────────────────────────────────────────────────
 
+pyo3::create_exception!(voidcrawl._ext, VoidCrawlError, PyRuntimeError);
+pyo3::create_exception!(voidcrawl._ext, ProfileBusy, VoidCrawlError);
+pyo3::create_exception!(voidcrawl._ext, ProfileLeaseExpired, VoidCrawlError);
+pyo3::create_exception!(voidcrawl._ext, ProfileNotFound, VoidCrawlError);
+pyo3::create_exception!(voidcrawl._ext, CaptchaDetected, VoidCrawlError);
+
 #[allow(clippy::needless_pass_by_value)] // used as fn pointer in map_err(to_py_err)
-fn to_py_err(e: VoidCrawlError) -> PyErr {
-    PyRuntimeError::new_err(e.to_string())
+fn to_py_err(e: void_crawl_core::VoidCrawlError) -> PyErr {
+    match e {
+        void_crawl_core::VoidCrawlError::ProfileBusy { .. } => ProfileBusy::new_err(e.to_string()),
+        void_crawl_core::VoidCrawlError::ProfileLeaseExpired { .. } => {
+            ProfileLeaseExpired::new_err(e.to_string())
+        }
+        void_crawl_core::VoidCrawlError::ProfileNotFound { .. } => {
+            ProfileNotFound::new_err(e.to_string())
+        }
+        void_crawl_core::VoidCrawlError::CaptchaDetected { .. } => {
+            CaptchaDetected::new_err(e.to_string())
+        }
+        _ => PyRuntimeError::new_err(e.to_string()),
+    }
 }
 
 /// Wrapper so `Vec<u8>` converts to Python `bytes` instead of `list[int]`.
 struct PyBytesResult(Vec<u8>);
+
+/// Converts `ScreenshotOutput` to bytes-or-str for Python.
+struct PyScreenshotOutput(void_crawl_core::ScreenshotOutput);
+
+impl<'py> IntoPyObject<'py> for PyScreenshotOutput {
+    type Target = PyAny;
+    type Output = Bound<'py, PyAny>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> PyResult<Self::Output> {
+        match self.0 {
+            void_crawl_core::ScreenshotOutput::Bytes(b) => Ok(PyBytes::new(py, &b).into_any()),
+            void_crawl_core::ScreenshotOutput::Path(p) => {
+                Ok(p.display().to_string().into_pyobject(py)?.into_any())
+            }
+        }
+    }
+}
 
 /// Wrapper for direct `serde_json::Value` → Python object conversion.
 ///
@@ -349,9 +385,144 @@ impl PyPage {
         with_page_map!(self, py, |page| page.screenshot_png(), |bytes| PyBytesResult(bytes))
     }
 
+    /// Take a PNG screenshot with optional disk output and/or cropping.
+    ///
+    /// Args:
+    ///     path: If set, writes PNG to this path and returns the path as a
+    ///         string. If omitted, returns raw bytes.
+    ///     bbox: Optional ``(x, y, width, height)`` in CSS pixels to crop.
+    #[pyo3(signature = (path=None, bbox=None))]
+    fn screenshot<'py>(
+        &self,
+        py: Python<'py>,
+        path: Option<String>,
+        bbox: Option<(u32, u32, u32, u32)>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let page = inner
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
+            let mut opts = void_crawl_core::ScreenshotOptions::default();
+            if let Some(p) = path {
+                opts = opts.with_path(p);
+            }
+            if let Some((x, y, w, h)) = bbox {
+                opts = opts.with_bbox(void_crawl_core::Bbox { x, y, width: w, height: h });
+            }
+            let result = page.screenshot(opts).await.map_err(to_py_err);
+            inner.lock().await.replace(page);
+            Ok(PyScreenshotOutput(result?))
+        })
+    }
+
+    /// Probe DOM for captcha / bot-wall markers. Returns the kind tag
+    /// (``"recaptcha"``, ``"hcaptcha"``, ``"turnstile"``,
+    /// ``"cloudflare_challenge"``, ``"datadome"``) or ``None``.
+    fn detect_captcha<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let page = inner
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
+            let result = void_crawl_core::detect_captcha(&page).await.map_err(to_py_err);
+            inner.lock().await.replace(page);
+            Ok(result?.map(|k| k.as_str().to_string()))
+        })
+    }
+
     /// Generate a PDF, returned as Python bytes.
     fn pdf_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         with_page_map!(self, py, |page| page.pdf_bytes(), |bytes| PyBytesResult(bytes))
+    }
+
+    /// Fetch the browser-computed accessibility (AX) tree.
+    ///
+    /// Returns a flat list of AX node dicts (`Accessibility.getFullAXTree`):
+    /// each has ``role``, computed ``name``, ``properties``, ``childIds`` and
+    /// ``backendDOMNodeId``. Call after the page has rendered. ``depth``
+    /// bounds descendant traversal (``None`` = full tree).
+    #[pyo3(signature = (depth=None))]
+    fn get_full_ax_tree<'py>(
+        &self,
+        py: Python<'py>,
+        depth: Option<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_page_map!(self, py, |page| page.get_full_ax_tree(depth), |val| PyJsonValue(val))
+    }
+
+    /// Fetch the AX tree as a compact, indented ``role "name"`` outline string
+    /// (text-noise and hidden nodes pruned) — the readable counterpart to
+    /// ``get_full_ax_tree``.
+    #[pyo3(signature = (depth=None))]
+    fn ax_tree_outline<'py>(
+        &self,
+        py: Python<'py>,
+        depth: Option<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_page!(self, py, |page| page.ax_tree_outline(depth))
+    }
+
+    /// Query the AX tree for nodes matching ``role`` and/or accessible
+    /// ``name`` (`Accessibility.queryAXTree`). Returns a list of node dicts.
+    #[pyo3(signature = (role=None, name=None))]
+    fn query_ax_tree<'py>(
+        &self,
+        py: Python<'py>,
+        role: Option<String>,
+        name: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_page_map!(
+            self,
+            py,
+            |page| page.query_ax_tree(role.as_deref(), name.as_deref()),
+            |val| PyJsonValue(val)
+        )
+    }
+
+    /// Click the ``nth`` element (0-based) matching accessibility ``role`` and
+    /// accessible ``name`` — the markup-independent analogue of
+    /// ``click_element``. Raises if no such node exists.
+    #[pyo3(signature = (role, name, nth=0))]
+    fn click_by_role<'py>(
+        &self,
+        py: Python<'py>,
+        role: String,
+        name: String,
+        nth: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_page!(self, py, |page| page.click_by_role(&role, &name, nth))
+    }
+
+    /// Override geolocation (and grant the permission). `accuracy` defaults
+    /// to 50 metres. `navigator.geolocation` reads require a secure context.
+    #[pyo3(signature = (latitude, longitude, accuracy=None))]
+    fn set_geolocation<'py>(
+        &self,
+        py: Python<'py>,
+        latitude: f64,
+        longitude: f64,
+        accuracy: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_page!(self, py, |page| page.set_geolocation(latitude, longitude, accuracy))
+    }
+
+    /// Override the locale (Intl + Accept-Language), e.g. "en-US", "fr-FR".
+    fn set_locale<'py>(&self, py: Python<'py>, locale: String) -> PyResult<Bound<'py, PyAny>> {
+        with_page!(self, py, |page| page.set_locale(&locale))
+    }
+
+    /// Override the timezone by IANA id, e.g. `America/New_York`.
+    fn set_timezone<'py>(
+        &self,
+        py: Python<'py>,
+        timezone_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_page!(self, py, |page| page.set_timezone(&timezone_id))
     }
 
     /// Query for an element by CSS selector, return its inner HTML or None.
@@ -444,26 +615,6 @@ impl PyPage {
         with_page!(self, py, |page| page.delete_cookies(vec![params]))
     }
 
-    /// Wait until the DOM stabilises and exceeds `min_length` characters.
-    ///
-    /// Returns True if stabilised within timeout, False otherwise.
-    /// Prevents redirect gates / loading stubs from being treated as content.
-    #[pyo3(signature = (timeout=10.0, min_length=5000, stable_checks=5))]
-    #[allow(deprecated)]
-    fn wait_for_stable_dom<'py>(
-        &self,
-        py: Python<'py>,
-        timeout: f64,
-        min_length: usize,
-        stable_checks: u32,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        with_page!(self, py, |page| page.wait_for_stable_dom(
-            Duration::from_secs_f64(timeout),
-            min_length,
-            stable_checks,
-        ))
-    }
-
     /// Event-driven wait for network idle. No polling.
     ///
     /// Returns the lifecycle event name ("networkIdle" or "networkAlmostIdle")
@@ -475,6 +626,20 @@ impl PyPage {
         timeout: f64,
     ) -> PyResult<Bound<'py, PyAny>> {
         with_page!(self, py, |page| page.wait_for_network_idle(Duration::from_secs_f64(timeout)))
+    }
+
+    /// Wait until a CSS selector matches via an in-page MutationObserver.
+    /// Event-driven — no polling. Returns None on match, raises Timeout
+    /// if `timeout` seconds pass without a match.
+    #[pyo3(signature = (selector, timeout=30.0))]
+    fn wait_for_selector<'py>(
+        &self,
+        py: Python<'py>,
+        selector: String,
+        timeout: f64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_page!(self, py, |page| page
+            .wait_for_selector(&selector, Duration::from_secs_f64(timeout)))
     }
 
     /// Dispatch a mouse event via the CDP Input.dispatchMouseEvent command.
@@ -855,6 +1020,91 @@ impl PyPooledTab {
         with_pooled_page_map!(self, py, |page| page.screenshot_png(), |bytes| PyBytesResult(bytes))
     }
 
+    /// Fetch the browser-computed accessibility (AX) tree.
+    ///
+    /// Returns a flat list of AX node dicts (`Accessibility.getFullAXTree`):
+    /// each has ``role``, computed ``name``, ``properties``, ``childIds`` and
+    /// ``backendDOMNodeId``. Call after the page has rendered. ``depth``
+    /// bounds descendant traversal (``None`` = full tree).
+    #[pyo3(signature = (depth=None))]
+    fn get_full_ax_tree<'py>(
+        &self,
+        py: Python<'py>,
+        depth: Option<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page_map!(self, py, |page| page.get_full_ax_tree(depth), |val| PyJsonValue(val))
+    }
+
+    /// Fetch the AX tree as a compact, indented ``role "name"`` outline string
+    /// (text-noise and hidden nodes pruned) — the readable counterpart to
+    /// ``get_full_ax_tree``.
+    #[pyo3(signature = (depth=None))]
+    fn ax_tree_outline<'py>(
+        &self,
+        py: Python<'py>,
+        depth: Option<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page!(self, py, |page| page.ax_tree_outline(depth))
+    }
+
+    /// Query the AX tree for nodes matching ``role`` and/or accessible
+    /// ``name`` (`Accessibility.queryAXTree`). Returns a list of node dicts.
+    #[pyo3(signature = (role=None, name=None))]
+    fn query_ax_tree<'py>(
+        &self,
+        py: Python<'py>,
+        role: Option<String>,
+        name: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page_map!(
+            self,
+            py,
+            |page| page.query_ax_tree(role.as_deref(), name.as_deref()),
+            |val| PyJsonValue(val)
+        )
+    }
+
+    /// Click the ``nth`` element (0-based) matching accessibility ``role`` and
+    /// accessible ``name`` — the markup-independent analogue of
+    /// ``click_element``. Raises if no such node exists.
+    #[pyo3(signature = (role, name, nth=0))]
+    fn click_by_role<'py>(
+        &self,
+        py: Python<'py>,
+        role: String,
+        name: String,
+        nth: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page!(self, py, |page| page.click_by_role(&role, &name, nth))
+    }
+
+    /// Override geolocation (and grant the permission). `accuracy` defaults
+    /// to 50 metres. `navigator.geolocation` reads require a secure context.
+    #[pyo3(signature = (latitude, longitude, accuracy=None))]
+    fn set_geolocation<'py>(
+        &self,
+        py: Python<'py>,
+        latitude: f64,
+        longitude: f64,
+        accuracy: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page!(self, py, |page| page.set_geolocation(latitude, longitude, accuracy))
+    }
+
+    /// Override the locale (Intl + Accept-Language), e.g. "en-US", "fr-FR".
+    fn set_locale<'py>(&self, py: Python<'py>, locale: String) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page!(self, py, |page| page.set_locale(&locale))
+    }
+
+    /// Override the timezone by IANA id, e.g. `America/New_York`.
+    fn set_timezone<'py>(
+        &self,
+        py: Python<'py>,
+        timezone_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page!(self, py, |page| page.set_timezone(&timezone_id))
+    }
+
     fn query_selector<'py>(
         &self,
         py: Python<'py>,
@@ -937,25 +1187,6 @@ impl PyPooledTab {
         with_pooled_page!(self, py, |page| page.delete_cookies(vec![params]))
     }
 
-    /// Wait until the DOM stabilises and exceeds `min_length` characters.
-    ///
-    /// Returns True if stabilised within timeout, False otherwise.
-    #[pyo3(signature = (timeout=10.0, min_length=5000, stable_checks=5))]
-    #[allow(deprecated)]
-    fn wait_for_stable_dom<'py>(
-        &self,
-        py: Python<'py>,
-        timeout: f64,
-        min_length: usize,
-        stable_checks: u32,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        with_pooled_page!(self, py, |page| page.wait_for_stable_dom(
-            Duration::from_secs_f64(timeout),
-            min_length,
-            stable_checks,
-        ))
-    }
-
     /// Event-driven wait for network idle. No polling.
     ///
     /// Returns the lifecycle event name ("networkIdle" or "networkAlmostIdle")
@@ -968,6 +1199,19 @@ impl PyPooledTab {
     ) -> PyResult<Bound<'py, PyAny>> {
         with_pooled_page!(self, py, |page| page
             .wait_for_network_idle(Duration::from_secs_f64(timeout)))
+    }
+
+    /// Wait until a CSS selector matches via an in-page MutationObserver.
+    /// Event-driven — no polling.
+    #[pyo3(signature = (selector, timeout=30.0))]
+    fn wait_for_selector<'py>(
+        &self,
+        py: Python<'py>,
+        selector: String,
+        timeout: f64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page!(self, py, |page| page
+            .wait_for_selector(&selector, Duration::from_secs_f64(timeout)))
     }
 
     /// Dispatch a mouse event via the CDP Input.dispatchMouseEvent command.
@@ -1416,6 +1660,115 @@ impl PyPoolParamsContext {
     }
 }
 
+// ── Profile bindings ────────────────────────────────────────────────────
+
+/// List Chrome profiles found in the platform's default user data dirs.
+///
+/// Returns a list of ``(name, path)`` tuples. Only profile directories
+/// that contain a ``Preferences`` file are returned.
+#[pyfunction]
+fn py_list_profiles() -> PyResult<Vec<(String, String)>> {
+    let profiles: Vec<ProfileInfo> = list_profiles().map_err(to_py_err)?;
+    Ok(profiles.into_iter().map(|p| (p.name, p.path.display().to_string())).collect())
+}
+
+/// Acquire exclusive lease on a Chrome profile, launching Chrome.
+///
+/// Args:
+///     name: Profile directory name (e.g. "Default", "Profile 1").
+///     `lease_timeout`: Seconds to poll for the lock before giving up.
+///     headless: Run Chrome headless (default). Set False for a visible
+///         window — e.g. for a one-time manual login.
+#[pyfunction]
+#[pyo3(signature = (name, lease_timeout=300.0, headless=true))]
+fn py_acquire_profile(
+    py: Python<'_>,
+    name: String,
+    lease_timeout: f64,
+    headless: bool,
+) -> PyResult<Bound<'_, PyAny>> {
+    future_into_py(py, async move {
+        let handle = acquire_profile(&name, Duration::from_secs_f64(lease_timeout), headless)
+            .await
+            .map_err(to_py_err)?;
+        Ok(PyProfileHandle { inner: Arc::new(Mutex::new(Some(handle))), name })
+    })
+}
+
+/// Handle on a leased Chrome profile. Use as an async context manager,
+/// or call ``release()`` explicitly.
+#[pyclass(name = "ProfileHandle")]
+pub struct PyProfileHandle {
+    inner: Arc<Mutex<Option<ProfileHandle>>>,
+    #[pyo3(get)]
+    name:  String,
+}
+
+impl fmt::Debug for PyProfileHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PyProfileHandle").field("name", &self.name).finish_non_exhaustive()
+    }
+}
+
+#[pymethods]
+impl PyProfileHandle {
+    /// Path to the profile directory on disk.
+    fn path<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let guard = inner.lock().await;
+            let h = guard
+                .as_ref()
+                .ok_or_else(|| PyRuntimeError::new_err("profile handle already released"))?;
+            Ok(h.path().display().to_string())
+        })
+    }
+
+    /// Open a new tab in the profile's Chrome and navigate to `url`.
+    fn new_page<'py>(&self, py: Python<'py>, url: String) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let guard = inner.lock().await;
+            let h = guard
+                .as_ref()
+                .ok_or_else(|| PyRuntimeError::new_err("profile handle already released"))?;
+            let session = h.session().map_err(to_py_err)?;
+            let page = session.new_page(&url).await.map_err(to_py_err)?;
+            Ok(PyPage::new(page))
+        })
+    }
+
+    /// Release the profile lease: close Chrome, drop the lock.
+    fn release<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            if let Some(mut h) = inner.lock().await.take() {
+                h.close().await.map_err(to_py_err)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn __aenter__<'py>(slf: Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        // `async with` awaits the return value, so __aenter__ must
+        // produce an awaitable — not the pyclass instance directly.
+        // Return a future that resolves to self, matching the pattern
+        // the other context-manager pyclasses in this file use.
+        let slf_ref = slf.into_any().unbind();
+        future_into_py(py, async move { Ok(slf_ref) })
+    }
+
+    fn __aexit__<'py>(
+        &self,
+        py: Python<'py>,
+        _exc_type: Bound<'py, PyAny>,
+        _exc_val: Bound<'py, PyAny>,
+        _exc_tb: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.release(py)
+    }
+}
+
 // ── Module ──────────────────────────────────────────────────────────────
 
 #[pymodule]
@@ -1428,5 +1781,14 @@ fn _ext(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPoolContext>()?;
     m.add_class::<PyPoolParamsContext>()?;
     m.add_class::<PyPageResponse>()?;
+    m.add_class::<PyProfileHandle>()?;
+    m.add_function(wrap_pyfunction!(py_list_profiles, m)?)?;
+    m.add_function(wrap_pyfunction!(py_acquire_profile, m)?)?;
+    let py = m.py();
+    m.add("VoidCrawlError", py.get_type::<VoidCrawlError>())?;
+    m.add("ProfileBusy", py.get_type::<ProfileBusy>())?;
+    m.add("ProfileLeaseExpired", py.get_type::<ProfileLeaseExpired>())?;
+    m.add("ProfileNotFound", py.get_type::<ProfileNotFound>())?;
+    m.add("CaptchaDetected", py.get_type::<CaptchaDetected>())?;
     Ok(())
 }

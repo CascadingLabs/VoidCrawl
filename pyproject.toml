@@ -4,7 +4,7 @@ requires = [ "maturin>=1.7,<2" ]
 
 [project]
 name = "voidcrawl"
-version = "0.2.3"
+version = "0.3.1"
 description = "Rust-native CDP browser automation for Python via PyO3"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -31,6 +31,26 @@ voidcrawl = "voidcrawl.cli:main"
 debug = [
   "rich>=14.3.3",
 ]
+# One-liner for the full bundle: Python lib + standalone MCP server.
+# The `voidcrawl-mcp` wheel is built from `crates/mcp_server/` and pulls
+# in the prebuilt Rust binary; there's no runtime dependency between
+# the two packages — the extra just co-installs them at matching versions.
+mcp = [
+  "voidcrawl-mcp==0.3.1",
+]
+
+# ── uv workspace ──────────────────────────────────────────────────────────
+#
+# Resolve `voidcrawl-mcp` from the local `crates/mcp_server/` package during
+# dev. End users installing from PyPI pick up the published version per the
+# `[project.optional-dependencies].mcp` constraint; uv only uses these
+# sources when working inside this repo.
+
+[tool.uv.workspace]
+members = [ "crates/mcp_server" ]
+
+[tool.uv.sources]
+voidcrawl-mcp = { workspace = true }
 
 [dependency-groups]
 dev = [
