@@ -72,6 +72,7 @@ get stealth, `fetch_many` concurrency, and isolated profiles for free.
 | Click by pixel | `click_visual_coords` | `{ session_id, x, y }` CSS px. Last resort (see recipe). |
 | Type | `type_text` | With `selector`: focus+type. Without: to whatever's focused. |
 | Run JS | `eval_js` | Returns the expression value as JSON. |
+| Teleport (geolocation) | `teleport` | `{ session_id, latitude, longitude, timezone?, locale?, accuracy? }`. Overrides `navigator.geolocation` (+ tz/locale); grants the geo permission. Set *before* navigating. For Maps "near me": fresh session per place + navigate the search twice (prime+read). |
 | Pull element text | `extract` | `querySelectorAll` → text content per match. |
 | Title only | `title` | Lightweight, no navigation. |
 | Wait for idle | `wait_for_network_idle` | Event-driven; no sleeps. |

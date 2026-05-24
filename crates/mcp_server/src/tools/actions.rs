@@ -701,6 +701,45 @@ pub async fn solve_captcha(
     Ok(SolveCaptchaResult { kind: Some(kind_tag), clicked: Some((cx, cy)), token, solved })
 }
 
+// ── Teleport (geolocation / timezone / locale override) ─────────────────
+
+#[derive(Debug, Deserialize, JsonSchema, Default)]
+pub struct TeleportArgs {
+    pub session_id: String,
+    /// Latitude in decimal degrees (e.g. 30.2672 for Austin, TX).
+    pub latitude:   f64,
+    /// Longitude in decimal degrees (e.g. -97.7431 for Austin, TX).
+    pub longitude:  f64,
+    /// IANA timezone matching the coordinates (e.g. "America/Chicago").
+    /// Omit to leave the session's timezone unchanged.
+    #[serde(default)]
+    pub timezone:   Option<String>,
+    /// Accept-Language / locale to match (e.g. "en-US"). Omit to leave it.
+    #[serde(default)]
+    pub locale:     Option<String>,
+    /// GPS accuracy in meters reported to `navigator.geolocation`. Default 50.
+    #[serde(default)]
+    pub accuracy:   Option<f64>,
+}
+
+/// Override the session's geolocation (and optionally timezone + locale) so
+/// `navigator.geolocation` and location-aware sites resolve to the given
+/// coordinates — "teleport" the browser. The geolocation permission is granted
+/// automatically. Apply AFTER `session_open` and BEFORE navigating; the
+/// override persists across navigations on the session.
+pub async fn teleport(server: &VoidCrawlServer, args: TeleportArgs) -> Result<OkResult, ErrorData> {
+    let handle = lookup(server, &args.session_id).await?;
+    let page = handle.page.lock().await;
+    page.set_geolocation(args.latitude, args.longitude, args.accuracy).await.map_err(map_err)?;
+    if let Some(tz) = args.timezone.as_deref() {
+        page.set_timezone(tz).await.map_err(map_err)?;
+    }
+    if let Some(loc) = args.locale.as_deref() {
+        page.set_locale(loc).await.map_err(map_err)?;
+    }
+    Ok(OkResult { ok: true })
+}
+
 // ── Helper ──────────────────────────────────────────────────────────────
 
 async fn lookup(server: &VoidCrawlServer, id: &str) -> Result<Arc<DedicatedSession>, ErrorData> {

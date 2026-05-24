@@ -27,7 +27,7 @@ use crate::{
             ClickVisualCoordsArgs, DetectCaptchaResult, EvalJsArgs, EvalJsResult, ExtractArgs,
             ExtractResult, InjectCaptchaTokenArgs, NetworkCaptureResult, OkResult,
             SessionIdArgs as ActionSessionIdArgs, SolveCaptchaArgs, SolveCaptchaResult,
-            TitleResult, TypeTextArgs, WaitIdleArgs,
+            TeleportArgs, TitleResult, TypeTextArgs, WaitIdleArgs,
         },
         fetch::{FetchArgs, FetchManyArgs, FetchManyResult, FetchResult},
         introspect::PoolStatus,
@@ -166,6 +166,22 @@ concurrency: `max_tabs`, `available` (free slots right now), `in_flight`, and \
         Parameters(args): Parameters<ClickArgs>,
     ) -> Result<Json<OkResult>, ErrorData> {
         tools::actions::click(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "teleport",
+        description = "Override the session's geolocation (and optionally timezone + locale) so \
+navigator.geolocation and location-aware sites resolve to the given lat/lon — 'teleport' the \
+browser. The geolocation permission is granted automatically. Call after session_open and \
+BEFORE navigating; the override persists across navigations. For Google Maps 'near me' queries: \
+use a FRESH session per location, and navigate to the search twice (prime + read) — Maps resolves \
+location on first load and applies it on the next request."
+    )]
+    pub async fn teleport(
+        &self,
+        Parameters(args): Parameters<TeleportArgs>,
+    ) -> Result<Json<OkResult>, ErrorData> {
+        tools::actions::teleport(self, args).await.map(Json)
     }
 
     #[tool(
