@@ -1,3 +1,13 @@
+## 0.3.2 (2026-05-24)
+
+Packaging-only re-release of 0.3.1 — no source changes. The 0.3.1 release failed: every `Build MCP` job errored, yet the crates.io publish still ran, leaving void_crawl_core/voidcrawl-mcp 0.3.1 on crates.io while neither reached PyPI.
+
+### Fix
+
+- release CI: the `voidcrawl-mcp` wheel and sdist jobs passed both `working-directory: crates/mcp_server` and `--manifest-path crates/mcp_server/Cargo.toml`. maturin-action joins the two, so it looked for the manifest at `crates/mcp_server/crates/mcp_server/…` and every `Build MCP` job failed. The manifest path is now relative to the working directory (`Cargo.toml`).
+- release CI: the MCP sdist's `[tool.maturin] include` reached the workspace LICENSE via `../../LICENSE.md`; maturin rejects `..` in include patterns. The crate now vendors its own `LICENSE.md`.
+- release CI: `publish-crates-io` only depended on the Rust/Python checks, so a failed build still published to the immutable crates.io registry (as happened in 0.3.1). It now waits on the full wheel + sdist build matrix, matching the PyPI publish jobs.
+
 ## 0.3.1 (2026-04-23)
 
 ### Feat

@@ -4,7 +4,7 @@ requires = [ "maturin>=1.7,<2" ]
 
 [project]
 name = "voidcrawl-mcp"
-version = "0.3.1"
+version = "0.3.2"
 description = "Stdio MCP server for stealthy headless Chrome via voidcrawl — expose the voidcrawl Chrome pool to Claude Code"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -39,5 +39,7 @@ Changelog = "https://github.com/CascadingLabs/VoidCrawl/blob/main/CHANGELOG.md"
 [tool.maturin]
 bindings = "bin"
 manifest-path = "Cargo.toml"
-# Bundle LICENSE in the sdist (PyPI validates License-File).
-include = [ { path = "../../LICENSE.md", format = "sdist" } ]
+# Bundle LICENSE in the sdist (PyPI validates License-File). maturin rejects
+# `..` in include patterns, so the crate vendors its own copy of the
+# workspace LICENSE.md rather than reaching up to the repo root.
+include = [ { path = "LICENSE.md", format = "sdist" } ]

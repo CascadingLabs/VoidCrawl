@@ -239,12 +239,13 @@ jobs:
         with:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
-          # --manifest-path points at the MCP crate's Cargo.toml. maturin
-          # picks up crates/mcp_server/pyproject.toml alongside it and
-          # ships the `voidcrawl-mcp` binary as a py3-none-<platform> wheel.
+          # Paths are relative to working-directory (crates/mcp_server), so
+          # the manifest is just Cargo.toml. maturin picks up the sibling
+          # pyproject.toml and ships the `voidcrawl-mcp` binary as a
+          # py3-none-<platform> wheel.
           args: >-
             --release
-            --manifest-path crates/mcp_server/Cargo.toml
+            --manifest-path Cargo.toml
             --out dist
           sccache: "true"
           docker-options: ${{ matrix.docker-options }}
@@ -268,7 +269,7 @@ jobs:
         uses: PyO3/maturin-action@04ac600d27cdf7a9a280dadf7147097c42b757ad # v1
         with:
           command: sdist
-          args: --manifest-path crates/mcp_server/Cargo.toml --out dist
+          args: --manifest-path Cargo.toml --out dist
           working-directory: crates/mcp_server
 
       - name: Upload sdist
@@ -361,7 +362,18 @@ jobs:
   publish-crates-io:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    needs: [rust-checks, python-tests]
+    # Gate on every artifact build, not just checks. crates.io publishes are
+    # immutable, so we must not push a version whose wheels/sdist failed to
+    # build — that's how 0.3.1 landed on crates.io while never reaching PyPI.
+    needs:
+      [
+        rust-checks,
+        python-tests,
+        build-wheels,
+        build-sdist,
+        build-mcp-wheels,
+        build-mcp-sdist,
+      ]
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
