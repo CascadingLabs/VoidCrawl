@@ -263,6 +263,38 @@ async fn test_pool_parallel() {
 }
 
 #[tokio::test]
+async fn test_acquire_timed_reports_queue_wait() {
+    // Single tab slot so the second acquire must queue behind the first.
+    let config = PoolConfig {
+        browsers:             1,
+        tabs_per_browser:     1,
+        tab_max_uses:         50,
+        tab_max_idle_secs:    60,
+        acquire_timeout_secs: 30,
+        auto_evict:           false,
+    };
+    let pool = std::sync::Arc::new(test_pool(config).await);
+    pool.warmup().await.expect("warmup failed");
+
+    // Uncontended acquire: a slot is free, so the wait is negligible.
+    let (tab, waited) = pool.acquire_timed().await.expect("first acquire");
+    assert!(waited < 50, "uncontended acquire should not queue, waited {waited}ms");
+
+    // Hold the only permit, then race a second acquire that must block until
+    // we release ~150ms later. Its reported wait should reflect that block.
+    let pool2 = pool.clone();
+    let second = tokio::spawn(async move { pool2.acquire_timed().await });
+    time::sleep(Duration::from_millis(150)).await;
+    pool.release(tab).await;
+
+    let (tab2, waited2) = second.await.expect("join").expect("second acquire");
+    assert!(waited2 >= 100, "queued acquire should report the block, waited {waited2}ms");
+    pool.release(tab2).await;
+
+    pool.close().await.expect("pool close failed");
+}
+
+#[tokio::test]
 async fn test_pool_hard_recycle() {
     let config = PoolConfig {
         browsers:             1,

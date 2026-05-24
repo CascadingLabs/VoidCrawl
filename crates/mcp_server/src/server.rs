@@ -74,7 +74,10 @@ Use for single-shot scrapes; for bulk use fetch_many."
     #[tool(
         name = "fetch_many",
         description = "Fetch many URLs in parallel over the shared browser pool. Returns \
-one entry per request in input order; per-request errors do not abort the batch."
+one entry per request in input order; per-request errors do not abort the batch. \
+Each result carries `waited_ms` (time queued for a tab), and the batch carries a \
+`pool` summary {max_tabs, submitted, queued, max_waited_ms, note} — if `queued > 0` \
+you oversubscribed the pool; cap batches at `max_tabs` (see pool_status) for full parallelism."
     )]
     pub async fn fetch_many(
         &self,
@@ -146,8 +149,9 @@ Always call this when you're done — otherwise the browser stays alive until th
 
     #[tool(
         name = "pool_status",
-        description = "Report the current browser pool configuration and how many dedicated \
-sessions are open. Useful for sanity-checking concurrency limits before a fan-out."
+        description = "Report the browser pool configuration plus a live snapshot of \
+concurrency: `max_tabs`, `available` (free slots right now), `in_flight`, and \
+`sessions_open`. Read `available` before a big fan-out to size the batch."
     )]
     pub async fn pool_status(&self) -> Result<Json<PoolStatus>, ErrorData> {
         tools::introspect::pool_status(self).await.map(Json).map_err(map_err)

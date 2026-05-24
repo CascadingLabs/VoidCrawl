@@ -1,6 +1,6 @@
 //! Stateless fetch over the shared `BrowserPool`.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::future::join_all;
 use schemars::JsonSchema;
@@ -43,6 +43,10 @@ pub struct FetchResult {
     pub title:       Option<String>,
     #[schemars(schema_with = "any_value_schema")]
     pub extracted:   Option<serde_json::Value>,
+    /// Milliseconds this request spent queued for a free pool tab before work
+    /// began. ~0 means a tab was free immediately; a larger value means the
+    /// pool was saturated and this request waited behind other in-flight work.
+    pub waited_ms:   u64,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Default)]
@@ -60,30 +64,104 @@ pub struct FetchManyItem {
     pub error:  Option<String>,
 }
 
+/// Batch-level concurrency summary so an agent driving `fetch_many` can see
+/// whether it oversubscribed the pool and adjust — without a separate
+/// `pool_status` round-trip.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PoolMeta {
+    /// Server concurrency ceiling: `browsers × tabs_per_browser`.
+    pub max_tabs:      usize,
+    /// Requests submitted in this batch.
+    pub submitted:     usize,
+    /// How many of them had to queue for a tab (waited measurably for a
+    /// permit). `0` means everything ran fully in parallel.
+    pub queued:        usize,
+    /// Worst per-request queue wait observed in the batch, milliseconds.
+    pub max_waited_ms: u64,
+    /// Present only when the batch oversubscribed the pool — a plain-language
+    /// hint the agent can act on (cap the next batch at `max_tabs`, or raise
+    /// the pool size).
+    pub note:          Option<String>,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct FetchManyResult {
     pub results: Vec<FetchManyItem>,
+    pub pool:    PoolMeta,
 }
 
+/// Queue waits at or below this (scheduler jitter) don't count as "queued".
+const QUEUE_WAIT_THRESHOLD_MS: u64 = 5;
+
 pub async fn run(server: &VoidCrawlServer, args: FetchArgs) -> Result<FetchResult, VoidCrawlError> {
-    let pool = server.state().pool().await?;
-    let tab = pool.acquire().await?;
-    let result = fetch_on_tab(&tab, args).await;
+    run_timed(server, args).await.1
+}
+
+/// One fetch, returning the pool queue-wait alongside the result so callers
+/// can report concurrency even when the request itself failed.
+async fn run_timed(
+    server: &VoidCrawlServer,
+    args: FetchArgs,
+) -> (u64, Result<FetchResult, VoidCrawlError>) {
+    let pool = match server.state().pool().await {
+        Ok(p) => p,
+        Err(e) => return (0, Err(e)),
+    };
+    // On the error path (e.g. acquire timeout) the precise semaphore-only wait
+    // isn't returned, so fall back to wall-clock around the acquire.
+    let started = Instant::now();
+    let (tab, waited_ms) = match pool.acquire_timed().await {
+        Ok((tab, waited)) => (tab, waited),
+        Err(e) => {
+            let waited = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            return (waited, Err(e));
+        }
+    };
+    let mut result = fetch_on_tab(&tab, args).await;
     pool.release(tab).await;
-    result
+    if let Ok(ref mut r) = result {
+        r.waited_ms = waited_ms;
+    }
+    (waited_ms, result)
 }
 
 pub async fn run_many(server: &VoidCrawlServer, args: FetchManyArgs) -> FetchManyResult {
-    let futures = args.requests.into_iter().map(|req| run(server, req));
+    let submitted = args.requests.len();
+    let max_tabs = server.state().pool().await.map_or(0, |p| {
+        let c = p.config();
+        c.browsers.saturating_mul(c.tabs_per_browser)
+    });
+
+    let futures = args.requests.into_iter().map(|req| run_timed(server, req));
     let outcomes = join_all(futures).await;
+
+    let mut max_waited_ms = 0u64;
+    let mut queued = 0usize;
     let results = outcomes
         .into_iter()
-        .map(|r| match r {
-            Ok(result) => FetchManyItem { ok: true, result: Some(result), error: None },
-            Err(e) => FetchManyItem { ok: false, result: None, error: Some(e.to_string()) },
+        .map(|(waited, r)| {
+            max_waited_ms = max_waited_ms.max(waited);
+            if waited > QUEUE_WAIT_THRESHOLD_MS {
+                queued += 1;
+            }
+            match r {
+                Ok(result) => FetchManyItem { ok: true, result: Some(result), error: None },
+                Err(e) => {
+                    FetchManyItem { ok: false, result: None, error: Some(e.to_string()) }
+                }
+            }
         })
         .collect();
-    FetchManyResult { results }
+
+    let note = (queued > 0 && max_tabs > 0).then(|| {
+        format!(
+            "{queued} of {submitted} requests queued behind the pool's {max_tabs}-tab limit \
+             (worst wait {max_waited_ms}ms). For full parallelism, submit at most {max_tabs} \
+             per batch, or raise TABS_PER_BROWSER / BROWSER_COUNT."
+        )
+    });
+
+    FetchManyResult { results, pool: PoolMeta { max_tabs, submitted, queued, max_waited_ms, note } }
 }
 
 async fn fetch_on_tab(tab: &PooledTab, args: FetchArgs) -> Result<FetchResult, VoidCrawlError> {
@@ -122,5 +200,7 @@ async fn fetch_on_tab(tab: &PooledTab, args: FetchArgs) -> Result<FetchResult, V
         html: resp.html,
         title,
         extracted,
+        // Overwritten by `run_timed` with the real pool queue-wait.
+        waited_ms: 0,
     })
 }

@@ -345,6 +345,18 @@ impl BrowserPool {
     /// The semaphore permit is returned on every error path so that
     /// failures never permanently shrink pool concurrency.
     pub async fn acquire(&self) -> Result<PooledTab> {
+        self.acquire_timed().await.map(|(tab, _waited_ms)| tab)
+    }
+
+    /// Like [`acquire`](Self::acquire), but also returns the milliseconds
+    /// spent blocked on the concurrency semaphore — the *pure queueing wait*,
+    /// excluding any lazy tab-creation latency that happens after a permit is
+    /// granted. A near-zero value means a slot was free immediately; a
+    /// non-trivial value means the caller queued behind other in-flight work.
+    /// Surfaced to MCP clients so an agent can tell when it has oversubscribed
+    /// the pool and should throttle or cap a batch at `max_tabs`.
+    pub async fn acquire_timed(&self) -> Result<(PooledTab, u64)> {
+        let wait_start = Instant::now();
         let permit = if self.config.acquire_timeout_secs == 0 {
             // No timeout — wait indefinitely (legacy behaviour).
             self.semaphore
@@ -367,6 +379,10 @@ impl BrowserPool {
                 }
             }
         };
+        // Pure semaphore queueing time — captured before the ready-queue pop
+        // and any lazy `create_tab()` round-trip, so tab-creation latency is
+        // never misreported as contention.
+        let waited_ms = u64::try_from(wait_start.elapsed().as_millis()).unwrap_or(u64::MAX);
         // Don't auto-return the permit on drop — release() will add it back
         // on the success path. Error paths below must add_permits(1) manually.
         permit.forget();
@@ -395,12 +411,10 @@ impl BrowserPool {
             let _ = tab.page.close().await;
             match self.sessions[browser_idx].new_blank_page().await {
                 Ok(page) => {
-                    return Ok(PooledTab {
-                        page,
-                        use_count: 0,
-                        last_used: Instant::now(),
-                        browser_idx,
-                    });
+                    return Ok((
+                        PooledTab { page, use_count: 0, last_used: Instant::now(), browser_idx },
+                        waited_ms,
+                    ));
                 }
                 Err(e) => {
                     self.semaphore.add_permits(1);
@@ -412,7 +426,7 @@ impl BrowserPool {
         // No about:blank cleanup — the caller's navigate(url) will replace
         // the prior page content, and stealth scripts persist across navigations.
         // This saves 50-200ms of CDP round-trip per reused tab.
-        Ok(tab)
+        Ok((tab, waited_ms))
     }
 
     /// Return a tab to the pool after use.
@@ -508,6 +522,15 @@ impl BrowserPool {
     /// Access the pool configuration.
     pub fn config(&self) -> &PoolConfig {
         &self.config
+    }
+
+    /// Free concurrency permits right now — how many more tabs could be
+    /// acquired without queueing. `max_tabs - available_permits()` is the
+    /// count currently checked out (in-flight fetches plus any held session
+    /// tabs). A live snapshot an agent can read via `pool_status` to size a
+    /// fan-out before submitting it.
+    pub fn available_permits(&self) -> usize {
+        self.semaphore.available_permits()
     }
 
     /// Start a background Tokio task that periodically calls
