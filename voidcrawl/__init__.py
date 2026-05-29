@@ -47,7 +47,7 @@ from voidcrawl._ext import (
     _PoolParamsContext,
 )
 from voidcrawl.actions._protocol import JsTab, Tab
-from voidcrawl.overlay import Overlay
+from voidcrawl.overlay import Overlay, OverlayLike, OverlayStyle
 from voidcrawl.profiles import acquire_profile, list_profiles, with_profile
 from voidcrawl.recording import RecordingError, record
 from voidcrawl.scale import ScaleProfile, ScaleReport
@@ -63,6 +63,8 @@ __all__ = [
     "CaptchaDetected",
     "JsTab",
     "Overlay",
+    "OverlayLike",
+    "OverlayStyle",
     "Page",
     "PageResponse",
     "PoolConfig",
