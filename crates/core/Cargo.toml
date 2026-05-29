@@ -26,3 +26,4 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls-no-p
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tempfile = "3"
 fd-lock = "4"
+base64 = "0.22.1"

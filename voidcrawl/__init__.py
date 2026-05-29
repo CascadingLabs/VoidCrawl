@@ -40,12 +40,15 @@ from voidcrawl._ext import (
     ProfileHandle,
     ProfileLeaseExpired,
     ProfileNotFound,
+    Screencast,
+    ScreencastFrame,
     VoidCrawlError,
     _AcquireContext,
     _PoolParamsContext,
 )
 from voidcrawl.actions._protocol import JsTab, Tab
 from voidcrawl.profiles import acquire_profile, list_profiles, with_profile
+from voidcrawl.recording import RecordingError, record
 from voidcrawl.scale import ScaleProfile, ScaleReport
 from voidcrawl.schema import Attr, Schema, Text, safe_url, strip_tags
 
@@ -66,15 +69,19 @@ __all__ = [
     "ProfileHandle",
     "ProfileLeaseExpired",
     "ProfileNotFound",
+    "RecordingError",
     "ScaleProfile",
     "ScaleReport",
     "Schema",
+    "Screencast",
+    "ScreencastFrame",
     "Selector",
     "Tab",
     "Text",
     "VoidCrawlError",
     "acquire_profile",
     "list_profiles",
+    "record",
     "safe_url",
     "strip_tags",
     "with_profile",

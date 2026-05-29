@@ -20,7 +20,10 @@ pub use chromiumoxide::cdp::browser_protocol::{
     network::{Cookie, CookieParam, DeleteCookiesParams},
 };
 pub use error::{Result, VoidCrawlError};
-pub use page::{Bbox, Page, PageResponse, ScreenshotOptions, ScreenshotOutput};
+pub use page::{
+    Bbox, Page, PageResponse, Screencast, ScreencastFormat, ScreencastFrame, ScreencastOptions,
+    ScreenshotOptions, ScreenshotOutput,
+};
 pub use pool::{BrowserPool, PoolConfig, PooledTab};
 pub use profile::{
     ProfileHandle, ProfileInfo, acquire_profile, acquire_profile_in, chrome_user_data_dirs,

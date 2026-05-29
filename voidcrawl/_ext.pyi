@@ -23,6 +23,36 @@ class PageResponse:
     status_code: int | None
     redirected: bool
 
+class ScreencastFrame:
+    """A single frame captured during a :class:`Screencast`.
+
+    Attributes:
+        data: Raw image bytes (JPEG or PNG, per the recording's format).
+        timestamp: CDP frame-swap time in seconds since the Unix epoch, or
+            ``None`` if Chrome reported none. Deltas between frames drive
+            playback timing.
+    """
+
+    data: bytes
+    timestamp: float | None
+
+    def __len__(self) -> int: ...
+
+class Screencast:
+    """An in-progress screencast returned by ``start_screencast()``.
+
+    The originating page stays usable while recording. For ergonomic capture
+    with mp4/gif assembly, prefer the :func:`voidcrawl.record` context manager.
+    """
+
+    async def stop(self) -> list[ScreencastFrame]:
+        """Stop recording and return the captured frames, in order.
+
+        Raises:
+            RuntimeError: If the screencast was already stopped.
+        """
+        ...
+
 class PooledTab:
     """A tab checked out from a :class:`~voidcrawl.BrowserPool`.
 
@@ -76,6 +106,20 @@ class PooledTab:
         ...
     async def screenshot_png(self) -> bytes:
         """Capture a full-page screenshot as PNG bytes."""
+        ...
+    async def start_screencast(
+        self,
+        format: str | None = None,  # noqa: A002 — mirrors the native CDP kwarg
+        quality: int | None = None,
+        max_width: int | None = None,
+        max_height: int | None = None,
+        every_nth_frame: int | None = None,
+    ) -> Screencast:
+        """Start recording this tab to a video frame stream via CDP screencast.
+
+        Mirror of :meth:`Page.start_screencast`. Concurrent screencasts on
+        different pooled tabs capture independently.
+        """
         ...
     async def get_full_ax_tree(self, depth: int | None = None) -> list[dict[str, Any]]:
         """Return the browser-computed accessibility (AX) tree.
@@ -363,6 +407,28 @@ class Page:
             path: If set, writes PNG to this path and returns the path.
                 If omitted, returns raw bytes.
             bbox: Optional ``(x, y, width, height)`` in CSS pixels.
+        """
+        ...
+    async def start_screencast(
+        self,
+        format: str | None = None,  # noqa: A002 — mirrors the native CDP kwarg
+        quality: int | None = None,
+        max_width: int | None = None,
+        max_height: int | None = None,
+        every_nth_frame: int | None = None,
+    ) -> Screencast:
+        """Start recording the page to a video frame stream via CDP screencast.
+
+        Returns a :class:`Screencast`; call ``.stop()`` to end it and collect
+        the frames. The page stays usable while recording. For ergonomic
+        capture with mp4/gif assembly, prefer :func:`voidcrawl.record`.
+
+        Args:
+            format: ``"jpeg"`` (default) or ``"png"``.
+            quality: JPEG quality 0..100 (default 80; ignored for PNG).
+            max_width: Cap frame width in device pixels.
+            max_height: Cap frame height in device pixels.
+            every_nth_frame: Deliver only every n-th frame to throttle.
         """
         ...
     async def detect_captcha(self) -> str | None:

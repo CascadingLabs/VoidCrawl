@@ -1,7 +1,14 @@
 //! High-level wrapper around a `chromiumoxide::Page`.
 
-use std::{collections::HashMap, fs, path::PathBuf, time::Duration};
+use std::{
+    collections::HashMap,
+    fmt, fs,
+    path::PathBuf,
+    sync::{Arc, Mutex, PoisonError},
+    time::Duration,
+};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chromiumoxide::{
     Page as CdpPage,
     cdp::{
@@ -24,16 +31,18 @@ use chromiumoxide::{
             },
             page::{
                 AddScriptToEvaluateOnNewDocumentParams, CaptureScreenshotFormat,
-                EventLifecycleEvent, PrintToPdfParams, SetBypassCspParams, Viewport,
+                EventLifecycleEvent, EventScreencastFrame, PrintToPdfParams,
+                ScreencastFrameAckParams, SetBypassCspParams, StartScreencastFormat,
+                StartScreencastParams, StopScreencastParams, Viewport,
             },
         },
         js_protocol::runtime::CallFunctionOnParams,
     },
     page::ScreenshotParams,
 };
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use serde_json::Value;
-use tokio::time;
+use tokio::{sync::oneshot, task::JoinHandle, time};
 
 use crate::{
     ax::compact_outline,
@@ -96,6 +105,99 @@ pub enum ScreenshotOutput {
     Bytes(Vec<u8>),
     /// Path the PNG was written to.
     Path(PathBuf),
+}
+
+/// Compression format for [`Page::start_screencast`] frames.
+#[derive(Debug, Clone, Copy)]
+pub enum ScreencastFormat {
+    Jpeg,
+    Png,
+}
+
+/// Options for [`Page::start_screencast`].
+///
+/// CDP screencast captures the **viewport** at a stable size (unlike a
+/// full-page screenshot, whose height varies per page), so every frame is
+/// the same dimensions — assembly downstream needs no per-frame normalization.
+#[derive(Debug, Clone)]
+pub struct ScreencastOptions {
+    /// Frame image format. JPEG is smaller; PNG is lossless.
+    pub format:          ScreencastFormat,
+    /// JPEG compression quality, `0..=100`. Ignored for PNG.
+    pub quality:         Option<u32>,
+    /// Cap frame width in device pixels (Chrome scales down to fit).
+    pub max_width:       Option<u32>,
+    /// Cap frame height in device pixels.
+    pub max_height:      Option<u32>,
+    /// Only deliver every n-th frame, to throttle the stream.
+    pub every_nth_frame: Option<u32>,
+}
+
+impl Default for ScreencastOptions {
+    fn default() -> Self {
+        Self {
+            format:          ScreencastFormat::Jpeg,
+            quality:         Some(80),
+            max_width:       None,
+            max_height:      None,
+            every_nth_frame: None,
+        }
+    }
+}
+
+/// A single frame captured during a [`Screencast`].
+#[derive(Debug, Clone)]
+pub struct ScreencastFrame {
+    /// Decoded image bytes (JPEG or PNG per [`ScreencastOptions::format`]).
+    pub data:      Vec<u8>,
+    /// CDP frame-swap time in seconds since the Unix epoch, when Chrome
+    /// supplied one. Use the deltas between frames to drive playback timing.
+    pub timestamp: Option<f64>,
+}
+
+/// An in-progress screencast.
+///
+/// Frames stream into an internal buffer on a background task from the moment
+/// [`Page::start_screencast`] returns until [`Screencast::stop`] is called.
+/// The capture runs on a **cloned** CDP page handle, so the originating
+/// [`Page`] stays free to drive the session (navigate, click, inject overlays)
+/// while recording — and concurrent screencasts on different pages never
+/// interleave, since each subscribes to its own per-target event stream.
+pub struct Screencast {
+    page:   CdpPage,
+    frames: Arc<Mutex<Vec<ScreencastFrame>>>,
+    stop:   Option<oneshot::Sender<()>>,
+    drain:  JoinHandle<()>,
+}
+
+impl fmt::Debug for Screencast {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let buffered = self.frames.lock().map(|g| g.len()).unwrap_or(0);
+        f.debug_struct("Screencast").field("buffered_frames", &buffered).finish_non_exhaustive()
+    }
+}
+
+impl Screencast {
+    /// Stop the screencast and return every frame captured so far, in order.
+    ///
+    /// Tells Chrome to stop emitting frames, then drains any frames already
+    /// queued before tearing down the background task — so the final frames
+    /// of the session are never dropped.
+    pub async fn stop(mut self) -> Result<Vec<ScreencastFrame>> {
+        // Ask Chrome to stop first, so no new frames are produced while we
+        // drain. A failure here is non-fatal: we still return what we have.
+        let _ = self.page.execute(StopScreencastParams::default()).await;
+        if let Some(tx) = self.stop.take() {
+            let _ = tx.send(());
+        }
+        // Let the drain task observe the stop signal and flush queued frames.
+        let _ = (&mut self.drain).await;
+        let frames = match Arc::try_unwrap(self.frames) {
+            Ok(m) => m.into_inner().unwrap_or_else(PoisonError::into_inner),
+            Err(arc) => arc.lock().map(|g| g.clone()).unwrap_or_default(),
+        };
+        Ok(frames)
+    }
 }
 
 /// Thin wrapper over `chromiumoxide::Page` exposing a clean async API.
@@ -482,6 +584,89 @@ impl Page {
         } else {
             Ok(ScreenshotOutput::Bytes(bytes))
         }
+    }
+
+    /// Begin recording the page to a stream of image frames via CDP
+    /// `Page.startScreencast`.
+    ///
+    /// Returns immediately with a [`Screencast`] handle; frames accumulate on
+    /// a background task until [`Screencast::stop`] is called, which returns
+    /// them in order. Chrome only emits a frame when the page actually
+    /// changes, so the result is true video of the session, not fixed-cadence
+    /// stills.
+    ///
+    /// The capture clones the CDP page handle, so this `Page` remains fully
+    /// usable while recording — drive the flow and inject overlays as normal.
+    pub async fn start_screencast(&self, opts: ScreencastOptions) -> Result<Screencast> {
+        let format = match opts.format {
+            ScreencastFormat::Jpeg => StartScreencastFormat::Jpeg,
+            ScreencastFormat::Png => StartScreencastFormat::Png,
+        };
+        let params = StartScreencastParams {
+            format:          Some(format),
+            quality:         opts.quality.map(i64::from),
+            max_width:       opts.max_width.map(i64::from),
+            max_height:      opts.max_height.map(i64::from),
+            every_nth_frame: opts.every_nth_frame.map(i64::from),
+        };
+
+        // A headless page is treated as hidden — its compositor produces only
+        // the initial frame and never repaints, so the screencast would stall
+        // at one frame. Activating the target marks it visible so frames flow
+        // for the whole session. Best-effort: a failure here shouldn't abort.
+        let _ = self.inner.bring_to_front().await;
+
+        // Subscribe before starting the cast so no early frame is missed.
+        let mut events = self
+            .inner
+            .event_listener::<EventScreencastFrame>()
+            .await
+            .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        self.inner.execute(params).await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+
+        let frames = Arc::new(Mutex::new(Vec::<ScreencastFrame>::new()));
+        let frames_w = Arc::clone(&frames);
+        let ack_page = self.inner.clone();
+        let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
+
+        let drain = tokio::spawn(async move {
+            // Ack each frame as it arrives (Chrome stalls the cast until the
+            // previous frame is acknowledged), decode it, and buffer it.
+            let handle = |ev: Arc<EventScreencastFrame>,
+                          ack_page: &CdpPage,
+                          buf: &Arc<Mutex<Vec<ScreencastFrame>>>| {
+                let ack_page = ack_page.clone();
+                let buf = Arc::clone(buf);
+                async move {
+                    let _ = ack_page.execute(ScreencastFrameAckParams::new(ev.session_id)).await;
+                    let b64: &str = ev.data.as_ref();
+                    if let Ok(bytes) = BASE64.decode(b64) {
+                        let timestamp = ev.metadata.timestamp.as_ref().map(|t| *t.inner());
+                        if let Ok(mut g) = buf.lock() {
+                            g.push(ScreencastFrame { data: bytes, timestamp });
+                        }
+                    }
+                }
+            };
+            loop {
+                tokio::select! {
+                    biased;
+                    maybe = events.next() => match maybe {
+                        Some(ev) => handle(ev, &ack_page, &frames_w).await,
+                        None => break,
+                    },
+                    _ = &mut stop_rx => {
+                        // Flush frames already delivered before we stopped.
+                        while let Some(Some(ev)) = events.next().now_or_never() {
+                            handle(ev, &ack_page, &frames_w).await;
+                        }
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(Screencast { page: self.inner.clone(), frames, stop: Some(stop_tx), drain })
     }
 
     /// Generate a PDF of the page, returned as raw bytes.

@@ -17,7 +17,8 @@ use tokio::sync::Mutex;
 use void_crawl_core::{
     BrowserMode, BrowserPool, BrowserSession, CookieParam, DeleteCookiesParams,
     DispatchKeyEventType, DispatchMouseEventType, MouseButton, Page, PageResponse, PoolConfig,
-    PooledTab, ProfileHandle, ProfileInfo, StealthConfig, acquire_profile, list_profiles,
+    PooledTab, ProfileHandle, ProfileInfo, Screencast, ScreencastFormat, ScreencastFrame,
+    ScreencastOptions, StealthConfig, acquire_profile, list_profiles,
 };
 
 // ── Error conversion ────────────────────────────────────────────────────
@@ -167,6 +168,127 @@ impl From<PageResponse> for PyPageResponse {
             status_code: r.status_code,
             redirected:  r.redirected,
         }
+    }
+}
+
+// ── Screencast ──────────────────────────────────────────────────────────
+
+/// Build core [`ScreencastOptions`] from the Python-facing keyword args.
+///
+/// `format` is case-insensitive and accepts `"jpeg"`/`"jpg"`/`"png"`;
+/// `None` keeps the JPEG default. Other knobs override the core defaults
+/// only when supplied.
+fn build_screencast_opts(
+    format: Option<String>,
+    quality: Option<u32>,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+    every_nth_frame: Option<u32>,
+) -> PyResult<ScreencastOptions> {
+    let mut opts = ScreencastOptions::default();
+    if let Some(f) = format {
+        opts.format = match f.to_ascii_lowercase().as_str() {
+            "jpeg" | "jpg" => ScreencastFormat::Jpeg,
+            "png" => ScreencastFormat::Png,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown screencast format {other:?}; expected 'jpeg' or 'png'"
+                )));
+            }
+        };
+    }
+    if let Some(q) = quality {
+        opts.quality = Some(q);
+    }
+    if max_width.is_some() {
+        opts.max_width = max_width;
+    }
+    if max_height.is_some() {
+        opts.max_height = max_height;
+    }
+    if every_nth_frame.is_some() {
+        opts.every_nth_frame = every_nth_frame;
+    }
+    Ok(opts)
+}
+
+/// A single frame captured during a :class:`Screencast`.
+#[pyclass(name = "ScreencastFrame")]
+#[derive(Debug)]
+pub struct PyScreencastFrame {
+    data:      Vec<u8>,
+    /// CDP frame-swap time, seconds since the Unix epoch (``None`` if Chrome
+    /// did not report one). Frame deltas drive playback timing.
+    #[pyo3(get)]
+    timestamp: Option<f64>,
+}
+
+#[pymethods]
+impl PyScreencastFrame {
+    /// Raw image bytes (JPEG or PNG, per the recording's format).
+    #[getter]
+    fn data<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.data)
+    }
+
+    fn __len__(&self) -> usize {
+        self.data.len()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("ScreencastFrame(bytes={}, timestamp={:?})", self.data.len(), self.timestamp)
+    }
+}
+
+impl From<ScreencastFrame> for PyScreencastFrame {
+    fn from(f: ScreencastFrame) -> Self {
+        Self { data: f.data, timestamp: f.timestamp }
+    }
+}
+
+/// An in-progress screencast handle returned by ``page.start_screencast()``.
+///
+/// Call :meth:`stop` to end the recording and get the captured frames. The
+/// originating page stays usable while recording, so drive the flow and
+/// inject overlays between frames as normal.
+#[pyclass(name = "Screencast")]
+pub struct PyScreencast {
+    inner: Arc<Mutex<Option<Screencast>>>,
+}
+
+impl fmt::Debug for PyScreencast {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Screencast").finish_non_exhaustive()
+    }
+}
+
+impl PyScreencast {
+    fn new(sc: Screencast) -> Self {
+        Self { inner: Arc::new(Mutex::new(Some(sc))) }
+    }
+}
+
+#[pymethods]
+impl PyScreencast {
+    /// Stop recording and return the captured frames in order, as a
+    /// ``list[ScreencastFrame]``. Idempotent guard: a second call raises.
+    fn stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let sc = inner
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| PyRuntimeError::new_err("screencast already stopped"))?;
+            let frames = sc.stop().await.map_err(to_py_err)?;
+            Ok(frames.into_iter().map(PyScreencastFrame::from).collect::<Vec<_>>())
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        // `true` when locked (a stop() is in flight) — treat as still active.
+        let active = self.inner.try_lock().map_or(true, |g| g.is_some());
+        format!("Screencast(active={active})")
     }
 }
 
@@ -415,6 +537,43 @@ impl PyPage {
             let result = page.screenshot(opts).await.map_err(to_py_err);
             inner.lock().await.replace(page);
             Ok(PyScreenshotOutput(result?))
+        })
+    }
+
+    /// Start recording the page to a video frame stream via CDP screencast.
+    ///
+    /// Returns a :class:`Screencast`; call ``.stop()`` to end it and collect
+    /// the frames. The page stays usable while recording. For ergonomic
+    /// capture with mp4/gif assembly, prefer the ``voidcrawl.record(...)``
+    /// async context manager.
+    ///
+    /// Args:
+    ///     format: ``"jpeg"`` (default) or ``"png"``.
+    ///     quality: JPEG quality 0..100 (default 80; ignored for PNG).
+    ///     max_width / max_height: cap frame size in device pixels.
+    ///     every_nth_frame: deliver only every n-th frame to throttle.
+    #[pyo3(signature = (format=None, quality=None, max_width=None, max_height=None, every_nth_frame=None))]
+    fn start_screencast<'py>(
+        &self,
+        py: Python<'py>,
+        format: Option<String>,
+        quality: Option<u32>,
+        max_width: Option<u32>,
+        max_height: Option<u32>,
+        every_nth_frame: Option<u32>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let opts =
+                build_screencast_opts(format, quality, max_width, max_height, every_nth_frame)?;
+            let page = inner
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
+            let result = page.start_screencast(opts).await.map_err(to_py_err);
+            inner.lock().await.replace(page);
+            Ok(PyScreencast::new(result?))
         })
     }
 
@@ -1018,6 +1177,36 @@ impl PyPooledTab {
 
     fn screenshot_png<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         with_pooled_page_map!(self, py, |page| page.screenshot_png(), |bytes| PyBytesResult(bytes))
+    }
+
+    /// Start recording this tab to a video frame stream via CDP screencast.
+    ///
+    /// Mirror of :meth:`Page.start_screencast`. Concurrent screencasts on
+    /// different pooled tabs capture independently — each subscribes to its
+    /// own per-target event stream, so frames never interleave.
+    #[pyo3(signature = (format=None, quality=None, max_width=None, max_height=None, every_nth_frame=None))]
+    fn start_screencast<'py>(
+        &self,
+        py: Python<'py>,
+        format: Option<String>,
+        quality: Option<u32>,
+        max_width: Option<u32>,
+        max_height: Option<u32>,
+        every_nth_frame: Option<u32>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let opts =
+                build_screencast_opts(format, quality, max_width, max_height, every_nth_frame)?;
+            let tab = inner
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| PyRuntimeError::new_err("tab has been released"))?;
+            let result = tab.page.start_screencast(opts).await.map_err(to_py_err);
+            inner.lock().await.replace(tab);
+            Ok(PyScreencast::new(result?))
+        })
     }
 
     /// Fetch the browser-computed accessibility (AX) tree.
@@ -1781,6 +1970,8 @@ fn _ext(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPoolContext>()?;
     m.add_class::<PyPoolParamsContext>()?;
     m.add_class::<PyPageResponse>()?;
+    m.add_class::<PyScreencast>()?;
+    m.add_class::<PyScreencastFrame>()?;
     m.add_class::<PyProfileHandle>()?;
     m.add_function(wrap_pyfunction!(py_list_profiles, m)?)?;
     m.add_function(wrap_pyfunction!(py_acquire_profile, m)?)?;
