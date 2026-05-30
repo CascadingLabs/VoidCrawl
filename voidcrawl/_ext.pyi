@@ -74,6 +74,9 @@ class PooledTab:
             expression: JavaScript expression or IIFE string.
         """
         ...
+    async def eval_js(self, expression: str) -> object:
+        """Alias for :meth:`evaluate_js` — short form used by MCP tooling."""
+        ...
     async def screenshot_png(self) -> bytes:
         """Capture a full-page screenshot as PNG bytes."""
         ...
@@ -348,6 +351,9 @@ class Page:
         ...
     async def evaluate_js(self, expression: str) -> object:
         """Evaluate a JavaScript *expression* and return the result."""
+        ...
+    async def eval_js(self, expression: str) -> object:
+        """Alias for :meth:`evaluate_js` — short form used by MCP tooling."""
         ...
     async def screenshot_png(self) -> bytes:
         """Capture a full-page screenshot as PNG bytes."""
