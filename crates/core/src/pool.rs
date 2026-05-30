@@ -431,12 +431,22 @@ impl BrowserPool {
 
     /// Return a tab to the pool after use.
     ///
-    /// Instant return — no CDP round-trip. The next caller's `navigate(url)`
-    /// overwrites prior page content; stealth scripts persist across
-    /// navigations.
+    /// Instant return — no CDP round-trip on the common path. The next caller's
+    /// `navigate(url)` overwrites prior page content; stealth scripts persist
+    /// across navigations.
+    ///
+    /// The one exception: if a download was armed on this tab and never
+    /// completed (`arm_download` without a matching `wait`), we reset the CDP
+    /// download behavior before recycling so the next caller doesn't inherit an
+    /// `allowAndName` pointing at a since-deleted quarantine dir. This costs
+    /// one CDP call only on the rare armed-but-abandoned path.
     pub async fn release(&self, mut tab: PooledTab) {
         tab.use_count += 1;
         tab.last_used = Instant::now();
+
+        if tab.page.is_download_armed() {
+            tab.page.reset_download_behavior().await;
+        }
 
         self.ready.lock().await.push_back(tab);
         self.semaphore.add_permits(1);

@@ -1,3 +1,9 @@
+## Unreleased
+
+### Feat
+
+- file downloads with a built-in antivirus gate (CAS-86). New `download` MCP tool and `Page::download_to_dir` fetch a file through the stealth browser context (cookies/TLS fingerprint preserved), into a quarantine directory. A new `scanner` module (`scan_path` / `scan_bytes`) gates it: size cap, magic-byte type check (`infer`) to catch executables disguised as documents (the server's claimed `Content-Type` is fed into the check), and a `yara-x` signature scan (ships an EICAR rule). The file is moved into the output directory only if it comes back clean; a flagged file is deleted. Downloads are forced from inside the page (same-origin `fetch` → blob → download anchor) so `Content-Disposition: inline` resources like PDFs download instead of rendering in Chrome's viewer; the stream aborts past the size cap so a hostile server can't exhaust the tab, and the CDP download behavior is reset before the pooled tab is recycled. **Opt-in**: the tool is disabled unless the server runs with `VOIDCRAWL_ALLOW_DOWNLOADS=1`. A `clean` verdict means the file passed the size + content-type + bundled-signature checks, not that it is guaranteed malware-free (real signature-DB scanning via `clamd` is a planned opt-in). See `examples/download_and_scan.rs`.
+
 ## 0.3.2 (2026-05-24)
 
 Packaging-only re-release of 0.3.1 — no source changes. The 0.3.1 release failed: every `Build MCP` job errored, yet the crates.io publish still ran, leaving void_crawl_core/voidcrawl-mcp 0.3.1 on crates.io while neither reached PyPI.

@@ -29,6 +29,9 @@ use crate::{
             SessionIdArgs as ActionSessionIdArgs, SolveCaptchaArgs, SolveCaptchaResult,
             TeleportArgs, TitleResult, TypeTextArgs, WaitIdleArgs,
         },
+        download::{
+            DownloadArgs, DownloadArmArgs, DownloadArmResult, DownloadResult, DownloadWaitArgs,
+        },
         fetch::{FetchArgs, FetchManyArgs, FetchManyResult, FetchResult},
         introspect::PoolStatus,
         screenshot::ScreenshotArgs,
@@ -84,6 +87,54 @@ you oversubscribed the pool; cap batches at `max_tabs` (see pool_status) for ful
         Parameters(args): Parameters<FetchManyArgs>,
     ) -> Result<Json<FetchManyResult>, ErrorData> {
         Ok(Json(tools::fetch::run_many(self, args).await))
+    }
+
+    #[tool(
+        name = "download",
+        description = "Download a file (PDF, archive, image, …) through stealth Chrome and scan \
+it with a built-in Rust antivirus gate (magic-byte type check + yara-x signatures) BEFORE it is \
+trusted. The file is fetched into a quarantine dir and only moved into `output_dir` if it passes \
+every check; a flagged file is deleted and the result has `ok=false` with a `reason`. Returns \
+{ok, verdict, path?, reason?, detected_mime, size}. Use this instead of `fetch` when you need the \
+actual bytes of a downloadable resource rather than rendered HTML. OPT-IN: disabled unless the \
+server is run with VOIDCRAWL_ALLOW_DOWNLOADS=1. NOTE: a `clean` verdict means it passed the \
+size + content-type + bundled-signature checks, not that it is guaranteed malware-free."
+    )]
+    pub async fn download(
+        &self,
+        Parameters(args): Parameters<DownloadArgs>,
+    ) -> Result<Json<DownloadResult>, ErrorData> {
+        tools::download::run(self, args).await.map(Json).map_err(map_err)
+    }
+
+    #[tool(
+        name = "download_arm",
+        description = "Arm an open session to capture the file produced by the NEXT \
+download-triggering action — for downloads started by clicking a button (e.g. Google Drive's \
+'Download'), where there's no stable URL to pass to `download`. Flow: session_open → \
+session_navigate → download_arm → click_by_role(\"button\",\"Download\") (+ \"Download anyway\" if \
+an interstitial appears) → download_wait. OPT-IN: needs VOIDCRAWL_ALLOW_DOWNLOADS=1."
+    )]
+    pub async fn download_arm(
+        &self,
+        Parameters(args): Parameters<DownloadArmArgs>,
+    ) -> Result<Json<DownloadArmResult>, ErrorData> {
+        tools::download::arm(self, args).await.map(Json).map_err(map_err)
+    }
+
+    #[tool(
+        name = "download_wait",
+        description = "Wait for the download armed by `download_arm` to land, scan it with the \
+antivirus gate, and (if clean) move it into the output dir. Returns {ok, verdict, path?, reason?, \
+detected_mime, size}. Call after the click(s) that trigger the download. NOTE: a `clean` verdict \
+means it passed the size + bundled-signature checks; the content-type disguise check does NOT run \
+on action downloads (no Content-Type is observed), so `clean` is not a malware-free guarantee."
+    )]
+    pub async fn download_wait(
+        &self,
+        Parameters(args): Parameters<DownloadWaitArgs>,
+    ) -> Result<Json<DownloadResult>, ErrorData> {
+        tools::download::wait(self, args).await.map(Json).map_err(map_err)
     }
 
     #[tool(

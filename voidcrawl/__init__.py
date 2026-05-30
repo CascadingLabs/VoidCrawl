@@ -25,6 +25,7 @@ import os
 
 from pydantic import BaseModel, Field
 
+from voidcrawl._downloads import capture_download
 from voidcrawl._ext import (
     BrowserPool as _BrowserPool,
 )
@@ -33,6 +34,8 @@ from voidcrawl._ext import (
 )
 from voidcrawl._ext import (
     CaptchaDetected,
+    DownloadCapture,
+    DownloadOutcome,
     Page,
     PageResponse,
     PooledTab,
@@ -40,9 +43,12 @@ from voidcrawl._ext import (
     ProfileHandle,
     ProfileLeaseExpired,
     ProfileNotFound,
+    ScanReport,
     VoidCrawlError,
     _AcquireContext,
     _PoolParamsContext,
+    scan_bytes,
+    scan_file,
 )
 from voidcrawl.actions._protocol import JsTab, Tab
 from voidcrawl.profiles import acquire_profile, list_profiles, with_profile
@@ -57,6 +63,8 @@ __all__ = [
     "BrowserPool",
     "BrowserSession",
     "CaptchaDetected",
+    "DownloadCapture",
+    "DownloadOutcome",
     "JsTab",
     "Page",
     "PageResponse",
@@ -68,14 +76,18 @@ __all__ = [
     "ProfileNotFound",
     "ScaleProfile",
     "ScaleReport",
+    "ScanReport",
     "Schema",
     "Selector",
     "Tab",
     "Text",
     "VoidCrawlError",
     "acquire_profile",
+    "capture_download",
     "list_profiles",
     "safe_url",
+    "scan_bytes",
+    "scan_file",
     "strip_tags",
     "with_profile",
 ]

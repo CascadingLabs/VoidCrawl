@@ -12,6 +12,7 @@ allow = [
   "ISC",
   "Unicode-3.0",
   "CDLA-Permissive-2.0",
+  "Zlib", # foldhash (via hashbrown ← cranelift ← yara-x); permissive, OSI/FSF-approved
 ]
 
 # Confidence threshold — licenses detected below this are treated as unlicensed
@@ -36,7 +37,12 @@ skip = [
 
 [advisories]
 # Warn on crates with known security vulnerabilities (requires cargo-deny 0.14+)
-ignore = []
+ignore = [
+  # bincode 2.x flagged "unmaintained" — a transitive dep of yara-x (compiled-
+  # rule serialization), not a vulnerability and not removable. Revisit if
+  # yara-x drops it or a CVE lands.
+  "RUSTSEC-2025-0141",
+]
 
 [sources]
 # Only allow crates from crates.io (no unpublished git deps)

@@ -43,8 +43,11 @@ async fn server_with_page(html: &str) -> VoidCrawlServer {
     let session =
         BrowserSession::builder().headless().no_sandbox().launch().await.expect("launch chromium");
     let page = session.new_page(&data_url(html)).await.expect("navigate fixture");
-    let handle =
-        Arc::new(DedicatedSession { session: Arc::new(session), page: Mutex::new(page) });
+    let handle = Arc::new(DedicatedSession {
+        session:          Arc::new(session),
+        page:             Mutex::new(page),
+        pending_download: Mutex::new(None),
+    });
     let sessions = Arc::new(SessionRegistry::default());
     sessions.insert(SID.to_string(), handle).await;
     VoidCrawlServer::new(Arc::new(AppState::new(sessions)))

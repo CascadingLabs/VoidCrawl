@@ -1,13 +1,22 @@
 //! High-level wrapper around a `chromiumoxide::Page`.
 
-use std::{collections::HashMap, fs, path::PathBuf, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 use chromiumoxide::{
     Page as CdpPage,
     cdp::{
         browser_protocol::{
             accessibility::{AxNode, GetFullAxTreeParams, QueryAxTreeParams},
-            browser::{PermissionDescriptor, PermissionSetting, SetPermissionParams},
+            browser::{
+                PermissionDescriptor, PermissionSetting, SetDownloadBehaviorBehavior,
+                SetDownloadBehaviorParams, SetPermissionParams,
+            },
             dom::{GetDocumentParams, ResolveNodeParams},
             emulation::{
                 SetDeviceMetricsOverrideParams, SetGeolocationOverrideParams,
@@ -98,16 +107,90 @@ pub enum ScreenshotOutput {
     Path(PathBuf),
 }
 
+/// Outcome of [`Page::download_to_dir`]: the file that landed on disk.
+#[derive(Debug, Clone)]
+pub struct DownloadOutcome {
+    /// Absolute path to the downloaded file inside the target directory.
+    pub path:         PathBuf,
+    /// Size of the downloaded file in bytes.
+    pub bytes:        u64,
+    /// The `Content-Type` the server sent for the download (parameters
+    /// stripped), if any — fed to the scanner to catch disguised payloads.
+    /// `None` for action-captured downloads (see [`Page::arm_download`]), where
+    /// Chrome streams to disk and the header isn't observed.
+    pub content_type: Option<String>,
+}
+
+/// A primed capture for an **action-triggered** download — created by
+/// [`Page::arm_download`], consumed by [`DownloadCapture::wait`].
+///
+/// Use this when the download is started by a page action (clicking a
+/// "Download" button, a generated/redirected/cross-origin URL) rather than a
+/// URL you already hold — e.g. Google Drive. The flow is *arm → act → await*:
+///
+/// ```no_run
+/// # async fn f(page: &void_crawl_core::Page) -> void_crawl_core::Result<()> {
+/// # use std::{path::Path, time::Duration};
+/// let cap = page.arm_download(Path::new("/tmp/dl"), 100 << 20).await?;
+/// page.click_by_role("button", "Download all", 0).await?; // the triggering action
+/// let file = cap.wait(page, Duration::from_secs(120)).await?;
+/// # Ok(()) }
+/// ```
+///
+/// `arm_download` snapshots the directory's existing files, so `wait` only
+/// accepts a file that appears *after* arming. Not `Clone` — a capture is
+/// consumed exactly once.
+#[derive(Debug)]
+pub struct DownloadCapture {
+    dir:       PathBuf,
+    before:    HashSet<PathBuf>,
+    max_bytes: u64,
+}
+
+impl DownloadCapture {
+    /// Wait for a new completed download to settle in the armed directory, then
+    /// reset `page`'s download behavior. `page` must be the page that armed
+    /// this capture.
+    ///
+    /// The size cap is enforced *after* the file lands (Chrome streams a native
+    /// download straight to disk — it can't be aborted mid-stream the way
+    /// [`Page::download_to_dir`] aborts its in-page fetch). An oversized file
+    /// is deleted and an error returned.
+    pub async fn wait(self, page: &Page, timeout: Duration) -> Result<DownloadOutcome> {
+        let result = self.poll(timeout).await;
+        page.reset_download_behavior().await;
+        result
+    }
+
+    /// Poll for the download **without** touching the page, so a caller holding
+    /// the page lock elsewhere doesn't hold it for the whole wait. Does NOT
+    /// reset download behavior — pair with [`Page::reset_download_behavior`].
+    pub async fn poll(&self, timeout: Duration) -> Result<DownloadOutcome> {
+        wait_for_new_download(&self.dir, &self.before, self.max_bytes, timeout).await
+    }
+}
+
 /// Thin wrapper over `chromiumoxide::Page` exposing a clean async API.
 #[derive(Debug)]
 pub struct Page {
-    inner: CdpPage,
+    inner:          CdpPage,
+    /// `true` between [`Page::arm_download`] / a `download_to_dir` in flight
+    /// and the matching reset. The pool checks this on release to reset an
+    /// abandoned download behavior cheaply (no CDP call on the common path).
+    download_armed: AtomicBool,
 }
 
 impl Page {
     /// Wrap an existing CDP page.
     pub(crate) fn new(inner: CdpPage) -> Self {
-        Self { inner }
+        Self { inner, download_armed: AtomicBool::new(false) }
+    }
+
+    /// Whether a download is currently armed on this page (set by
+    /// `arm_download` / `download_to_dir`, cleared by
+    /// `reset_download_behavior`).
+    pub fn is_download_armed(&self) -> bool {
+        self.download_armed.load(Ordering::Relaxed)
     }
 
     /// Apply stealth settings to this page.
@@ -488,6 +571,165 @@ impl Page {
     pub async fn pdf_bytes(&self) -> Result<Vec<u8>> {
         let params = PrintToPdfParams::default();
         self.inner.pdf(params).await.map_err(|e| VoidCrawlError::PdfError(e.to_string()))
+    }
+
+    /// Download the resource at `url` into `dir`, returning the file that
+    /// landed.
+    ///
+    /// The transfer runs inside this page's browser context — cookies, TLS
+    /// fingerprint, and stealth patches are all preserved, unlike a
+    /// side-channel HTTP GET. CDP
+    /// `Browser.setDownloadBehavior(allowAndName)` routes the bytes to `dir`.
+    ///
+    /// A plain navigation only triggers a download for `Content-Disposition:
+    /// attachment` responses — `inline` resources (e.g. a PDF) get rendered by
+    /// Chrome's built-in viewer instead. To download *any* content type, the
+    /// save is forced from inside the page: navigate to the URL's origin so an
+    /// in-page `fetch` is same-origin (and carries cookies), then stream the
+    /// response — **aborting past `max_bytes`** so a hostile server can't OOM
+    /// the tab — into a blob and click a `download` anchor.
+    ///
+    /// Completion is detected by **watching the directory** (the file settling
+    /// without a `.crdownload` suffix), not by `Browser.downloadProgress`
+    /// events, which are unreliable in headless Chrome. The in-page fetch also
+    /// reports its `Content-Type` and any error back through a `window` flag,
+    /// so a failed fetch returns promptly instead of waiting out the
+    /// timeout.
+    ///
+    /// The CDP download behavior is **always reset** before returning, so a
+    /// pooled tab recycled to the next caller never inherits this download's
+    /// `allowAndName` mode or output path.
+    ///
+    /// `dir` should be a fresh, empty directory the caller treats as quarantine
+    /// and scans before trusting the file.
+    pub async fn download_to_dir(
+        &self,
+        url: &str,
+        dir: &Path,
+        timeout: Duration,
+        max_bytes: u64,
+    ) -> Result<DownloadOutcome> {
+        let outcome = self.run_download(url, dir, timeout, max_bytes).await;
+        // ALWAYS reset: setDownloadBehavior is browser-context-scoped and our
+        // download_path points at a quarantine dir the caller is about to
+        // delete. Leaving it set would mis-route or break the next user of a
+        // recycled pool tab.
+        self.reset_download_behavior().await;
+        outcome
+    }
+
+    /// Arm a capture for an **action-triggered** download into `dir`, returning
+    /// a [`DownloadCapture`]. Set CDP download behavior to route files into
+    /// `dir`, then snapshot the directory's current contents so the matching
+    /// `wait` only accepts a *new* file.
+    ///
+    /// Use this for the *arm → act → await* flow when a page action (a button
+    /// click, a generated/redirected/cross-origin URL) starts the download —
+    /// the Google-Drive case — rather than [`Page::download_to_dir`], which
+    /// needs a URL in hand. After arming, perform the triggering action with
+    /// the normal methods (e.g. [`Page::click_by_role`]), then call
+    /// [`DownloadCapture::wait`].
+    ///
+    /// `dir` should be a fresh directory the caller treats as quarantine and
+    /// scans before trusting the file.
+    pub async fn arm_download(&self, dir: &Path, max_bytes: u64) -> Result<DownloadCapture> {
+        let params = SetDownloadBehaviorParams::builder()
+            .behavior(SetDownloadBehaviorBehavior::AllowAndName)
+            .download_path(dir.to_string_lossy().into_owned())
+            .build()
+            .map_err(VoidCrawlError::PageError)?;
+        self.inner.execute(params).await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        self.download_armed.store(true, Ordering::Relaxed);
+        Ok(DownloadCapture { dir: dir.to_path_buf(), before: dir_entries(dir), max_bytes })
+    }
+
+    /// Reset CDP download behavior to Chrome's default and clear the armed
+    /// flag. Best-effort: failures here must not mask the download result,
+    /// so errors are swallowed.
+    ///
+    /// Does **not** navigate the page — a caller's page state (e.g. an open
+    /// session sitting on the download's origin) is left intact.
+    pub async fn reset_download_behavior(&self) {
+        if let Ok(params) = SetDownloadBehaviorParams::builder()
+            .behavior(SetDownloadBehaviorBehavior::Default)
+            .build()
+        {
+            let _ = self.inner.execute(params).await;
+        }
+        self.download_armed.store(false, Ordering::Relaxed);
+    }
+
+    async fn run_download(
+        &self,
+        url: &str,
+        dir: &Path,
+        timeout: Duration,
+        max_bytes: u64,
+    ) -> Result<DownloadOutcome> {
+        // Snapshot the dir so we only accept a file that appears *after* arming
+        // — correctness no longer depends on the caller handing us a fresh dir.
+        let before = dir_entries(dir);
+
+        let params = SetDownloadBehaviorParams::builder()
+            .behavior(SetDownloadBehaviorBehavior::AllowAndName)
+            .download_path(dir.to_string_lossy().into_owned())
+            .build()
+            .map_err(VoidCrawlError::PageError)?;
+        self.inner.execute(params).await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        self.download_armed.store(true, Ordering::Relaxed);
+
+        // Land on the target's origin so the in-page fetch below is same-origin
+        // (no CORS wall, cookies included). Best-effort: a 4xx/5xx on the origin
+        // root is fine, we only need a document in the right security context.
+        if let Some(origin) = origin_of(url) {
+            let _ = self.inner.goto(&origin).await;
+        }
+
+        // Kick off the streaming fetch→blob→anchor-click download. The IIFE
+        // returns synchronously (so `evaluate_js` doesn't await a pending value)
+        // and stashes progress on `window.__vcDl` for the poll loop to read.
+        let url_json = serde_json::to_string(url).unwrap_or_else(|_| "''".to_string());
+        let js =
+            DOWNLOAD_JS.replace("__URL__", &url_json).replace("__MAX__", &max_bytes.to_string());
+        self.evaluate_js(&js).await?;
+
+        const POLL: Duration = Duration::from_millis(200);
+        let deadline = time::Instant::now() + timeout;
+        let mut settle = SettleTracker::new();
+        let mut content_type: Option<String> = None;
+        let mut done = false;
+
+        loop {
+            // Read in-page progress: surface a fetch error immediately, capture
+            // the server's Content-Type, and learn when the blob save fired.
+            if let Ok(state) = self.evaluate_js("window.__vcDl || null").await {
+                if let Some(ct) = state.get("ct").and_then(|v| v.as_str()) {
+                    content_type = Some(strip_mime_params(ct));
+                }
+                if let Some(err) = state.get("err").and_then(|v| v.as_str()) {
+                    return Err(VoidCrawlError::Other(format!("download failed: {err}")));
+                }
+                if state.get("done").and_then(Value::as_bool) == Some(true) {
+                    done = true;
+                }
+            }
+
+            // Only trust the directory once the in-page driver reports the save
+            // fired — the authoritative completion signal, not a heuristic.
+            if done {
+                if let Some(outcome) = settle.poll(dir, &before, max_bytes)? {
+                    return Ok(DownloadOutcome { content_type, ..outcome });
+                }
+            }
+
+            if time::Instant::now() >= deadline {
+                return Err(VoidCrawlError::Timeout(format!(
+                    "download did not complete within {}s",
+                    timeout.as_secs()
+                )));
+            }
+            time::sleep(POLL).await;
+        }
     }
 
     /// Fetch the browser-computed accessibility (AX) tree for the root frame.
@@ -883,6 +1125,179 @@ impl Page {
     }
 }
 
+/// In-page download driver. `__URL__` and `__MAX__` are substituted before
+/// evaluation. Streams the response, aborting past `__MAX__` bytes so a hostile
+/// server can't OOM the tab, then saves the bytes via a blob `download` anchor
+/// (which forces a save even for `Content-Disposition: inline` resources like
+/// PDFs that Chrome would otherwise render). Progress is reported on
+/// `window.__vcDl = { ct, err, done }` for the Rust poll loop.
+const DOWNLOAD_JS: &str = r"(() => {
+  window.__vcDl = { ct: null, err: null, done: false };
+  (async () => {
+    try {
+      const MAX = __MAX__;
+      const ctrl = new AbortController();
+      const resp = await fetch(__URL__, { credentials: 'include', signal: ctrl.signal });
+      window.__vcDl.ct = resp.headers.get('content-type');
+      const cl = resp.headers.get('content-length');
+      if (cl && Number(cl) > MAX) { ctrl.abort(); throw new Error('content-length ' + cl + ' exceeds limit ' + MAX); }
+      let blob;
+      if (resp.body && resp.body.getReader) {
+        const reader = resp.body.getReader();
+        const chunks = []; let total = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          total += value.byteLength;
+          if (total > MAX) { ctrl.abort(); throw new Error('exceeded size limit ' + MAX + ' bytes'); }
+          chunks.push(value);
+        }
+        blob = new Blob(chunks);
+      } else {
+        blob = await resp.blob();
+        if (blob.size > MAX) throw new Error('exceeded size limit ' + MAX + ' bytes');
+      }
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = (__URL__.split(/[?#]/)[0].split('/').pop()) || 'download';
+      (document.body || document.documentElement).appendChild(a);
+      a.click();
+      window.__vcDl.done = true;
+    } catch (e) {
+      window.__vcDl.err = String((e && e.message) || e);
+    }
+  })();
+  return true;
+})()";
+
+/// Strip parameters from a MIME type: `application/pdf; charset=utf-8` →
+/// `application/pdf`.
+fn strip_mime_params(mime: &str) -> String {
+    mime.split(';').next().unwrap_or(mime).trim().to_ascii_lowercase()
+}
+
+/// `scheme://host[:port]` for `url`, or `None` if it isn't an absolute URL.
+fn origin_of(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let host = rest.split(['/', '?', '#']).next()?;
+    if host.is_empty() {
+        return None;
+    }
+    Some(format!("{scheme}://{host}"))
+}
+
+/// Snapshot the set of paths currently in `dir` (empty on a read error).
+fn dir_entries(dir: &Path) -> HashSet<PathBuf> {
+    fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).collect()
+}
+
+/// Finished (non-`.crdownload`, non-empty) files in `dir` that are **not** in
+/// `before` — i.e. downloads that appeared after the snapshot.
+fn new_complete_files(dir: &Path, before: &HashSet<PathBuf>) -> Vec<(PathBuf, u64)> {
+    let Ok(rd) = fs::read_dir(dir) else { return Vec::new() };
+    rd.flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if before.contains(&path) || path.extension().is_some_and(|e| e == "crdownload") {
+                return None;
+            }
+            match entry.metadata() {
+                Ok(m) if m.is_file() && m.len() > 0 => Some((path, m.len())),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// Number of identical consecutive size samples required before a file is
+/// accepted — ~2 poll intervals of an unchanged size, so a stream that pauses
+/// mid-write isn't captured truncated.
+const SETTLE_SIGHTINGS: u32 = 3;
+
+/// Tracks the size-stability of the newest new download across polls.
+struct SettleTracker {
+    prev:   Option<(PathBuf, u64)>,
+    stable: u32,
+}
+
+impl SettleTracker {
+    fn new() -> Self {
+        Self { prev: None, stable: 0 }
+    }
+
+    /// One poll over `dir`. `Ok(Some(_))` once a single new file's size has
+    /// held steady for [`SETTLE_SIGHTINGS`] samples; `Ok(None)` to keep
+    /// waiting; `Err` if more than one new file appeared (ambiguous) or the
+    /// file is oversized (deleted first).
+    fn poll(
+        &mut self,
+        dir: &Path,
+        before: &HashSet<PathBuf>,
+        max_bytes: u64,
+    ) -> Result<Option<DownloadOutcome>> {
+        let files = new_complete_files(dir, before);
+        if files.len() > 1 {
+            let names = files
+                .iter()
+                .filter_map(|(p, _)| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(VoidCrawlError::Other(format!(
+                "ambiguous download: {} new files appeared ({names}); expected exactly one",
+                files.len()
+            )));
+        }
+        let Some((path, size)) = files.into_iter().next() else {
+            self.prev = None;
+            self.stable = 0;
+            return Ok(None);
+        };
+
+        if self.prev.as_ref().is_some_and(|(p, s)| *p == path && *s == size) {
+            self.stable += 1;
+        } else {
+            self.prev = Some((path.clone(), size));
+            self.stable = 1;
+        }
+        if self.stable < SETTLE_SIGHTINGS {
+            return Ok(None);
+        }
+        if size > max_bytes {
+            let _ = fs::remove_file(&path);
+            return Err(VoidCrawlError::Other(format!(
+                "download is {size} bytes, over the {max_bytes}-byte limit"
+            )));
+        }
+        Ok(Some(DownloadOutcome { path, bytes: size, content_type: None }))
+    }
+}
+
+/// Poll `dir` until a **new** completed download settles (see
+/// [`SettleTracker::poll`]), or `timeout` elapses.
+async fn wait_for_new_download(
+    dir: &Path,
+    before: &HashSet<PathBuf>,
+    max_bytes: u64,
+    timeout: Duration,
+) -> Result<DownloadOutcome> {
+    const POLL: Duration = Duration::from_millis(250);
+    let deadline = time::Instant::now() + timeout;
+    let mut settle = SettleTracker::new();
+
+    loop {
+        if let Some(outcome) = settle.poll(dir, before, max_bytes)? {
+            return Ok(outcome);
+        }
+        if time::Instant::now() >= deadline {
+            return Err(VoidCrawlError::Timeout(format!(
+                "no download completed within {}s",
+                timeout.as_secs()
+            )));
+        }
+        time::sleep(POLL).await;
+    }
+}
+
 /// Probe the browser's real User-Agent and strip any "Headless"
 /// qualifier. Returns `Some(stripped_ua)` when the probe finds
 /// `HeadlessChrome` (or similar) and a rewrite is needed; returns
@@ -968,6 +1383,78 @@ fn client_hints_for_ua(ua: &str) -> (String, Option<UserAgentMetadata>) {
     // platform_version, architecture, model, and mobile are all set above, so
     // this is `Some` in practice. `None` (unreachable) simply skips metadata.
     (nav_platform.to_string(), builder.build().ok())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "test harness")]
+mod download_tests {
+    use std::{fs, path::Path};
+
+    use super::{SETTLE_SIGHTINGS, SettleTracker, dir_entries, new_complete_files};
+
+    fn touch(dir: &Path, name: &str, bytes: usize) {
+        fs::write(dir.join(name), vec![0u8; bytes]).unwrap();
+    }
+
+    #[test]
+    fn new_complete_files_excludes_before_crdownload_and_empty() {
+        let d = tempfile::tempdir().unwrap();
+        touch(d.path(), "old.bin", 10);
+        let before = dir_entries(d.path());
+        touch(d.path(), "new.bin", 10);
+        touch(d.path(), "partial.crdownload", 10);
+        touch(d.path(), "empty.bin", 0);
+        let files = new_complete_files(d.path(), &before);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].0.file_name().unwrap(), "new.bin");
+    }
+
+    #[test]
+    fn settle_requires_stable_samples_then_accepts() {
+        let d = tempfile::tempdir().unwrap();
+        let before = dir_entries(d.path());
+        touch(d.path(), "f.bin", 100);
+        let mut s = SettleTracker::new();
+        for _ in 0..(SETTLE_SIGHTINGS - 1) {
+            assert!(s.poll(d.path(), &before, 1_000).unwrap().is_none());
+        }
+        assert_eq!(s.poll(d.path(), &before, 1_000).unwrap().unwrap().bytes, 100);
+    }
+
+    #[test]
+    fn settle_resets_when_size_still_changing() {
+        let d = tempfile::tempdir().unwrap();
+        let before = dir_entries(d.path());
+        touch(d.path(), "f.bin", 10);
+        let mut s = SettleTracker::new();
+        s.poll(d.path(), &before, 1_000).unwrap();
+        touch(d.path(), "f.bin", 20); // still growing → counter resets
+        assert!(s.poll(d.path(), &before, 1_000).unwrap().is_none());
+    }
+
+    #[test]
+    fn settle_rejects_and_deletes_oversize() {
+        let d = tempfile::tempdir().unwrap();
+        let before = dir_entries(d.path());
+        touch(d.path(), "big.bin", 50);
+        let mut s = SettleTracker::new();
+        let mut last = Ok(None);
+        for _ in 0..SETTLE_SIGHTINGS {
+            last = s.poll(d.path(), &before, 8);
+        }
+        assert!(last.is_err());
+        assert!(!d.path().join("big.bin").exists(), "oversize file should be deleted");
+    }
+
+    #[test]
+    fn settle_errors_on_multiple_new_files() {
+        let d = tempfile::tempdir().unwrap();
+        let before = dir_entries(d.path());
+        touch(d.path(), "a.bin", 10);
+        touch(d.path(), "b.bin", 10);
+        let mut s = SettleTracker::new();
+        assert!(s.poll(d.path(), &before, 1_000).is_err());
+    }
 }
 
 #[cfg(test)]
