@@ -28,5 +28,8 @@ tempfile = "3"
 fd-lock = "4"
 # Content-safety gate for downloads: pure-Rust YARA engine (signatures) +
 # magic-byte type detection. Both MIT/Apache-2.0, no external daemon.
-yara-x = "1.7"
+# default-features off drops the binary-format modules (pe/macho/dotnet/…) we
+# don't use — and with them the `rsa`/`dsa` crypto crates (RUSTSEC-flagged) and
+# other heavy transitive deps. Our ruleset is string-only, so the core suffices.
+yara-x = { version = "1.7", default-features = false }
 infer = "0.16"
