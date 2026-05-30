@@ -92,8 +92,11 @@ pub async fn open(
     let session = builder.launch().await.map_err(map_err)?;
     let page = session.new_blank_page().await.map_err(map_err)?;
     let id = Uuid::new_v4().to_string();
-    let handle =
-        Arc::new(DedicatedSession { session: Arc::new(session), page: Mutex::new(page) });
+    let handle = Arc::new(DedicatedSession {
+        session:          Arc::new(session),
+        page:             Mutex::new(page),
+        pending_download: Mutex::new(None),
+    });
     server.state().sessions.insert(id.clone(), handle).await;
     Ok(SessionOpenResult { session_id: id })
 }

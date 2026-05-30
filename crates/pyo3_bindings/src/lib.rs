@@ -3,7 +3,14 @@
 //! Exposes `PyBrowserSession` and `PyPage` as Python classes with async methods
 //! that bridge to Python's asyncio via `pyo3-async-runtimes`.
 
-use std::{collections::HashMap, convert::Infallible, fmt, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    convert::Infallible,
+    fmt,
+    path::Path,
+    sync::{Arc, Mutex as StdMutex},
+    time::Duration,
+};
 
 use futures::future;
 use pyo3::{
@@ -15,9 +22,10 @@ use pyo3_async_runtimes::tokio::future_into_py;
 use serde_json::Value;
 use tokio::sync::Mutex;
 use void_crawl_core::{
-    BrowserMode, BrowserPool, BrowserSession, CookieParam, DeleteCookiesParams,
-    DispatchKeyEventType, DispatchMouseEventType, MouseButton, Page, PageResponse, PoolConfig,
-    PooledTab, ProfileHandle, ProfileInfo, StealthConfig, acquire_profile, list_profiles,
+    BrowserMode, BrowserPool, BrowserSession, CookieParam, DEFAULT_MAX_BYTES, DeleteCookiesParams,
+    DispatchKeyEventType, DispatchMouseEventType, DownloadCapture, DownloadOutcome, MouseButton,
+    Page, PageResponse, PoolConfig, PooledTab, ProfileHandle, ProfileInfo, ScanConfig, ScanReport,
+    StealthConfig, Verdict, acquire_profile, list_profiles, scan_bytes, scan_path,
 };
 
 // ── Error conversion ────────────────────────────────────────────────────
@@ -167,6 +175,121 @@ impl From<PageResponse> for PyPageResponse {
             status_code: r.status_code,
             redirected:  r.redirected,
         }
+    }
+}
+
+// ── DownloadOutcome ─────────────────────────────────────────────────────
+
+/// Python-visible result of `Page.download()` / `PooledTab.download()`.
+///
+/// Attributes:
+///     path (str): Absolute path to the downloaded file inside the dir.
+///     bytes (int): Size of the downloaded file in bytes.
+///     `content_type` (str | None): The server's ``Content-Type`` (parameters
+///         stripped), or ``None`` if it sent none. Pass this to
+///         :func:`scan_file` as ``claimed_mime`` to catch disguised payloads.
+#[pyclass(name = "DownloadOutcome")]
+#[derive(Debug)]
+pub struct PyDownloadOutcome {
+    #[pyo3(get)]
+    pub path:         String,
+    #[pyo3(get)]
+    pub bytes:        u64,
+    #[pyo3(get)]
+    pub content_type: Option<String>,
+}
+
+#[pymethods]
+impl PyDownloadOutcome {
+    fn __repr__(&self) -> String {
+        format!(
+            "DownloadOutcome(path={:?}, bytes={}, content_type={:?})",
+            self.path, self.bytes, self.content_type
+        )
+    }
+}
+
+impl From<DownloadOutcome> for PyDownloadOutcome {
+    fn from(o: DownloadOutcome) -> Self {
+        Self {
+            path:         o.path.display().to_string(),
+            bytes:        o.bytes,
+            content_type: o.content_type,
+        }
+    }
+}
+
+// ── DownloadCapture ─────────────────────────────────────────────────────
+
+/// Opaque handle for an armed action-triggered download. Created by
+/// ``Page.arm_download`` / ``PooledTab.arm_download``; pass to the matching
+/// ``wait_download`` after performing the triggering action. Consumed once.
+#[pyclass(name = "DownloadCapture")]
+#[derive(Debug)]
+pub struct PyDownloadCapture {
+    inner: StdMutex<Option<DownloadCapture>>,
+}
+
+impl PyDownloadCapture {
+    fn new(capture: DownloadCapture) -> Self {
+        Self { inner: StdMutex::new(Some(capture)) }
+    }
+
+    /// Take the capture out, erroring if it was already waited on.
+    fn take(&self) -> PyResult<DownloadCapture> {
+        self.inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("download capture lock poisoned"))?
+            .take()
+            .ok_or_else(|| PyRuntimeError::new_err("download capture already consumed"))
+    }
+}
+
+// ── ScanReport ──────────────────────────────────────────────────────────
+
+/// Python-visible result of :func:`scan_file` / :func:`scan_bytes`.
+///
+/// Attributes:
+///     verdict (str): ``"clean"`` or ``"flagged"``.
+///     `is_clean` (bool): ``True`` iff ``verdict == "clean"``.
+///     reason (str | None): Why it was flagged (``None`` when clean).
+///     `detected_mime` (str | None): MIME inferred from the file's magic bytes.
+///     size (int): Size of the scanned buffer in bytes.
+#[pyclass(name = "ScanReport")]
+#[derive(Debug)]
+pub struct PyScanReport {
+    #[pyo3(get)]
+    pub verdict:       String,
+    #[pyo3(get)]
+    pub reason:        Option<String>,
+    #[pyo3(get)]
+    pub detected_mime: Option<String>,
+    #[pyo3(get)]
+    pub size:          u64,
+}
+
+#[pymethods]
+impl PyScanReport {
+    #[getter]
+    fn is_clean(&self) -> bool {
+        self.verdict == "clean"
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ScanReport(verdict={:?}, reason={:?}, detected_mime={:?}, size={})",
+            self.verdict, self.reason, self.detected_mime, self.size
+        )
+    }
+}
+
+impl From<ScanReport> for PyScanReport {
+    fn from(r: ScanReport) -> Self {
+        let (verdict, reason) = match r.verdict {
+            Verdict::Clean => ("clean".to_string(), None),
+            Verdict::Flagged { reason } => ("flagged".to_string(), Some(reason)),
+        };
+        Self { verdict, reason, detected_mime: r.detected_mime, size: r.size }
     }
 }
 
@@ -438,6 +561,114 @@ impl PyPage {
     /// Generate a PDF, returned as Python bytes.
     fn pdf_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         with_page_map!(self, py, |page| page.pdf_bytes(), |bytes| PyBytesResult(bytes))
+    }
+
+    /// Download the resource at ``url`` into directory ``dir`` through this
+    /// page's browser context (cookies / fingerprint preserved), returning a
+    /// :class:`DownloadOutcome`.
+    ///
+    /// The stream aborts past ``max_bytes`` so a hostile server can't exhaust
+    /// the tab. ``dir`` should be a fresh directory you treat as quarantine and
+    /// pass to :func:`scan_file` before trusting the file. The CDP download
+    /// behavior is reset before this returns.
+    ///
+    /// Args:
+    ///     url: Absolute URL of the file to download.
+    ///     dir: Directory the file is saved into.
+    ///     timeout: Download timeout in seconds (default 120).
+    ///     `max_bytes`: Abort past this many bytes (default 100 MiB).
+    #[pyo3(signature = (url, dir, timeout=120.0, max_bytes=None))]
+    fn download<'py>(
+        &self,
+        py: Python<'py>,
+        url: String,
+        dir: String,
+        timeout: f64,
+        max_bytes: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let page = inner
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
+            let max = max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
+            let result = page
+                .download_to_dir(&url, Path::new(&dir), Duration::from_secs_f64(timeout), max)
+                .await
+                .map_err(to_py_err);
+            inner.lock().await.replace(page);
+            Ok(PyDownloadOutcome::from(result?))
+        })
+    }
+
+    /// Arm an **action-triggered** download capture into *dir*, returning a
+    /// :class:`DownloadCapture`. Perform the triggering action next (e.g.
+    /// :meth:`click_by_role`), then pass the capture to :meth:`wait_download`.
+    /// Use for downloads started by a page action — a "Download" button, a
+    /// generated/cross-origin URL (Google Drive) — rather than
+    /// :meth:`download`, which needs a URL in hand. The convenience wrapper
+    /// :func:`voidcrawl.capture_download` brackets these as a context manager.
+    #[pyo3(signature = (dir, max_bytes=None))]
+    fn arm_download<'py>(
+        &self,
+        py: Python<'py>,
+        dir: String,
+        max_bytes: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let page = inner
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
+            let max = max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
+            let result = page.arm_download(Path::new(&dir), max).await.map_err(to_py_err);
+            inner.lock().await.replace(page);
+            Ok(PyDownloadCapture::new(result?))
+        })
+    }
+
+    /// Wait for the armed *capture* to land a new download, returning a
+    /// :class:`DownloadOutcome`. Resets the page's download behavior. The
+    /// capture is consumed — a second wait errors.
+    #[pyo3(signature = (capture, timeout=120.0))]
+    fn wait_download<'py>(
+        &self,
+        py: Python<'py>,
+        capture: &PyDownloadCapture,
+        timeout: f64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        let cap = capture.take()?;
+        future_into_py(py, async move {
+            let page = inner
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
+            let result = cap.wait(&page, Duration::from_secs_f64(timeout)).await.map_err(to_py_err);
+            inner.lock().await.replace(page);
+            Ok(PyDownloadOutcome::from(result?))
+        })
+    }
+
+    /// Reset this page's CDP download behavior to Chrome's default. Call to
+    /// release an armed-but-unused capture (e.g. on an error path).
+    fn reset_download<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let page = inner
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
+            page.reset_download_behavior().await;
+            inner.lock().await.replace(page);
+            Ok(())
+        })
     }
 
     /// Fetch the browser-computed accessibility (AX) tree.
@@ -1018,6 +1249,98 @@ impl PyPooledTab {
 
     fn screenshot_png<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         with_pooled_page_map!(self, py, |page| page.screenshot_png(), |bytes| PyBytesResult(bytes))
+    }
+
+    /// Download the resource at ``url`` into directory ``dir`` over this pooled
+    /// tab, returning a :class:`DownloadOutcome`. See :meth:`Page.download`.
+    #[pyo3(signature = (url, dir, timeout=120.0, max_bytes=None))]
+    fn download<'py>(
+        &self,
+        py: Python<'py>,
+        url: String,
+        dir: String,
+        timeout: f64,
+        max_bytes: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let tab = inner
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| PyRuntimeError::new_err("tab has been released"))?;
+            let max = max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
+            let result = tab
+                .page
+                .download_to_dir(&url, Path::new(&dir), Duration::from_secs_f64(timeout), max)
+                .await
+                .map_err(to_py_err);
+            inner.lock().await.replace(tab);
+            Ok(PyDownloadOutcome::from(result?))
+        })
+    }
+
+    /// Arm an action-triggered download capture into *dir*; see
+    /// :meth:`Page.arm_download`.
+    #[pyo3(signature = (dir, max_bytes=None))]
+    fn arm_download<'py>(
+        &self,
+        py: Python<'py>,
+        dir: String,
+        max_bytes: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let tab = inner
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| PyRuntimeError::new_err("tab has been released"))?;
+            let max = max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
+            let result = tab.page.arm_download(Path::new(&dir), max).await.map_err(to_py_err);
+            inner.lock().await.replace(tab);
+            Ok(PyDownloadCapture::new(result?))
+        })
+    }
+
+    /// Wait for the armed *capture* to land a new download; see
+    /// :meth:`Page.wait_download`.
+    #[pyo3(signature = (capture, timeout=120.0))]
+    fn wait_download<'py>(
+        &self,
+        py: Python<'py>,
+        capture: &PyDownloadCapture,
+        timeout: f64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        let cap = capture.take()?;
+        future_into_py(py, async move {
+            let tab = inner
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| PyRuntimeError::new_err("tab has been released"))?;
+            let result =
+                cap.wait(&tab.page, Duration::from_secs_f64(timeout)).await.map_err(to_py_err);
+            inner.lock().await.replace(tab);
+            Ok(PyDownloadOutcome::from(result?))
+        })
+    }
+
+    /// Reset this tab's CDP download behavior to Chrome's default; see
+    /// :meth:`Page.reset_download`.
+    fn reset_download<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let tab = inner
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| PyRuntimeError::new_err("tab has been released"))?;
+            tab.page.reset_download_behavior().await;
+            inner.lock().await.replace(tab);
+            Ok(())
+        })
     }
 
     /// Fetch the browser-computed accessibility (AX) tree.
@@ -1769,6 +2092,42 @@ impl PyProfileHandle {
     }
 }
 
+// ── Scanner bindings ────────────────────────────────────────────────────
+
+/// Scan a file on disk with the content-safety gate (size cap + magic-byte
+/// type check + yara-x signatures). Returns a :class:`ScanReport`.
+///
+/// Args:
+///     path: Path to the file to scan.
+///     `max_bytes`: Flag files larger than this (default 100 MiB).
+///     `claimed_mime`: The Content-Type the server claimed, if known — pass
+///         ``DownloadOutcome.content_type`` so an executable disguised as a
+///         document is flagged.
+#[pyfunction]
+#[pyo3(name = "scan_file", signature = (path, max_bytes=None, claimed_mime=None))]
+fn py_scan_file(
+    path: &str,
+    max_bytes: Option<u64>,
+    claimed_mime: Option<String>,
+) -> PyResult<PyScanReport> {
+    let cfg = ScanConfig { max_bytes: max_bytes.unwrap_or(DEFAULT_MAX_BYTES), claimed_mime };
+    let report = scan_path(Path::new(path), &cfg).map_err(to_py_err)?;
+    Ok(PyScanReport::from(report))
+}
+
+/// Scan an in-memory buffer with the content-safety gate. See
+/// :func:`scan_file`.
+#[pyfunction]
+#[pyo3(name = "scan_bytes", signature = (data, max_bytes=None, claimed_mime=None))]
+fn py_scan_bytes(
+    data: &[u8],
+    max_bytes: Option<u64>,
+    claimed_mime: Option<String>,
+) -> PyScanReport {
+    let cfg = ScanConfig { max_bytes: max_bytes.unwrap_or(DEFAULT_MAX_BYTES), claimed_mime };
+    PyScanReport::from(scan_bytes(data, &cfg))
+}
+
 // ── Module ──────────────────────────────────────────────────────────────
 
 #[pymodule]
@@ -1781,9 +2140,14 @@ fn _ext(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPoolContext>()?;
     m.add_class::<PyPoolParamsContext>()?;
     m.add_class::<PyPageResponse>()?;
+    m.add_class::<PyDownloadOutcome>()?;
+    m.add_class::<PyDownloadCapture>()?;
+    m.add_class::<PyScanReport>()?;
     m.add_class::<PyProfileHandle>()?;
     m.add_function(wrap_pyfunction!(py_list_profiles, m)?)?;
     m.add_function(wrap_pyfunction!(py_acquire_profile, m)?)?;
+    m.add_function(wrap_pyfunction!(py_scan_file, m)?)?;
+    m.add_function(wrap_pyfunction!(py_scan_bytes, m)?)?;
     let py = m.py();
     m.add("VoidCrawlError", py.get_type::<VoidCrawlError>())?;
     m.add("ProfileBusy", py.get_type::<ProfileBusy>())?;

@@ -4,18 +4,31 @@
 //! temporary user-data-dir, so cookies and storage never leak between
 //! subagents. Pooled tabs are only used for stateless `fetch*` calls.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
+use tempfile::TempDir;
 use tokio::sync::{Mutex, RwLock};
-use void_crawl_core::{BrowserSession, Page};
+use void_crawl_core::{BrowserSession, DownloadCapture, Page};
 
 pub type SessionId = String;
+
+/// A download armed on a session by `download_arm`, awaiting `download_wait`.
+/// Holds the quarantine `TempDir` alive between the two tool calls.
+#[derive(Debug)]
+pub struct PendingDownload {
+    pub capture:    DownloadCapture,
+    pub quarantine: TempDir,
+    pub output_dir: PathBuf,
+    pub max_bytes:  u64,
+}
 
 /// Owned state for one stateful MCP session.
 #[derive(Debug)]
 pub struct DedicatedSession {
-    pub session: Arc<BrowserSession>,
-    pub page:    Mutex<Page>,
+    pub session:          Arc<BrowserSession>,
+    pub page:             Mutex<Page>,
+    /// A download armed via `download_arm`, pending its `download_wait`.
+    pub pending_download: Mutex<Option<PendingDownload>>,
 }
 
 /// Thread-safe map of live sessions.

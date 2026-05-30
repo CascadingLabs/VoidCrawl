@@ -23,6 +23,44 @@ class PageResponse:
     status_code: int | None
     redirected: bool
 
+class DownloadOutcome:
+    """Result of :meth:`Page.download` / :meth:`PooledTab.download`.
+
+    Attributes:
+        path: Absolute path to the downloaded file.
+        bytes: Size of the downloaded file in bytes.
+        content_type: The server's ``Content-Type`` (parameters stripped), or
+            ``None``. Pass to :func:`scan_file` as ``claimed_mime``.
+    """
+
+    path: str
+    bytes: int
+    content_type: str | None
+
+class DownloadCapture:
+    """Opaque handle for an armed action-triggered download.
+
+    Created by :meth:`Page.arm_download` / :meth:`PooledTab.arm_download`; pass
+    to the matching ``wait_download`` after performing the triggering action.
+    """
+
+class ScanReport:
+    """Result of :func:`scan_file` / :func:`scan_bytes`.
+
+    Attributes:
+        verdict: ``"clean"`` or ``"flagged"``.
+        is_clean: ``True`` iff ``verdict == "clean"``.
+        reason: Why it was flagged (``None`` when clean).
+        detected_mime: MIME inferred from the file's magic bytes.
+        size: Size of the scanned buffer in bytes.
+    """
+
+    verdict: str
+    is_clean: bool
+    reason: str | None
+    detected_mime: str | None
+    size: int
+
 class PooledTab:
     """A tab checked out from a :class:`~voidcrawl.BrowserPool`.
 
@@ -76,6 +114,30 @@ class PooledTab:
         ...
     async def screenshot_png(self) -> bytes:
         """Capture a full-page screenshot as PNG bytes."""
+        ...
+    async def download(
+        self,
+        url: str,
+        dir: str,  # noqa: A002 — mirrors the native binding
+        timeout: float = 120.0,
+        max_bytes: int | None = None,
+    ) -> DownloadOutcome:
+        """Download *url* into directory *dir*; see :meth:`Page.download`."""
+        ...
+    async def arm_download(
+        self,
+        dir: str,  # noqa: A002 — mirrors the native binding
+        max_bytes: int | None = None,
+    ) -> DownloadCapture:
+        """Arm an action-triggered download capture; see :meth:`Page.arm_download`."""
+        ...
+    async def wait_download(
+        self, capture: DownloadCapture, timeout: float = 120.0
+    ) -> DownloadOutcome:
+        """Await an armed capture; see :meth:`Page.wait_download`."""
+        ...
+    async def reset_download(self) -> None:
+        """Reset this tab's CDP download behavior to Chrome's default."""
         ...
     async def get_full_ax_tree(self, depth: int | None = None) -> list[dict[str, Any]]:
         """Return the browser-computed accessibility (AX) tree.
@@ -375,6 +437,51 @@ class Page:
     async def pdf_bytes(self) -> bytes:
         """Render the page as a PDF and return the raw bytes."""
         ...
+    async def download(
+        self,
+        url: str,
+        dir: str,  # noqa: A002 — mirrors the native binding
+        timeout: float = 120.0,
+        max_bytes: int | None = None,
+    ) -> DownloadOutcome:
+        """Download *url* into directory *dir* through this page's browser
+        context (cookies / fingerprint preserved).
+
+        The stream aborts past *max_bytes*. Treat *dir* as quarantine and pass
+        the result to :func:`scan_file` before trusting the file. The CDP
+        download behavior is reset before this returns.
+
+        Args:
+            url: Absolute URL of the file to download.
+            dir: Directory the file is saved into.
+            timeout: Download timeout in seconds.
+            max_bytes: Abort past this many bytes (default 100 MiB).
+        """
+        ...
+    async def arm_download(
+        self,
+        dir: str,  # noqa: A002 — mirrors the native binding
+        max_bytes: int | None = None,
+    ) -> DownloadCapture:
+        """Arm an action-triggered download capture into *dir*.
+
+        Perform the triggering action next (e.g. :meth:`click_by_role`), then
+        pass the returned capture to :meth:`wait_download`. Use for downloads
+        started by a page action — a "Download" button, a generated/cross-origin
+        URL (Google Drive) — rather than :meth:`download`, which needs a URL.
+        :func:`voidcrawl.capture_download` brackets these as a context manager.
+        """
+        ...
+    async def wait_download(
+        self, capture: DownloadCapture, timeout: float = 120.0
+    ) -> DownloadOutcome:
+        """Wait for the armed *capture* to land a new download. Resets the
+        page's download behavior. The capture is consumed (single wait)."""
+        ...
+    async def reset_download(self) -> None:
+        """Reset this page's CDP download behavior to Chrome's default. Call to
+        release an armed-but-unused capture (e.g. on an error path)."""
+        ...
     async def get_full_ax_tree(self, depth: int | None = None) -> list[dict[str, Any]]:
         """Return the browser-computed accessibility (AX) tree.
 
@@ -556,6 +663,26 @@ async def py_acquire_profile(
     lease_timeout: float = 300.0,
     headless: bool = True,
 ) -> ProfileHandle: ...
+
+# ── Scanner ─────────────────────────────────────────────────────────────
+
+def scan_file(
+    path: str,
+    max_bytes: int | None = None,
+    claimed_mime: str | None = None,
+) -> ScanReport:
+    """Scan a file on disk with the content-safety gate (size cap + magic-byte
+    type check + yara-x signatures). Returns a :class:`ScanReport`."""
+    ...
+
+def scan_bytes(
+    data: bytes,
+    max_bytes: int | None = None,
+    claimed_mime: str | None = None,
+) -> ScanReport:
+    """Scan an in-memory buffer with the content-safety gate. See
+    :func:`scan_file`."""
+    ...
 
 # ── Exceptions ──────────────────────────────────────────────────────────
 # ruff: noqa: N818  — these are the public exception names, preserved for API compat
