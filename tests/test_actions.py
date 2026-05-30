@@ -59,6 +59,9 @@ class MockTab:
         self.js_calls.append(expression)
         return self.js_return
 
+    async def eval_js(self, expression: str) -> object:
+        return await self.evaluate_js(expression)
+
     async def dispatch_mouse_event(
         self,
         event_type: str,
@@ -105,6 +108,9 @@ class JsOnlyTab:
     async def evaluate_js(self, expression: str) -> object:
         self.js_calls.append(expression)
         return self.js_return
+
+    async def eval_js(self, expression: str) -> object:
+        return await self.evaluate_js(expression)
 
 
 # ── JS expression helpers ────────────────────────────────────────────────
