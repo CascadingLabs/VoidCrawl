@@ -16,6 +16,9 @@ class JsTab(Protocol):
     async def evaluate_js(self, expression: str) -> object:
         """Evaluate a JavaScript *expression* in the page and return the result."""
         ...
+    async def eval_js(self, expression: str) -> object:
+        """Alias for :meth:`evaluate_js` — short form used by MCP tooling."""
+        ...
 
 @runtime_checkable
 class Tab(JsTab, Protocol):
