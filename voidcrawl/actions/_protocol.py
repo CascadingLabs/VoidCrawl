@@ -30,6 +30,17 @@ class JsTab(Protocol):
         """
         ...
 
+    async def eval_js(self, expression: str) -> object:
+        """Alias for :meth:`evaluate_js` — short form used by MCP tooling.
+
+        Args:
+            expression: JavaScript expression or IIFE string.
+
+        Returns:
+            The JSON-deserialised return value from the browser.
+        """
+        ...
+
 
 @runtime_checkable
 class Tab(JsTab, Protocol):

@@ -503,6 +503,12 @@ impl PyPage {
         with_page_map!(self, py, |page| page.evaluate_js(&expression), |val| PyJsonValue(val))
     }
 
+    /// Alias for :meth:`evaluate_js` — short form used by MCP tooling and
+    /// internal Yosoi callers.
+    fn eval_js<'py>(&self, py: Python<'py>, expression: String) -> PyResult<Bound<'py, PyAny>> {
+        self.evaluate_js(py, expression)
+    }
+
     /// Take a PNG screenshot, returned as Python bytes.
     fn screenshot_png<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         with_page_map!(self, py, |page| page.screenshot_png(), |bytes| PyBytesResult(bytes))
@@ -1245,6 +1251,11 @@ impl PyPooledTab {
         with_pooled_page_map!(self, py, |page| page.evaluate_js(&expression), |val| PyJsonValue(
             val
         ))
+    }
+
+    /// Alias for :meth:`evaluate_js`.
+    fn eval_js<'py>(&self, py: Python<'py>, expression: String) -> PyResult<Bound<'py, PyAny>> {
+        self.evaluate_js(py, expression)
     }
 
     fn screenshot_png<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
