@@ -23,6 +23,12 @@ concurrent by construction — ten tabs in parallel is the norm.
 | `session_content` | stateful  | HTML + title + URL of the session's current page.           |
 | `session_close`   | stateful  | Shut down the session's Chrome.                             |
 | `pool_status`     | diag      | Pool config + live session count.                           |
+| `download`        | stateless | Download a file by URL through stealth Chrome and scan it with the built-in antivirus gate. **Opt-in** (`VOIDCRAWL_ALLOW_DOWNLOADS=1`). |
+| `download_arm` / `download_wait` | stateful | Capture a download started by a page action (button with no stable URL), then scan it. **Opt-in** (`VOIDCRAWL_ALLOW_DOWNLOADS=1`). |
+
+This is an abbreviated list; the perceive/act tools (`click`, `click_by_role`,
+`type_text`, `eval_js`, `extract`, `session_ax_tree`, `detect_captcha`, …) are
+documented in the published MCP and File Downloads guides.
 
 Each tool accepts a `wait_for` string: `"networkidle"` (default),
 `"selector:<css>"`, or `"ms:<n>"`.
@@ -59,6 +65,12 @@ All knobs are read by `BrowserPool::from_env()` in `void_crawl_core`:
 | `VIEWPORT_WIDTH`        | 1920    | Stealth viewport width.                                |
 | `VIEWPORT_HEIGHT`       | 1080    | Stealth viewport height.                               |
 | `CDP_PORT_BASE`         | —       | Pin Chrome's `--remote-debugging-port` for launched browsers (browser *i* gets `base + i`). Unset = OS picks a free ephemeral port, which can't conflict. Set when a firewall only exposes specific ports. |
+
+One capability knob is read separately from `from_env()`:
+
+| Env var                    | Default | Meaning                                                |
+| -------------------------- | ------- | ------------------------------------------------------ |
+| `VOIDCRAWL_ALLOW_DOWNLOADS` | unset (off) | `1` exposes the `download` / `download_arm` / `download_wait` tools. Off by default: downloads pull untrusted bytes to disk over a live auth session, so they're opt-in. |
 
 Logging goes to stderr (`RUST_LOG=voidcrawl_mcp=debug` for more). stdout
 is reserved for the MCP protocol.
