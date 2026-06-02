@@ -24,6 +24,10 @@ pub fn map_err(err: VoidCrawlError) -> ErrorData {
             let data = tagged("CaptchaDetected", json!({ "kind": kind }));
             ErrorData::internal_error(err.to_string(), Some(obj(data)))
         }
+        VoidCrawlError::AntibotChallenge { ref vendor } => {
+            let data = tagged("AntibotChallenge", json!({ "vendor": vendor }));
+            ErrorData::internal_error(err.to_string(), Some(obj(data)))
+        }
         VoidCrawlError::ProfileBusy { ref name } => {
             let data = tagged("ProfileBusy", json!({ "name": name }));
             ErrorData::internal_error(err.to_string(), Some(obj(data)))

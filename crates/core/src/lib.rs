@@ -2,6 +2,7 @@
 //!
 //! This crate provides `BrowserSession` and `Page` as the primary API.
 
+pub mod antibot;
 pub mod ax;
 pub mod captcha;
 pub mod error;
@@ -13,6 +14,7 @@ pub mod session;
 pub mod stealth;
 
 // Re-export CDP types for downstream crates (pyo3_bindings).
+pub use antibot::{AntibotVerdict, Evidence as AntibotEvidence, classify as classify_antibot};
 pub use captcha::{
     CaptchaInfo, CaptchaKind, WidgetRect, capture_captcha, detect_captcha, inject_captcha_token,
 };

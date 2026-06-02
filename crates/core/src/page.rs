@@ -45,6 +45,7 @@ use serde_json::Value;
 use tokio::time;
 
 use crate::{
+    antibot::{self, AntibotVerdict},
     ax::compact_outline,
     error::{Result, VoidCrawlError},
     stealth::StealthConfig,
@@ -66,6 +67,30 @@ pub struct PageResponse {
     pub status_code: Option<u16>,
     /// `true` when at least one HTTP redirect occurred before the final URL.
     pub redirected:  bool,
+    /// Response headers of the final Document response (`name`, `value`),
+    /// lowercased names, in arrival order. Empty when no network response was
+    /// captured (cache/service-worker/`file://`). Feeds anti-bot fingerprinting
+    /// and replay-grade provenance (`cf-ray`, `x-cache`, …).
+    pub headers:     Vec<(String, String)>,
+    /// Signature-based anti-bot / CDN vendor fingerprint of the final response,
+    /// computed from `status_code` + `headers` + `html`. `None` when no
+    /// network response was captured. Non-fatal: presence is a routing hint,
+    /// `challenged` means an active wall — see [`crate::antibot`].
+    pub antibot:     Option<AntibotVerdict>,
+}
+
+/// Flatten CDP's `Network.Response.headers` (a JSON object of name → string
+/// value) into ordered `(lowercased-name, value)` pairs. Non-string values are
+/// skipped; an unexpected non-object yields an empty list.
+fn flatten_headers(value: &serde_json::Value) -> Vec<(String, String)> {
+    value
+        .as_object()
+        .map(|map| {
+            map.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.to_lowercase(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Rectangular crop in CSS pixels for [`ScreenshotOptions::bbox`].
@@ -322,6 +347,9 @@ impl Page {
         let mut status_code: Option<u16> = None;
         let mut redirect_count: u32 = 0;
         let mut got_almost_idle = false;
+        // Headers of the final (non-redirect) Document response. Overwritten if
+        // a later navigation supersedes it, mirroring `status_code`.
+        let mut headers: Vec<(String, String)> = Vec::new();
 
         loop {
             tokio::select! {
@@ -354,6 +382,7 @@ impl Page {
                                 // Chrome emits 0 for cancelled/intercepted
                                 // requests — treat as "no network response".
                                 status_code = Some(code);
+                                headers = flatten_headers(event.response.headers.inner());
                             }
                             // A new Document response after networkAlmostIdle
                             // means a new navigation started; reset the flag so
@@ -369,11 +398,14 @@ impl Page {
                     // Hard timeout with no idle signal
                     let html = self.content().await.unwrap_or_default();
                     let final_url = self.url().await.unwrap_or_default().unwrap_or_default();
+                    let antibot = status_code.map(|c| antibot::classify(c, &headers, &html));
                     return Ok(PageResponse {
                         html,
                         url: final_url,
                         status_code,
                         redirected: redirect_count > 0,
+                        headers,
+                        antibot,
                     });
                 }
             }
@@ -381,7 +413,15 @@ impl Page {
 
         let html = self.content().await?;
         let final_url = self.url().await?.unwrap_or_default();
-        Ok(PageResponse { html, url: final_url, status_code, redirected: redirect_count > 0 })
+        let antibot = status_code.map(|c| antibot::classify(c, &headers, &html));
+        Ok(PageResponse {
+            html,
+            url: final_url,
+            status_code,
+            redirected: redirect_count > 0,
+            headers,
+            antibot,
+        })
     }
 
     /// Wait for the in-flight navigation to finish.

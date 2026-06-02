@@ -27,12 +27,8 @@ from pydantic import BaseModel, Field
 
 from voidcrawl._downloads import capture_download
 from voidcrawl._ext import (
-    BrowserPool as _BrowserPool,
-)
-from voidcrawl._ext import (
-    BrowserSession as _BrowserSession,
-)
-from voidcrawl._ext import (
+    AntibotChallenge,
+    AntibotVerdict,
     CaptchaDetected,
     DownloadCapture,
     DownloadOutcome,
@@ -50,6 +46,12 @@ from voidcrawl._ext import (
     scan_bytes,
     scan_file,
 )
+from voidcrawl._ext import (
+    BrowserPool as _BrowserPool,
+)
+from voidcrawl._ext import (
+    BrowserSession as _BrowserSession,
+)
 from voidcrawl.actions._protocol import JsTab, Tab
 from voidcrawl.profiles import acquire_profile, list_profiles, with_profile
 from voidcrawl.scale import ScaleProfile, ScaleReport
@@ -58,6 +60,8 @@ from voidcrawl.schema import Attr, Schema, Text, safe_url, strip_tags
 Selector = Text
 
 __all__ = [
+    "AntibotChallenge",
+    "AntibotVerdict",
     "Attr",
     "BrowserConfig",
     "BrowserPool",

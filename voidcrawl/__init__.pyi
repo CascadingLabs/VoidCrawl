@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 from voidcrawl._ext import (
+    AntibotChallenge as AntibotChallenge,
+)
+from voidcrawl._ext import (
+    AntibotVerdict as AntibotVerdict,
+)
+from voidcrawl._ext import (
     CaptchaDetected as CaptchaDetected,
 )
 from voidcrawl._ext import (
@@ -72,6 +78,8 @@ from voidcrawl.schema import (
 Selector = Text
 
 __all__ = [
+    "AntibotChallenge",
+    "AntibotVerdict",
     "Attr",
     "BrowserConfig",
     "BrowserPool",

@@ -51,6 +51,16 @@ pub enum VoidCrawlError {
     #[error("captcha detected: {kind}")]
     CaptchaDetected { kind: String },
 
+    /// An anti-bot vendor is actively challenging the response (an active wall,
+    /// not mere CDN presence). Typed so opt-in callers can route on the vendor.
+    ///
+    /// Deliberately **not** raised automatically on the `fetch` / `fetch_many`
+    /// path — that path surfaces the verdict as a non-fatal annotation on
+    /// `PageResponse` so a 403-with-usable-HTML stays a success and batch
+    /// per-item isolation holds. Reserved for explicit detect/routing callers.
+    #[error("anti-bot challenge by {vendor}")]
+    AntibotChallenge { vendor: String },
+
     #[error("{0}")]
     Other(String),
 }

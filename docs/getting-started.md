@@ -103,10 +103,12 @@ python examples/basic_navigation.py
 python examples/screenshot_and_pdf.py
 python examples/dom_and_interaction.py
 python examples/javascript_eval.py
+python examples/antibot_detection.py   # which CDN/anti-bot vendor is walling a fetch
 ```
 
 ## Next Steps
 
 - [API Reference](api-reference.md) — full method signatures and return types
 - [Stealth & Anti-Detection](stealth.md) — how stealth mode works and how to tune it
+- [Anti-bot / CDN Detection](antibot.md) — fingerprint which vendor is gating a response (presence vs. active challenge)
 - [Architecture](architecture.md) — how the Rust core, PyO3 bindings, and Python layer fit together

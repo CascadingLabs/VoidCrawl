@@ -7,6 +7,26 @@ from __future__ import annotations
 
 from typing import Any
 
+class AntibotVerdict:
+    """Signature-based anti-bot / CDN vendor fingerprint of a response.
+
+    Attributes:
+        vendors: Canonical vendor tags detected (e.g. ``"cloudflare"``,
+            ``"datadome"``), sorted.
+        challenged: ``True`` when an active wall/challenge fired (rotate),
+            vs. mere CDN presence (no action needed).
+        challenge_vendor: Vendor whose challenge fired, when ``challenged``.
+        corpus_version: Signature corpus the verdict was produced against —
+            record alongside captures for replay-grade provenance.
+        evidence: Which tier matched — ``"none"`` / ``"headers"`` / ``"body"``.
+    """
+
+    vendors: list[str]
+    challenged: bool
+    challenge_vendor: str | None
+    corpus_version: str
+    evidence: str
+
 class PageResponse:
     """Result of :meth:`Page.goto` / :meth:`PooledTab.goto`.
 
@@ -16,12 +36,19 @@ class PageResponse:
         status_code: HTTP status of the last response, or ``None``
             when served from cache / service worker.
         redirected: ``True`` when at least one HTTP redirect occurred.
+        headers: Final Document response headers (lowercased names; last
+            value wins on duplicates). Empty when no network response was
+            captured.
+        antibot: Anti-bot / CDN vendor fingerprint, or ``None`` when no
+            network response was captured.
     """
 
     html: str
     url: str
     status_code: int | None
     redirected: bool
+    headers: dict[str, str]
+    antibot: AntibotVerdict | None
 
 class DownloadOutcome:
     """Result of :meth:`Page.download` / :meth:`PooledTab.download`.
@@ -707,3 +734,13 @@ class ProfileNotFound(VoidCrawlError):
 
 class CaptchaDetected(VoidCrawlError):
     """DOM markers indicate a captcha / bot-wall challenge on the page."""
+
+class AntibotChallenge(VoidCrawlError):
+    """An anti-bot vendor is actively challenging the response.
+
+    Signature-based (header/status/body), distinct from the DOM-based
+    :class:`CaptchaDetected`. Not raised on the ``fetch`` / ``fetch_many``
+    path — those surface the verdict as the non-fatal
+    :attr:`PageResponse.antibot` annotation instead; this is reserved for
+    explicit detect/routing callers that opt into failing on a wall.
+    """
