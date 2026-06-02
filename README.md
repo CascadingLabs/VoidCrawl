@@ -156,6 +156,7 @@ uv run pytest tests/ -v
 ## Documentation
 
 - [Full API reference](docs/api-reference.md)
+- [Anti-bot / CDN detection](docs/antibot.md)
 - [Examples](examples/)
 
 ## Contact

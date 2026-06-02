@@ -22,10 +22,11 @@ use pyo3_async_runtimes::tokio::future_into_py;
 use serde_json::Value;
 use tokio::sync::Mutex;
 use void_crawl_core::{
-    BrowserMode, BrowserPool, BrowserSession, CookieParam, DEFAULT_MAX_BYTES, DeleteCookiesParams,
-    DispatchKeyEventType, DispatchMouseEventType, DownloadCapture, DownloadOutcome, MouseButton,
-    Page, PageResponse, PoolConfig, PooledTab, ProfileHandle, ProfileInfo, ScanConfig, ScanReport,
-    StealthConfig, Verdict, acquire_profile, list_profiles, scan_bytes, scan_path,
+    AntibotEvidence, AntibotVerdict, BrowserMode, BrowserPool, BrowserSession, CookieParam,
+    DEFAULT_MAX_BYTES, DeleteCookiesParams, DispatchKeyEventType, DispatchMouseEventType,
+    DownloadCapture, DownloadOutcome, MouseButton, Page, PageResponse, PoolConfig, PooledTab,
+    ProfileHandle, ProfileInfo, ScanConfig, ScanReport, StealthConfig, Verdict, acquire_profile,
+    list_profiles, scan_bytes, scan_path,
 };
 
 // ── Error conversion ────────────────────────────────────────────────────
@@ -35,6 +36,7 @@ pyo3::create_exception!(voidcrawl._ext, ProfileBusy, VoidCrawlError);
 pyo3::create_exception!(voidcrawl._ext, ProfileLeaseExpired, VoidCrawlError);
 pyo3::create_exception!(voidcrawl._ext, ProfileNotFound, VoidCrawlError);
 pyo3::create_exception!(voidcrawl._ext, CaptchaDetected, VoidCrawlError);
+pyo3::create_exception!(voidcrawl._ext, AntibotChallenge, VoidCrawlError);
 
 #[allow(clippy::needless_pass_by_value)] // used as fn pointer in map_err(to_py_err)
 fn to_py_err(e: void_crawl_core::VoidCrawlError) -> PyErr {
@@ -48,6 +50,9 @@ fn to_py_err(e: void_crawl_core::VoidCrawlError) -> PyErr {
         }
         void_crawl_core::VoidCrawlError::CaptchaDetected { .. } => {
             CaptchaDetected::new_err(e.to_string())
+        }
+        void_crawl_core::VoidCrawlError::AntibotChallenge { .. } => {
+            AntibotChallenge::new_err(e.to_string())
         }
         _ => PyRuntimeError::new_err(e.to_string()),
     }
@@ -131,6 +136,63 @@ fn json_to_py(py: Python<'_>, val: Value) -> PyResult<Bound<'_, PyAny>> {
     }
 }
 
+// ── AntibotVerdict ──────────────────────────────────────────────────────
+
+/// Python-visible signature-based anti-bot / CDN vendor fingerprint.
+///
+/// Attributes:
+///     vendors (list[str]): Canonical vendor tags detected (sorted).
+///     challenged (bool): ``True`` when an active wall/challenge fired (vs.
+///         mere CDN presence).
+///     `challenge_vendor` (str | None): Vendor whose challenge fired.
+///     `corpus_version` (str): Signature corpus the verdict was produced
+///         against — record alongside captures for replay-grade provenance.
+///     evidence (str): Which tier matched — ``"none"`` / ``"headers"`` /
+///         ``"body"``.
+// Only ever returned to Python (a getter on `PageResponse`), never accepted as
+// an argument — skip the `FromPyObject` derive pyo3 0.28 adds for `Clone` types.
+#[pyclass(name = "AntibotVerdict", skip_from_py_object)]
+#[derive(Debug, Clone)]
+pub struct PyAntibotVerdict {
+    #[pyo3(get)]
+    pub vendors:          Vec<String>,
+    #[pyo3(get)]
+    pub challenged:       bool,
+    #[pyo3(get)]
+    pub challenge_vendor: Option<String>,
+    #[pyo3(get)]
+    pub corpus_version:   String,
+    #[pyo3(get)]
+    pub evidence:         String,
+}
+
+#[pymethods]
+impl PyAntibotVerdict {
+    fn __repr__(&self) -> String {
+        format!(
+            "AntibotVerdict(vendors={:?}, challenged={}, challenge_vendor={:?}, evidence={:?})",
+            self.vendors, self.challenged, self.challenge_vendor, self.evidence,
+        )
+    }
+}
+
+impl From<AntibotVerdict> for PyAntibotVerdict {
+    fn from(v: AntibotVerdict) -> Self {
+        let evidence = match v.evidence {
+            AntibotEvidence::None => "none",
+            AntibotEvidence::Headers => "headers",
+            AntibotEvidence::Body => "body",
+        };
+        Self {
+            vendors:          v.vendors,
+            challenged:       v.challenged,
+            challenge_vendor: v.challenge_vendor,
+            corpus_version:   v.corpus_version.to_string(),
+            evidence:         evidence.to_string(),
+        }
+    }
+}
+
 // ── PageResponse ────────────────────────────────────────────────────────
 
 /// Python-visible result of `Page.goto()` / `PooledTab.goto()`.
@@ -141,6 +203,10 @@ fn json_to_py(py: Python<'_>, val: Value) -> PyResult<Bound<'_, PyAny>> {
 ///     `status_code` (int | None): HTTP status of the last response, or
 ///         ``None`` when served from cache / service worker.
 ///     redirected (bool): ``True`` when at least one HTTP redirect occurred.
+///     headers (dict[str, str]): Final Document response headers (lowercased
+///         names; last value wins on duplicates).
+///     antibot (AntibotVerdict | None): Anti-bot / CDN vendor fingerprint, or
+///         ``None`` when no network response was captured.
 #[pyclass(name = "PageResponse")]
 #[derive(Debug)]
 pub struct PyPageResponse {
@@ -152,6 +218,10 @@ pub struct PyPageResponse {
     pub status_code: Option<u16>,
     #[pyo3(get)]
     pub redirected:  bool,
+    #[pyo3(get)]
+    pub headers:     HashMap<String, String>,
+    #[pyo3(get)]
+    pub antibot:     Option<PyAntibotVerdict>,
 }
 
 #[pymethods]
@@ -174,6 +244,8 @@ impl From<PageResponse> for PyPageResponse {
             url:         r.url,
             status_code: r.status_code,
             redirected:  r.redirected,
+            headers:     r.headers.into_iter().collect(),
+            antibot:     r.antibot.map(PyAntibotVerdict::from),
         }
     }
 }
@@ -2151,6 +2223,7 @@ fn _ext(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPoolContext>()?;
     m.add_class::<PyPoolParamsContext>()?;
     m.add_class::<PyPageResponse>()?;
+    m.add_class::<PyAntibotVerdict>()?;
     m.add_class::<PyDownloadOutcome>()?;
     m.add_class::<PyDownloadCapture>()?;
     m.add_class::<PyScanReport>()?;
@@ -2165,5 +2238,6 @@ fn _ext(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("ProfileLeaseExpired", py.get_type::<ProfileLeaseExpired>())?;
     m.add("ProfileNotFound", py.get_type::<ProfileNotFound>())?;
     m.add("CaptchaDetected", py.get_type::<CaptchaDetected>())?;
+    m.add("AntibotChallenge", py.get_type::<AntibotChallenge>())?;
     Ok(())
 }

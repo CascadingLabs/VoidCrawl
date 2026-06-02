@@ -10,9 +10,14 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
-use void_crawl_core::{BrowserSession, VoidCrawlError};
+use void_crawl_core::{AntibotVerdict, BrowserSession, VoidCrawlError};
 
-use crate::{errors::map_err, server::VoidCrawlServer, sessions::DedicatedSession, tools::wait};
+use crate::{
+    errors::map_err,
+    server::VoidCrawlServer,
+    sessions::DedicatedSession,
+    tools::{fetch::AntibotInfo, wait},
+};
 
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
@@ -58,6 +63,9 @@ pub struct SessionNavigateResult {
     pub url:         String,
     pub status_code: Option<u16>,
     pub redirected:  bool,
+    /// Anti-bot / CDN vendor fingerprint of the navigated response, or `null`
+    /// when no vendor was detected. See [`crate::tools::fetch::AntibotInfo`].
+    pub antibot:     Option<AntibotInfo>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Default)]
@@ -110,10 +118,12 @@ pub async fn navigate(
     let timeout = Duration::from_secs(args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
     let resp = page.goto_and_wait_for_idle(&args.url, timeout).await.map_err(map_err)?;
     wait::apply_post_navigate(&page, args.wait_for.as_deref(), timeout).await.map_err(map_err)?;
+    let antibot = resp.antibot.filter(AntibotVerdict::detected).map(AntibotInfo::from);
     Ok(SessionNavigateResult {
-        url:         resp.url,
+        url: resp.url,
         status_code: resp.status_code,
-        redirected:  resp.redirected,
+        redirected: resp.redirected,
+        antibot,
     })
 }
 

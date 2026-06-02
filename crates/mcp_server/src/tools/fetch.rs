@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use futures::future::join_all;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use void_crawl_core::{PooledTab, VoidCrawlError};
+use void_crawl_core::{AntibotVerdict, PooledTab, VoidCrawlError};
 
 use crate::{server::VoidCrawlServer, tools::wait};
 
@@ -34,6 +34,43 @@ fn any_value_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     serde_json::Map::new().into()
 }
 
+/// Anti-bot / CDN vendor fingerprint of the fetched response, surfaced so an
+/// agent can route deterministically (rotate proxy/profile, go headful) instead
+/// of retrying blind. The raw headers it was derived from are available on the
+/// Python `PageResponse`; only the actionable verdict is surfaced here to keep
+/// the agent response small. See `crate::antibot` (core).
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AntibotInfo {
+    /// Canonical vendor tags detected (e.g. `cloudflare`, `datadome`), sorted.
+    pub vendors:          Vec<String>,
+    /// `true` when an active wall/challenge fired (rotate), vs. mere CDN
+    /// presence (no action needed).
+    pub challenged:       bool,
+    /// Vendor whose challenge fired, when `challenged`.
+    pub challenge_vendor: Option<String>,
+    /// Signature corpus version the verdict was produced against.
+    pub corpus_version:   String,
+    /// Which tier matched: `none` / `headers` / `body`.
+    pub evidence:         String,
+}
+
+impl From<void_crawl_core::AntibotVerdict> for AntibotInfo {
+    fn from(v: void_crawl_core::AntibotVerdict) -> Self {
+        let evidence = match v.evidence {
+            void_crawl_core::AntibotEvidence::None => "none",
+            void_crawl_core::AntibotEvidence::Headers => "headers",
+            void_crawl_core::AntibotEvidence::Body => "body",
+        };
+        Self {
+            vendors:          v.vendors,
+            challenged:       v.challenged,
+            challenge_vendor: v.challenge_vendor,
+            corpus_version:   v.corpus_version.to_string(),
+            evidence:         evidence.to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct FetchResult {
     pub url:         String,
@@ -43,6 +80,9 @@ pub struct FetchResult {
     pub title:       Option<String>,
     #[schemars(schema_with = "any_value_schema")]
     pub extracted:   Option<serde_json::Value>,
+    /// Anti-bot / CDN vendor fingerprint, or `null` when no vendor was detected
+    /// (or no network response was captured).
+    pub antibot:     Option<AntibotInfo>,
     /// Milliseconds this request spent queued for a free pool tab before work
     /// began. ~0 means a tab was free immediately; a larger value means the
     /// pool was saturated and this request waited behind other in-flight work.
@@ -193,6 +233,9 @@ async fn fetch_on_tab(tab: &PooledTab, args: FetchArgs) -> Result<FetchResult, V
         }
         None => None,
     };
+    // Surface the verdict only when a vendor was actually detected — keeps the
+    // common (un-walled) response free of empty `antibot` noise.
+    let antibot = resp.antibot.filter(AntibotVerdict::detected).map(AntibotInfo::from);
     Ok(FetchResult {
         url: resp.url,
         status_code: resp.status_code,
@@ -200,6 +243,7 @@ async fn fetch_on_tab(tab: &PooledTab, args: FetchArgs) -> Result<FetchResult, V
         html: resp.html,
         title,
         extracted,
+        antibot,
         // Overwritten by `run_timed` with the real pool queue-wait.
         waited_ms: 0,
     })
