@@ -1,3 +1,13 @@
+## 0.3.4 (2026-06-04)
+
+### Feat
+
+- signature-based anti-bot / CDN vendor detection (CAS-139). A new `antibot` module fingerprints which anti-bot/WAF/CDN vendor is gating a fetched response and whether it is actively *challenging* (a wall) vs. merely present (a CDN serving us fine), so pipelines can route deterministically instead of retrying blind. `classify(status, headers, body) -> AntibotVerdict { vendors, challenged, challenge_vendor, corpus_version, evidence }` tiers header-first (status + headers, with a bounded 64KB body-prefix fallback for 200-cloaked challenges) against a hand-picked ~12-vendor signature corpus compiled once into a linear-time `RegexSet`; `corpus_version` stamps each verdict as a captured fact for replay. The verdict is surfaced through PyO3 (`AntibotVerdict`, `PageResponse.headers` / `.antibot`) and MCP (`FetchResult.antibot`, `SessionNavigateResult.antibot`, emitted only when a vendor is detected). A typed `AntibotChallenge` exception exists across Rust/PyO3/MCP but is **not** auto-raised on the fetch path — `fetch_many` per-item isolation is preserved and a 403-with-HTML stays a success; it's reserved for opt-in detect/routing callers. See `docs/antibot.md`, `crates/core/CORPUS.md`, and `examples/antibot_detection.py`.
+
+### Fix
+
+- CI: Chrome launches now wait up to 45s (was chromiumoxide's hardcoded 20s) for the browser to report its WebSocket URL, configurable via `CHROME_LAUNCH_TIMEOUT_SECS`. On headless runners with no working Vulkan ICD, the stealth-default `enable-gpu` / `use-angle=vulkan` flags make the GPU process crash-loop, and a cold start could run past 20s and abort the launch with a `LaunchTimeout` — a flaky, Python-version-independent failure (it hit only one matrix leg per run). The stealth GPU flags are unchanged.
+
 ## 0.3.3 (2026-05-30)
 
 ### Feat

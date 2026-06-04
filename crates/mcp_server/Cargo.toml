@@ -1,6 +1,6 @@
 [package]
 name = "voidcrawl-mcp"
-version = "0.3.3"
+version = "0.3.4"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -23,7 +23,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-void_crawl_core = { path = "../core", version = "0.3.3" }
+void_crawl_core = { path = "../core", version = "0.3.4" }
 rmcp = { version = "1.4", features = ["server", "macros", "transport-io"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

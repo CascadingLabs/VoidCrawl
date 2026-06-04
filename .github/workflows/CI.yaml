@@ -125,6 +125,11 @@ jobs:
         run: uv run maturin develop --release --manifest-path crates/pyo3_bindings/Cargo.toml
 
       - name: Run pytest
+        # GitHub runners have no working Vulkan ICD, so Chrome's forced
+        # `enable-gpu` / `use-angle=vulkan` GPU process crash-loops and a cold
+        # launch can run past chromiumoxide's 20s default. Give it headroom.
+        env:
+          CHROME_LAUNCH_TIMEOUT_SECS: "60"
         run: uv run pytest tests/ -v
 
   docker-build:

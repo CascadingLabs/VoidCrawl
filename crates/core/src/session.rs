@@ -1,12 +1,13 @@
 //! `BrowserSession` — the main entry point for controlling a browser.
 
 use std::{
-    fmt,
+    env, fmt,
     path::PathBuf,
     sync::{
         Arc, Once,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 use chromiumoxide::{
@@ -91,6 +92,28 @@ pub(crate) const DEFAULT_CHROME_ARGS: &[&str] = &[
     "use-angle=vulkan",
     "disable-gpu-sandbox",
 ];
+
+/// Default `Browser::launch` timeout. chromiumoxide ships a 20s default, which
+/// is too tight for a cold start on a headless CI runner: the stealth-critical
+/// `enable-gpu` / `use-angle=vulkan` flags ([`DEFAULT_CHROME_ARGS`]) hit a box
+/// with no working Vulkan ICD (every GitHub-hosted runner is one), so the GPU
+/// process crash-loops before Chrome prints its `DevTools listening on ws://…`
+/// line — occasionally pushing the first launch past 20s and aborting it with a
+/// `LaunchTimeout`. 45s gives that cold start headroom without touching the GPU
+/// flags. Override with `CHROME_LAUNCH_TIMEOUT_SECS`.
+const DEFAULT_LAUNCH_TIMEOUT_SECS: u64 = 45;
+
+/// Resolve the Chrome launch timeout from `CHROME_LAUNCH_TIMEOUT_SECS`, falling
+/// back to [`DEFAULT_LAUNCH_TIMEOUT_SECS`]. An unset, unparseable, or `0` value
+/// uses the default.
+fn launch_timeout() -> Duration {
+    let secs = env::var("CHROME_LAUNCH_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_LAUNCH_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
 
 /// Normalize a Chrome flag to the form chromiumoxide wants: strip a single
 /// leading `--` if present, so both `"--use-angle=gl"` (how a human/Python
@@ -440,6 +463,11 @@ impl BrowserSession {
                 for a in assemble_chrome_args(&extra_args) {
                     builder = builder.arg(a);
                 }
+
+                // Give Chrome longer than chromiumoxide's 20s default to print
+                // its WebSocket URL — a cold start with the GPU stack thrashing
+                // (no Vulkan on CI) can run past 20s. See `launch_timeout`.
+                builder = builder.launch_timeout(launch_timeout());
 
                 let config = builder.build().map_err(VoidCrawlError::LaunchFailed)?;
 
