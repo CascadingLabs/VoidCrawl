@@ -2,7 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs,
+    fs, future,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
@@ -28,8 +28,8 @@ use chromiumoxide::{
                 DispatchMouseEventType, MouseButton,
             },
             network::{
-                Cookie, CookieParam, DeleteCookiesParams, EventResponseReceived, Headers,
-                ResourceType, SetExtraHttpHeadersParams,
+                Cookie, CookieParam, DeleteCookiesParams, EventRequestWillBeSent,
+                EventResponseReceived, Headers, ResourceType, SetExtraHttpHeadersParams,
             },
             page::{
                 AddScriptToEvaluateOnNewDocumentParams, CaptureScreenshotFormat,
@@ -60,23 +60,155 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct PageResponse {
     /// Outer HTML of `<html>` after the page reached network idle.
-    pub html:        String,
+    pub html:                String,
     /// Final URL after any redirects.
-    pub url:         String,
+    pub url:                 String,
     /// HTTP status code of the last response in the navigation chain.
-    pub status_code: Option<u16>,
+    pub status_code:         Option<u16>,
     /// `true` when at least one HTTP redirect occurred before the final URL.
-    pub redirected:  bool,
+    pub redirected:          bool,
     /// Response headers of the final Document response (`name`, `value`),
     /// lowercased names, in arrival order. Empty when no network response was
     /// captured (cache/service-worker/`file://`). Feeds anti-bot fingerprinting
     /// and replay-grade provenance (`cf-ray`, `x-cache`, …).
-    pub headers:     Vec<(String, String)>,
+    pub headers:             Vec<(String, String)>,
     /// Signature-based anti-bot / CDN vendor fingerprint of the final response,
     /// computed from `status_code` + `headers` + `html`. `None` when no
     /// network response was captured. Non-fatal: presence is a routing hint,
     /// `challenged` means an active wall — see [`crate::antibot`].
-    pub antibot:     Option<AntibotVerdict>,
+    pub antibot:             Option<AntibotVerdict>,
+    /// Data-plane network endpoints (XHR + Fetch request URLs) observed during
+    /// navigation — a sorted, deduplicated set of `scheme://host[:port]/path`
+    /// strings with query/fragment/userinfo stripped and secret-like path
+    /// segments redacted at the source (a replay-grade archive must never
+    /// persist a token; see [`safe_endpoint`] and
+    /// `ENDPOINT_SANITIZER_VERSION`). `None` when capture was not requested
+    /// (opt-in); `Some(empty)` when requested but the page made no
+    /// XHR/fetch calls. The *consumer* templatizes id-bearing path segments
+    /// — this stays a generic, faithful observation.
+    pub endpoints:           Option<Vec<String>>,
+    /// `true` when the captured endpoint set hit its cap and further endpoints
+    /// were dropped — so a consumer can tell "made few calls" from "we stopped
+    /// counting". Always `false` when `endpoints` is `None`.
+    pub endpoints_truncated: bool,
+}
+
+/// Version of the endpoint-sanitization rules ([`safe_endpoint`]). Bump on any
+/// change to the redaction patterns so a captured set is reproducible/auditable
+/// at replay time — mirrors `antibot::CORPUS_VERSION`.
+pub const ENDPOINT_SANITIZER_VERSION: &str = "ep-2026.06.06";
+
+/// Largest distinct-endpoint set kept per navigation; past this, capture stops
+/// and `PageResponse::endpoints_truncated` is set. Bounds memory on chatty
+/// SPAs.
+const MAX_ENDPOINTS: usize = 256;
+
+/// Reduce a raw request URL to a **PII-safe** `scheme://host[:port]/path` key,
+/// or `None` if it must not be archived.
+///
+/// A replay-grade archive cannot retroactively un-persist a secret, so this
+/// strips at the source — BEFORE the string is ever stored:
+///   * query string and fragment removed (where tokens/PII/cache-busters live),
+///   * userinfo (`user:pass@`) removed,
+///   * non-`http(s)` schemes and loopback/private hosts dropped entirely
+///     (operator-environment leak),
+///   * each path segment that looks like a secret/PII token — a long
+///     high-entropy blob (JWT/signed-URL), an email, or a long digit run
+///     (card/SSN/phone) — replaced with `:redacted`.
+///
+/// It deliberately does NOT templatize ordinary id segments (`/users/123/`) —
+/// that semantic normalization is the *consumer's* fingerprint concern; this
+/// function's only job is to never emit a secret while staying a faithful,
+/// generic observation of what the browser requested.
+pub fn safe_endpoint(raw_url: &str) -> Option<String> {
+    let no_frag = raw_url.split('#').next().unwrap_or("");
+    let no_query = no_frag.split('?').next().unwrap_or("");
+
+    let (scheme, rest) = no_query.split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+
+    let (authority, path) = match rest.split_once('/') {
+        Some((a, p)) => (a, format!("/{p}")),
+        None => (rest, String::new()),
+    };
+    // Drop userinfo (user:pass@host) — embedded credentials.
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
+    let host = host_port.split(':').next().unwrap_or("").to_ascii_lowercase();
+    if host.is_empty() || is_local_host(&host) {
+        return None;
+    }
+
+    let safe_path: String = path
+        .split('/')
+        .map(|seg| if is_secret_segment(seg) { ":redacted" } else { seg })
+        .collect::<Vec<_>>()
+        .join("/");
+
+    Some(format!(
+        "{scheme}://{host_port_lower}{safe_path}",
+        host_port_lower = host_port.to_ascii_lowercase()
+    ))
+}
+
+/// Loopback / RFC-1918 private / link-local hosts — never archive these (they
+/// describe the crawl operator's machine, not the page).
+fn is_local_host(host: &str) -> bool {
+    host == "localhost"
+        || host == "::1"
+        || host.starts_with("127.")
+        || host.starts_with("10.")
+        || host.starts_with("192.168.")
+        || host.starts_with("169.254.")
+        || (host.starts_with("172.")
+            && host
+                .split('.')
+                .nth(1)
+                .and_then(|o| o.parse::<u8>().ok())
+                .is_some_and(|o| (16..=31).contains(&o)))
+}
+
+/// True when a path segment looks like a secret or direct PII token that must
+/// not enter a long-term archive (conservative: over-redact secrets, do NOT
+/// touch ordinary ids — that's the consumer's normalization job).
+fn is_secret_segment(seg: &str) -> bool {
+    if seg.is_empty() {
+        return false;
+    }
+    // Email-like (PII).
+    if seg.contains('@') && seg.contains('.') {
+        return true;
+    }
+    let digits = seg.chars().filter(char::is_ascii_digit).count();
+    // Long pure-digit run: card / SSN / phone range (ordinary numeric ids are
+    // short).
+    if seg.len() >= 12 && digits == seg.len() {
+        return true;
+    }
+    // Long high-entropy token (JWT / signed-URL / opaque session id): a long
+    // url-safe-base64/hex blob carrying both letters and digits.
+    if seg.len() >= 32
+        && seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        && digits > 0
+        && seg.chars().any(|c| c.is_ascii_alphabetic())
+    {
+        return true;
+    }
+    false
+}
+
+/// Turn the in-loop deduped endpoint set into the final field value: `None`
+/// when capture was off, else a SORTED `Vec` (a stable set — arrival order is a
+/// session/timing tell, and the consumer set-ifies anyway).
+fn finalize_endpoints(seen: &HashSet<String>, capture: bool) -> Option<Vec<String>> {
+    if !capture {
+        return None;
+    }
+    let mut v: Vec<String> = seen.iter().cloned().collect();
+    v.sort();
+    Some(v)
 }
 
 /// Flatten CDP's `Network.Response.headers` (a JSON object of name → string
@@ -324,7 +456,30 @@ impl Page {
         url: &str,
         timeout: Duration,
     ) -> Result<PageResponse> {
-        // Subscribe to BOTH event streams BEFORE navigation so no events slip
+        self.goto_and_wait_for_idle_with_capture(url, timeout, false).await
+    }
+
+    /// Like [`Page::goto_and_wait_for_idle`], but when `capture_endpoints` is
+    /// `true` also records the page's data-plane network endpoint set (XHR +
+    /// Fetch request URLs) onto [`PageResponse::endpoints`].
+    ///
+    /// Capture is **opt-in** so the default fetch path pays no extra cost: the
+    /// `Network.requestWillBeSent` listener is only subscribed when requested.
+    /// It is passive (listen-only — no request interception, invisible to the
+    /// site) and the endpoints are PII-stripped at the source via
+    /// [`safe_endpoint`]. The listener is function-local and dropped on return,
+    /// so nothing leaks across a pooled tab's recycle.
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "a single navigate select-loop reads more clearly inline than split across helpers"
+    )]
+    pub async fn goto_and_wait_for_idle_with_capture(
+        &self,
+        url: &str,
+        timeout: Duration,
+        capture_endpoints: bool,
+    ) -> Result<PageResponse> {
+        // Subscribe to ALL event streams BEFORE navigation so no events slip
         // through the gap between goto() and the listener setup.
         let mut lifecycle = self
             .inner
@@ -338,6 +493,19 @@ impl Page {
             .await
             .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
 
+        // Request listener is gated on the opt-in so the wire/decode cost is
+        // only paid when a caller wants the endpoint set.
+        let mut requests = if capture_endpoints {
+            Some(
+                self.inner
+                    .event_listener::<EventRequestWillBeSent>()
+                    .await
+                    .map_err(|e| VoidCrawlError::PageError(e.to_string()))?,
+            )
+        } else {
+            None
+        };
+
         // Start navigation (non-blocking CDP command)
         self.inner.goto(url).await.map_err(|e| VoidCrawlError::NavigationFailed(e.to_string()))?;
 
@@ -350,6 +518,9 @@ impl Page {
         // Headers of the final (non-redirect) Document response. Overwritten if
         // a later navigation supersedes it, mirroring `status_code`.
         let mut headers: Vec<(String, String)> = Vec::new();
+        // Deduped data-plane endpoint set (only populated when capturing).
+        let mut endpoints: HashSet<String> = HashSet::new();
+        let mut endpoints_truncated = false;
 
         loop {
             tokio::select! {
@@ -391,6 +562,29 @@ impl Page {
                         }
                     }
                 }
+                // Endpoint capture — only polled when capturing (guard ensures
+                // `requests` is Some). Sits BELOW lifecycle so a chatty request
+                // stream can never starve the networkIdle break.
+                maybe_request = async {
+                    match requests.as_mut() {
+                        Some(s) => s.next().await,
+                        None => future::pending().await,
+                    }
+                }, if capture_endpoints => {
+                    if let Some(event) = maybe_request {
+                        if matches!(event.r#type, Some(ResourceType::Xhr | ResourceType::Fetch)) {
+                            if let Some(ep) = safe_endpoint(&event.request.url) {
+                                if endpoints.contains(&ep) {
+                                    // already counted — dedup, no cap pressure
+                                } else if endpoints.len() < MAX_ENDPOINTS {
+                                    endpoints.insert(ep);
+                                } else {
+                                    endpoints_truncated = true;
+                                }
+                            }
+                        }
+                    }
+                }
                 () = &mut deadline => {
                     if got_almost_idle {
                         break;
@@ -406,6 +600,8 @@ impl Page {
                         redirected: redirect_count > 0,
                         headers,
                         antibot,
+                        endpoints: finalize_endpoints(&endpoints, capture_endpoints),
+                        endpoints_truncated,
                     });
                 }
             }
@@ -421,6 +617,8 @@ impl Page {
             redirected: redirect_count > 0,
             headers,
             antibot,
+            endpoints: finalize_endpoints(&endpoints, capture_endpoints),
+            endpoints_truncated,
         })
     }
 
@@ -1500,7 +1698,87 @@ mod download_tests {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "test harness")]
 mod tests {
-    use super::{client_hints_for_ua, dehead};
+    use std::collections::HashSet;
+
+    use super::{client_hints_for_ua, dehead, finalize_endpoints, safe_endpoint};
+
+    #[test]
+    fn safe_endpoint_strips_query_and_fragment() {
+        assert_eq!(
+            safe_endpoint("https://api.example.com/v2/search?token=SECRET&q=ada#frag"),
+            Some("https://api.example.com/v2/search".to_string())
+        );
+        // host + scheme lowercased; bare host, no path.
+        assert_eq!(
+            safe_endpoint("HTTPS://API.Example.COM"),
+            Some("https://api.example.com".to_string())
+        );
+        // non-default port is kept (it's infra signature, not a secret).
+        assert_eq!(
+            safe_endpoint("https://api.example.com:8443/v1/quote"),
+            Some("https://api.example.com:8443/v1/quote".to_string())
+        );
+    }
+
+    #[test]
+    fn safe_endpoint_drops_userinfo_and_nonhttp_and_local() {
+        // userinfo (embedded credentials) removed.
+        assert_eq!(
+            safe_endpoint("https://alice:hunter2@host.com/p"),
+            Some("https://host.com/p".to_string())
+        );
+        // non-http(s) schemes are never archived.
+        assert_eq!(safe_endpoint("ws://host.com/socket"), None);
+        assert_eq!(safe_endpoint("data:text/html,hi"), None);
+        // loopback / private / link-local hosts (operator environment) dropped.
+        assert_eq!(safe_endpoint("http://127.0.0.1:9000/api"), None);
+        assert_eq!(safe_endpoint("http://localhost/api"), None);
+        assert_eq!(safe_endpoint("http://192.168.1.5/api"), None);
+        assert_eq!(safe_endpoint("http://172.16.0.9/api"), None);
+        // 172.x outside the private 16-31 band is public — kept.
+        assert!(safe_endpoint("http://172.32.0.1/api").is_some());
+    }
+
+    #[test]
+    fn safe_endpoint_redacts_secret_path_segments() {
+        // JWT-like high-entropy blob.
+        let jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
+        assert_eq!(
+            safe_endpoint(&format!("https://h.com/reset/{jwt}")),
+            Some("https://h.com/reset/:redacted".to_string())
+        );
+        // email PII segment.
+        assert_eq!(
+            safe_endpoint("https://h.com/u/ada@example.com/profile"),
+            Some("https://h.com/u/:redacted/profile".to_string())
+        );
+        // long digit run (card/SSN/phone range).
+        assert_eq!(
+            safe_endpoint("https://h.com/pay/4111111111111111"),
+            Some("https://h.com/pay/:redacted".to_string())
+        );
+        // an ordinary short numeric id is NOT redacted — templatizing is the
+        // consumer's job, not the crawler's.
+        assert_eq!(
+            safe_endpoint("https://h.com/users/123/profile"),
+            Some("https://h.com/users/123/profile".to_string())
+        );
+    }
+
+    #[test]
+    fn finalize_endpoints_none_when_not_capturing_else_sorted() {
+        let mut seen = HashSet::new();
+        seen.insert("https://b.com/2".to_string());
+        seen.insert("https://a.com/1".to_string());
+        assert_eq!(finalize_endpoints(&seen, false), None);
+        assert_eq!(
+            finalize_endpoints(&seen, true),
+            Some(vec!["https://a.com/1".to_string(), "https://b.com/2".to_string()])
+        );
+        // capturing with nothing seen → Some(empty), distinct from None ("not
+        // captured").
+        assert_eq!(finalize_endpoints(&HashSet::new(), true), Some(vec![]));
+    }
 
     const LINUX_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
     const WIN_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";

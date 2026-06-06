@@ -41,6 +41,13 @@ class PageResponse:
             captured.
         antibot: Anti-bot / CDN vendor fingerprint, or ``None`` when no
             network response was captured.
+        endpoints: Data-plane network endpoints (XHR + Fetch request URLs) —
+            a sorted, deduplicated set of ``scheme://host/path`` with query,
+            fragment, and userinfo stripped and secret-like path segments
+            redacted at the source. ``None`` unless ``capture_endpoints=True``
+            was passed to ``goto``; ``[]`` when requested but none were seen.
+        endpoints_truncated: ``True`` when the endpoint set hit its cap and
+            further endpoints were dropped.
     """
 
     html: str
@@ -49,6 +56,8 @@ class PageResponse:
     redirected: bool
     headers: dict[str, str]
     antibot: AntibotVerdict | None
+    endpoints: list[str] | None
+    endpoints_truncated: bool
 
 class DownloadOutcome:
     """Result of :meth:`Page.download` / :meth:`PooledTab.download`.
@@ -101,7 +110,9 @@ class PooledTab:
 
     use_count: int
 
-    async def goto(self, url: str, timeout: float = 30.0) -> PageResponse:
+    async def goto(
+        self, url: str, timeout: float = 30.0, capture_endpoints: bool = False
+    ) -> PageResponse:
         """Navigate to *url* and wait for network idle in one shot.
 
         Args:
@@ -420,7 +431,9 @@ class BrowserPool:
 class Page:
     """A single browser tab created via :meth:`BrowserSession.new_page`."""
 
-    async def goto(self, url: str, timeout: float = 30.0) -> PageResponse:
+    async def goto(
+        self, url: str, timeout: float = 30.0, capture_endpoints: bool = False
+    ) -> PageResponse:
         """Navigate to *url* and wait for network idle in one shot."""
         ...
     async def navigate(self, url: str) -> None:

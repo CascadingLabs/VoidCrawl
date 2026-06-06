@@ -207,32 +207,44 @@ impl From<AntibotVerdict> for PyAntibotVerdict {
 ///         names; last value wins on duplicates).
 ///     antibot (AntibotVerdict | None): Anti-bot / CDN vendor fingerprint, or
 ///         ``None`` when no network response was captured.
+///     endpoints (list[str] | None): Data-plane network endpoints (XHR + Fetch
+///         request URLs) — a sorted, deduplicated set of ``scheme://host/path``
+///         with query/fragment/userinfo stripped and secret-like path segments
+///         redacted at the source. ``None`` unless ``capture_endpoints=True``
+///         was passed to ``goto()``; ``[]`` when requested but none were seen.
+///     `endpoints_truncated` (bool): ``True`` when the endpoint set hit its cap
+///         and further endpoints were dropped.
 #[pyclass(name = "PageResponse")]
 #[derive(Debug)]
 pub struct PyPageResponse {
     #[pyo3(get)]
-    pub html:        String,
+    pub html:                String,
     #[pyo3(get)]
-    pub url:         String,
+    pub url:                 String,
     #[pyo3(get)]
-    pub status_code: Option<u16>,
+    pub status_code:         Option<u16>,
     #[pyo3(get)]
-    pub redirected:  bool,
+    pub redirected:          bool,
     #[pyo3(get)]
-    pub headers:     HashMap<String, String>,
+    pub headers:             HashMap<String, String>,
     #[pyo3(get)]
-    pub antibot:     Option<PyAntibotVerdict>,
+    pub antibot:             Option<PyAntibotVerdict>,
+    #[pyo3(get)]
+    pub endpoints:           Option<Vec<String>>,
+    #[pyo3(get)]
+    pub endpoints_truncated: bool,
 }
 
 #[pymethods]
 impl PyPageResponse {
     fn __repr__(&self) -> String {
         format!(
-            "PageResponse(url={:?}, status_code={:?}, redirected={}, html_len={})",
+            "PageResponse(url={:?}, status_code={:?}, redirected={}, html_len={}, endpoints={})",
             self.url,
             self.status_code,
             self.redirected,
             self.html.len(),
+            self.endpoints.as_ref().map_or_else(|| "None".to_string(), |e| e.len().to_string()),
         )
     }
 }
@@ -240,12 +252,14 @@ impl PyPageResponse {
 impl From<PageResponse> for PyPageResponse {
     fn from(r: PageResponse) -> Self {
         Self {
-            html:        r.html,
-            url:         r.url,
-            status_code: r.status_code,
-            redirected:  r.redirected,
-            headers:     r.headers.into_iter().collect(),
-            antibot:     r.antibot.map(PyAntibotVerdict::from),
+            html:                r.html,
+            url:                 r.url,
+            status_code:         r.status_code,
+            redirected:          r.redirected,
+            headers:             r.headers.into_iter().collect(),
+            antibot:             r.antibot.map(PyAntibotVerdict::from),
+            endpoints:           r.endpoints,
+            endpoints_truncated: r.endpoints_truncated,
         }
     }
 }
@@ -536,12 +550,22 @@ impl PyPage {
     /// Returns:
     ///     `PageResponse`: HTML, final URL, HTTP status code, and redirect
     /// flag.
-    #[pyo3(signature = (url, timeout=30.0))]
-    fn goto<'py>(&self, py: Python<'py>, url: String, timeout: f64) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (url, timeout=30.0, capture_endpoints=false))]
+    fn goto<'py>(
+        &self,
+        py: Python<'py>,
+        url: String,
+        timeout: f64,
+        capture_endpoints: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
         with_page_map!(
             self,
             py,
-            |page| page.goto_and_wait_for_idle(&url, Duration::from_secs_f64(timeout)),
+            |page| page.goto_and_wait_for_idle_with_capture(
+                &url,
+                Duration::from_secs_f64(timeout),
+                capture_endpoints
+            ),
             |resp| PyPageResponse::from(resp)
         )
     }
@@ -1293,12 +1317,22 @@ impl PyPooledTab {
     /// Faster than calling `navigate()` then `wait_for_network_idle()`
     /// separately because the event listener is set up before navigation
     /// starts.
-    #[pyo3(signature = (url, timeout=30.0))]
-    fn goto<'py>(&self, py: Python<'py>, url: String, timeout: f64) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (url, timeout=30.0, capture_endpoints=false))]
+    fn goto<'py>(
+        &self,
+        py: Python<'py>,
+        url: String,
+        timeout: f64,
+        capture_endpoints: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
         with_pooled_page_map!(
             self,
             py,
-            |page| page.goto_and_wait_for_idle(&url, Duration::from_secs_f64(timeout)),
+            |page| page.goto_and_wait_for_idle_with_capture(
+                &url,
+                Duration::from_secs_f64(timeout),
+                capture_endpoints
+            ),
             |resp| PyPageResponse::from(resp)
         )
     }
