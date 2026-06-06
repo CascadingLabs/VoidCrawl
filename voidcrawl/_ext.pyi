@@ -48,6 +48,9 @@ class PageResponse:
             was passed to ``goto``; ``[]`` when requested but none were seen.
         endpoints_truncated: ``True`` when the endpoint set hit its cap and
             further endpoints were dropped.
+        endpoint_sanitizer_version: Which redaction-rule version produced
+            ``endpoints`` (record it alongside the set for replay-grade
+            provenance). ``None`` iff ``endpoints`` is ``None``.
     """
 
     html: str
@@ -58,6 +61,7 @@ class PageResponse:
     antibot: AntibotVerdict | None
     endpoints: list[str] | None
     endpoints_truncated: bool
+    endpoint_sanitizer_version: str | None
 
 class DownloadOutcome:
     """Result of :meth:`Page.download` / :meth:`PooledTab.download`.

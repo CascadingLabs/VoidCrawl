@@ -60,23 +60,23 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct PageResponse {
     /// Outer HTML of `<html>` after the page reached network idle.
-    pub html:                String,
+    pub html: String,
     /// Final URL after any redirects.
-    pub url:                 String,
+    pub url: String,
     /// HTTP status code of the last response in the navigation chain.
-    pub status_code:         Option<u16>,
+    pub status_code: Option<u16>,
     /// `true` when at least one HTTP redirect occurred before the final URL.
-    pub redirected:          bool,
+    pub redirected: bool,
     /// Response headers of the final Document response (`name`, `value`),
     /// lowercased names, in arrival order. Empty when no network response was
     /// captured (cache/service-worker/`file://`). Feeds anti-bot fingerprinting
     /// and replay-grade provenance (`cf-ray`, `x-cache`, …).
-    pub headers:             Vec<(String, String)>,
+    pub headers: Vec<(String, String)>,
     /// Signature-based anti-bot / CDN vendor fingerprint of the final response,
     /// computed from `status_code` + `headers` + `html`. `None` when no
     /// network response was captured. Non-fatal: presence is a routing hint,
     /// `challenged` means an active wall — see [`crate::antibot`].
-    pub antibot:             Option<AntibotVerdict>,
+    pub antibot: Option<AntibotVerdict>,
     /// Data-plane network endpoints (XHR + Fetch request URLs) observed during
     /// navigation — a sorted, deduplicated set of `scheme://host[:port]/path`
     /// strings with query/fragment/userinfo stripped and secret-like path
@@ -86,11 +86,16 @@ pub struct PageResponse {
     /// (opt-in); `Some(empty)` when requested but the page made no
     /// XHR/fetch calls. The *consumer* templatizes id-bearing path segments
     /// — this stays a generic, faithful observation.
-    pub endpoints:           Option<Vec<String>>,
+    pub endpoints: Option<Vec<String>>,
     /// `true` when the captured endpoint set hit its cap and further endpoints
     /// were dropped — so a consumer can tell "made few calls" from "we stopped
     /// counting". Always `false` when `endpoints` is `None`.
     pub endpoints_truncated: bool,
+    /// The [`ENDPOINT_SANITIZER_VERSION`] the `endpoints` were redacted under,
+    /// so a long-term archive can reproduce/audit exactly which rules produced
+    /// the set (mirrors `AntibotVerdict::corpus_version`). `None` iff
+    /// `endpoints` is `None` (capture was not requested).
+    pub endpoint_sanitizer_version: Option<&'static str>,
 }
 
 /// Version of the endpoint-sanitization rules ([`safe_endpoint`]). Bump on any
@@ -236,6 +241,17 @@ fn is_safe_segment(seg: &str) -> bool {
     // A 12+ char all-hex blob is a hash/token, never a word.
     if seg.len() >= 12 && seg.chars().all(|c| c.is_ascii_hexdigit()) {
         return false;
+    }
+    // A 12+ char segment spanning 3 character classes (lower AND upper AND
+    // digit) is an opaque mixed-case token, not a template word — `oAuth2…`-
+    // style names are rare in paths and over-redacting them is the safe trade.
+    if seg.len() >= 12 {
+        let has_lower = seg.chars().any(|c| c.is_ascii_lowercase());
+        let has_upper = seg.chars().any(|c| c.is_ascii_uppercase());
+        let has_digit = seg.chars().any(|c| c.is_ascii_digit());
+        if has_lower && has_upper && has_digit {
+            return false;
+        }
     }
     true
 }
@@ -652,6 +668,7 @@ impl Page {
                         antibot,
                         endpoints: finalize_endpoints(&endpoints, capture_endpoints),
                         endpoints_truncated,
+                        endpoint_sanitizer_version: capture_endpoints.then_some(ENDPOINT_SANITIZER_VERSION),
                     });
                 }
             }
@@ -669,6 +686,7 @@ impl Page {
             antibot,
             endpoints: finalize_endpoints(&endpoints, capture_endpoints),
             endpoints_truncated,
+            endpoint_sanitizer_version: capture_endpoints.then_some(ENDPOINT_SANITIZER_VERSION),
         })
     }
 
@@ -1833,6 +1851,12 @@ mod tests {
         assert_eq!(
             safe_endpoint("https://h.com/store;jsessionid=ABC123/cart"),
             Some("https://h.com/:redacted/cart".to_string())
+        );
+        // a 12-15 char mixed-case+digit token (under the length/digit/hex caps)
+        // is still an opaque secret → redacted by the 3-character-class rule.
+        assert_eq!(
+            safe_endpoint("https://h.com/s/aB3xK9mP2qR5w"),
+            Some("https://h.com/s/:redacted".to_string())
         );
         // template words + a version segment survive (the endpoint skeleton);
         // path case is preserved (only the host is lowercased).

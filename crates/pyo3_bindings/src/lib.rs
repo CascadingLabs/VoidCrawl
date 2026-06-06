@@ -214,25 +214,30 @@ impl From<AntibotVerdict> for PyAntibotVerdict {
 ///         was passed to ``goto()``; ``[]`` when requested but none were seen.
 ///     `endpoints_truncated` (bool): ``True`` when the endpoint set hit its cap
 ///         and further endpoints were dropped.
+///     `endpoint_sanitizer_version` (str | None): Which redaction-rule version
+///         produced ``endpoints`` (record it alongside the set for replay-grade
+///         provenance). ``None`` iff ``endpoints`` is ``None``.
 #[pyclass(name = "PageResponse")]
 #[derive(Debug)]
 pub struct PyPageResponse {
     #[pyo3(get)]
-    pub html:                String,
+    pub html: String,
     #[pyo3(get)]
-    pub url:                 String,
+    pub url: String,
     #[pyo3(get)]
-    pub status_code:         Option<u16>,
+    pub status_code: Option<u16>,
     #[pyo3(get)]
-    pub redirected:          bool,
+    pub redirected: bool,
     #[pyo3(get)]
-    pub headers:             HashMap<String, String>,
+    pub headers: HashMap<String, String>,
     #[pyo3(get)]
-    pub antibot:             Option<PyAntibotVerdict>,
+    pub antibot: Option<PyAntibotVerdict>,
     #[pyo3(get)]
-    pub endpoints:           Option<Vec<String>>,
+    pub endpoints: Option<Vec<String>>,
     #[pyo3(get)]
     pub endpoints_truncated: bool,
+    #[pyo3(get)]
+    pub endpoint_sanitizer_version: Option<String>,
 }
 
 #[pymethods]
@@ -252,14 +257,15 @@ impl PyPageResponse {
 impl From<PageResponse> for PyPageResponse {
     fn from(r: PageResponse) -> Self {
         Self {
-            html:                r.html,
-            url:                 r.url,
-            status_code:         r.status_code,
-            redirected:          r.redirected,
-            headers:             r.headers.into_iter().collect(),
-            antibot:             r.antibot.map(PyAntibotVerdict::from),
-            endpoints:           r.endpoints,
+            html: r.html,
+            url: r.url,
+            status_code: r.status_code,
+            redirected: r.redirected,
+            headers: r.headers.into_iter().collect(),
+            antibot: r.antibot.map(PyAntibotVerdict::from),
+            endpoints: r.endpoints,
             endpoints_truncated: r.endpoints_truncated,
+            endpoint_sanitizer_version: r.endpoint_sanitizer_version.map(str::to_string),
         }
     }
 }
