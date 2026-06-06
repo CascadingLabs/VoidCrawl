@@ -103,100 +103,141 @@ pub const ENDPOINT_SANITIZER_VERSION: &str = "ep-2026.06.06";
 /// SPAs.
 const MAX_ENDPOINTS: usize = 256;
 
-/// Reduce a raw request URL to a **PII-safe** `scheme://host[:port]/path` key,
-/// or `None` if it must not be archived.
+/// Reduce a raw request URL to a `scheme://host[:port]/path` key with secrets
+/// removed, or `None` if it must not be archived at all.
 ///
 /// A replay-grade archive cannot retroactively un-persist a secret, so this
-/// strips at the source — BEFORE the string is ever stored:
-///   * query string and fragment removed (where tokens/PII/cache-busters live),
+/// strips at the source — BEFORE the string is ever stored — and is
+/// **redact-by-default** on the path (deny-unknown, not allow-unknown):
+///   * query string + fragment removed (where tokens/PII/cache-busters live),
 ///   * userinfo (`user:pass@`) removed,
-///   * non-`http(s)` schemes and loopback/private hosts dropped entirely
-///     (operator-environment leak),
-///   * each path segment that looks like a secret/PII token — a long
-///     high-entropy blob (JWT/signed-URL), an email, or a long digit run
-///     (card/SSN/phone) — replaced with `:redacted`.
+///   * non-`http(s)` schemes and loopback/private/CGNAT/`.local` hosts dropped
+///     entirely (an operator-environment leak, not page signal),
+///   * a path segment is KEPT only when it is clearly a short, low-entropy
+///     template token ([`is_safe_segment`]); ANYTHING else — long blobs
+///     (JWT/signed-URL/hash), kv/matrix markers (`;`/`=`/`%`), emails, long
+///     digit runs — becomes `:redacted`.
 ///
-/// It deliberately does NOT templatize ordinary id segments (`/users/123/`) —
-/// that semantic normalization is the *consumer's* fingerprint concern; this
-/// function's only job is to never emit a secret while staying a faithful,
-/// generic observation of what the browser requested.
+/// This is a best-effort *security* filter, not a proof: a short high-entropy
+/// secret can still resemble a word. It deliberately does NOT templatize
+/// ordinary id segments (`/users/123/` keeps `123`) — that semantic
+/// normalization is the *consumer's* fingerprint concern; this function's job
+/// is only to keep secrets out while staying a faithful, generic observation.
 pub fn safe_endpoint(raw_url: &str) -> Option<String> {
-    let no_frag = raw_url.split('#').next().unwrap_or("");
-    let no_query = no_frag.split('?').next().unwrap_or("");
+    // Cut everything from the first `?` or `#` — query and fragment never enter.
+    let head = raw_url.split(['?', '#']).next().unwrap_or("");
 
-    let (scheme, rest) = no_query.split_once("://")?;
+    let (scheme, rest) = head.split_once("://")?;
     let scheme = scheme.to_ascii_lowercase();
     if scheme != "http" && scheme != "https" {
         return None;
     }
 
+    // Authority is everything up to the first `/`; the rest is the path.
     let (authority, path) = match rest.split_once('/') {
         Some((a, p)) => (a, format!("/{p}")),
         None => (rest, String::new()),
     };
-    // Drop userinfo (user:pass@host) — embedded credentials.
-    let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
-    let host = host_port.split(':').next().unwrap_or("").to_ascii_lowercase();
-    if host.is_empty() || is_local_host(&host) {
+    // Drop userinfo (`user:pass@host`) — embedded credentials — then lowercase
+    // the host:port ONCE (the single source of truth for both the local-host
+    // guard and the emitted key).
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp).to_ascii_lowercase();
+    let host = bare_host(&host_port);
+    if host.is_empty() || is_local_host(host) {
         return None;
     }
 
     let safe_path: String = path
         .split('/')
-        .map(|seg| if is_secret_segment(seg) { ":redacted" } else { seg })
+        .map(|seg| if is_safe_segment(seg) { seg } else { ":redacted" })
         .collect::<Vec<_>>()
         .join("/");
 
-    Some(format!(
-        "{scheme}://{host_port_lower}{safe_path}",
-        host_port_lower = host_port.to_ascii_lowercase()
-    ))
+    Some(format!("{scheme}://{host_port}{safe_path}"))
 }
 
-/// Loopback / RFC-1918 private / link-local hosts — never archive these (they
-/// describe the crawl operator's machine, not the page).
+/// The bare host from a (already-lowercased) `host[:port]` authority, handling
+/// the bracketed IPv6 form `[::1]:9000` → `::1` (a plain `split(':')` would
+/// return `"["` and let loopback IPv6 slip past [`is_local_host`]).
+fn bare_host(host_port: &str) -> &str {
+    if let Some(after) = host_port.strip_prefix('[') {
+        return after.split(']').next().unwrap_or("");
+    }
+    host_port.split(':').next().unwrap_or("")
+}
+
+/// Loopback / private / CGNAT / link-local / mDNS hosts — never archive these
+/// (they describe the crawl operator's machine/network, not the page). `host`
+/// is the bare, lowercased host (no brackets, no port).
 fn is_local_host(host: &str) -> bool {
-    host == "localhost"
-        || host == "::1"
-        || host.starts_with("127.")
-        || host.starts_with("10.")
-        || host.starts_with("192.168.")
-        || host.starts_with("169.254.")
-        || (host.starts_with("172.")
-            && host
-                .split('.')
-                .nth(1)
-                .and_then(|o| o.parse::<u8>().ok())
-                .is_some_and(|o| (16..=31).contains(&o)))
-}
-
-/// True when a path segment looks like a secret or direct PII token that must
-/// not enter a long-term archive (conservative: over-redact secrets, do NOT
-/// touch ordinary ids — that's the consumer's normalization job).
-fn is_secret_segment(seg: &str) -> bool {
-    if seg.is_empty() {
-        return false;
-    }
-    // Email-like (PII).
-    if seg.contains('@') && seg.contains('.') {
-        return true;
-    }
-    let digits = seg.chars().filter(char::is_ascii_digit).count();
-    // Long pure-digit run: card / SSN / phone range (ordinary numeric ids are
-    // short).
-    if seg.len() >= 12 && digits == seg.len() {
-        return true;
-    }
-    // Long high-entropy token (JWT / signed-URL / opaque session id): a long
-    // url-safe-base64/hex blob carrying both letters and digits.
-    if seg.len() >= 32
-        && seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-        && digits > 0
-        && seg.chars().any(|c| c.is_ascii_alphabetic())
+    // IPv6 loopback / unspecified / link-local / unique-local (fc00::/7).
+    if host == "::1"
+        || host == "::"
+        || host.starts_with("fe80:")
+        || host.starts_with("fc")
+        || host.starts_with("fd")
     {
         return true;
     }
+    // mDNS `*.local` (compare the final label, not via ends_with — that trips
+    // clippy's file-extension lint and would also match a bare "local").
+    let mdns_local = host.rsplit_once('.').is_some_and(|(_, tld)| tld == "local");
+    if host == "localhost" || host == "0.0.0.0" || mdns_local {
+        return true;
+    }
+    if host.starts_with("127.")
+        || host.starts_with("10.")
+        || host.starts_with("192.168.")
+        || host.starts_with("169.254.")
+    {
+        return true;
+    }
+    // RFC-1918 172.16.0.0/12 and RFC-6598 CGNAT 100.64.0.0/10.
+    let second_octet = |s: &str| s.split('.').nth(1).and_then(|o| o.parse::<u8>().ok());
+    if host.starts_with("172.") {
+        return second_octet(host).is_some_and(|o| (16..=31).contains(&o));
+    }
+    if host.starts_with("100.") {
+        return second_octet(host).is_some_and(|o| (64..=127).contains(&o));
+    }
     false
+}
+
+/// True when a path segment is clearly a SAFE template token worth keeping —
+/// the allow-list half of the redact-by-default policy. Conservative: anything
+/// that isn't obviously a short, low-entropy lexical/id token is redacted.
+///
+/// Keeps: `finance`, `quoteSummary`, `v10`, `users`, `123`, `AAPL` (the
+/// consumer templatizes ordinary ids). Redacts: JWTs/signed-URLs/hashes (long
+/// or high-entropy), emails / kv / matrix params (`@`/`=`/`;`/`%`), and long
+/// digit runs (card/SSN/phone).
+fn is_safe_segment(seg: &str) -> bool {
+    // Empty (a `//` or trailing `/`) is structure, not content — keep it.
+    if seg.is_empty() {
+        return true;
+    }
+    // Any kv / matrix / userinfo / percent-encoding marker → not a plain token.
+    if seg.contains(['@', '=', ';', '%', ':']) {
+        return false;
+    }
+    // Only ordinary url-path token characters.
+    if !seg.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~')) {
+        return false;
+    }
+    // Long segments are tokens/blobs, not template words (`recommendations` is 15).
+    if seg.len() > 15 {
+        return false;
+    }
+    let digits = seg.chars().filter(char::is_ascii_digit).count();
+    // 9+ digits → SSN / card / phone range (ordinary numeric ids are shorter).
+    if digits >= 9 {
+        return false;
+    }
+    // A 12+ char all-hex blob is a hash/token, never a word.
+    if seg.len() >= 12 && seg.chars().all(|c| c.is_ascii_hexdigit()) {
+        return false;
+    }
+    true
 }
 
 /// Turn the in-loop deduped endpoint set into the final field value: `None`
@@ -565,6 +606,12 @@ impl Page {
                 // Endpoint capture — only polled when capturing (guard ensures
                 // `requests` is Some). Sits BELOW lifecycle so a chatty request
                 // stream can never starve the networkIdle break.
+                //
+                // select! evaluates every branch's future expression even when
+                // its `if` guard is false, so the `None` branch must still yield
+                // a same-typed future that never resolves — pending() parks it
+                // harmlessly (it's unreachable in practice: requests is Some iff
+                // capture_endpoints).
                 maybe_request = async {
                     match requests.as_mut() {
                         Some(s) => s.next().await,
@@ -574,12 +621,15 @@ impl Page {
                     if let Some(event) = maybe_request {
                         if matches!(event.r#type, Some(ResourceType::Xhr | ResourceType::Fetch)) {
                             if let Some(ep) = safe_endpoint(&event.request.url) {
-                                if endpoints.contains(&ep) {
-                                    // already counted — dedup, no cap pressure
-                                } else if endpoints.len() < MAX_ENDPOINTS {
-                                    endpoints.insert(ep);
-                                } else {
-                                    endpoints_truncated = true;
+                                // A duplicate (already counted) applies no cap
+                                // pressure; only a NEW endpoint past the cap
+                                // flips the truncated flag.
+                                if !endpoints.contains(&ep) {
+                                    if endpoints.len() < MAX_ENDPOINTS {
+                                        endpoints.insert(ep);
+                                    } else {
+                                        endpoints_truncated = true;
+                                    }
                                 }
                             }
                         }
@@ -1763,6 +1813,45 @@ mod tests {
             safe_endpoint("https://h.com/users/123/profile"),
             Some("https://h.com/users/123/profile".to_string())
         );
+    }
+
+    #[test]
+    fn safe_endpoint_redacts_by_default_holes() {
+        // Holes a denylist missed; redact-by-default catches them:
+        // a >15-char opaque token (a real key would be kept under the old >=32
+        // rule; a low-entropy stand-in here keeps the secret-scanner happy).
+        assert_eq!(
+            safe_endpoint("https://h.com/v1/keys/tokentokentokentoken"),
+            Some("https://h.com/v1/keys/:redacted".to_string())
+        );
+        // a 16-char all-hex token (2-class, slipped the old digit+alpha gate).
+        assert_eq!(
+            safe_endpoint("https://h.com/t/a1b2c3d4e5f6a7b8"),
+            Some("https://h.com/t/:redacted".to_string())
+        );
+        // matrix-param session id (`;jsessionid=`) — never handled before.
+        assert_eq!(
+            safe_endpoint("https://h.com/store;jsessionid=ABC123/cart"),
+            Some("https://h.com/:redacted/cart".to_string())
+        );
+        // template words + a version segment survive (the endpoint skeleton);
+        // path case is preserved (only the host is lowercased).
+        assert_eq!(
+            safe_endpoint("https://q1.finance.yahoo.com/v10/finance/quoteSummary/AAPL"),
+            Some("https://q1.finance.yahoo.com/v10/finance/quoteSummary/AAPL".to_string())
+        );
+    }
+
+    #[test]
+    fn safe_endpoint_handles_ipv6_and_cgnat_local_hosts() {
+        // bracketed IPv6 loopback — `split(':')` would yield "[" and leak it.
+        assert_eq!(safe_endpoint("http://[::1]:9000/api"), None);
+        assert_eq!(safe_endpoint("http://[fe80::1]/api"), None);
+        // CGNAT (RFC-6598) and mDNS .local are operator-network, not the page.
+        assert_eq!(safe_endpoint("http://100.64.0.7/api"), None);
+        assert_eq!(safe_endpoint("http://printer.local/status"), None);
+        // a public IPv6 host is kept (bracket form parsed correctly).
+        assert!(safe_endpoint("http://[2606:4700::1111]/cdn-cgi").is_some());
     }
 
     #[test]
