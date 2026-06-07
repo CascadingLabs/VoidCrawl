@@ -117,6 +117,7 @@ class BrowserConfig:
     proxy: str | None
     chrome_executable: str | None
     extra_args: list[str]
+    user_data_dir: str | None
     ws_url: str | None
     debug: bool
     stepping: bool
@@ -132,6 +133,7 @@ class BrowserConfig:
         proxy: str | None = None,
         chrome_executable: str | None = None,
         extra_args: list[str] = ...,
+        user_data_dir: str | None = None,
         ws_url: str | None = None,
         debug: bool = False,
         stepping: bool = True,

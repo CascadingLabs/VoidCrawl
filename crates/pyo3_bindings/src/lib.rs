@@ -438,6 +438,7 @@ async fn do_launch(
     proxy: Option<String>,
     chrome_executable: Option<String>,
     extra_args: Vec<String>,
+    user_data_dir: Option<String>,
 ) -> PyResult<()> {
     let stealth =
         if stealth_enabled { StealthConfig::chrome_like() } else { StealthConfig::none() };
@@ -452,6 +453,9 @@ async fn do_launch(
     }
     if let Some(exe) = chrome_executable {
         builder = builder.chrome_executable(exe);
+    }
+    if let Some(dir) = user_data_dir {
+        builder = builder.user_data_dir(dir);
     }
     for arg in extra_args {
         builder = builder.arg(arg);
@@ -1065,6 +1069,7 @@ pub struct PyBrowserSession {
     proxy:             Option<String>,
     chrome_executable: Option<String>,
     extra_args:        Vec<String>,
+    user_data_dir:     Option<String>,
 }
 
 impl fmt::Debug for PyBrowserSession {
@@ -1085,8 +1090,9 @@ impl PyBrowserSession {
     ///     proxy: Proxy server URL.
     ///     `chrome_executable`: Path to Chrome/Chromium binary.
     ///     `extra_args`: Additional Chrome command-line arguments.
+    ///     `user_data_dir`: Persistent Chrome user data directory.
     #[new]
-    #[pyo3(signature = (*, headless=true, ws_url=None, stealth=true, no_sandbox=false, proxy=None, chrome_executable=None, extra_args=None))]
+    #[pyo3(signature = (*, headless=true, ws_url=None, stealth=true, no_sandbox=false, proxy=None, chrome_executable=None, extra_args=None, user_data_dir=None))]
     fn new(
         headless: bool,
         ws_url: Option<String>,
@@ -1095,6 +1101,7 @@ impl PyBrowserSession {
         proxy: Option<String>,
         chrome_executable: Option<String>,
         extra_args: Option<Vec<String>>,
+        user_data_dir: Option<String>,
     ) -> Self {
         let mode = if let Some(url) = ws_url {
             BrowserMode::RemoteDebug { ws_url: url }
@@ -1112,6 +1119,7 @@ impl PyBrowserSession {
             proxy,
             chrome_executable,
             extra_args: extra_args.unwrap_or_default(),
+            user_data_dir,
         }
     }
 
@@ -1125,6 +1133,7 @@ impl PyBrowserSession {
         let proxy = self.proxy.clone();
         let chrome_executable = self.chrome_executable.clone();
         let extra_args = self.extra_args.clone();
+        let user_data_dir = self.user_data_dir.clone();
 
         future_into_py(py, async move {
             do_launch(
@@ -1135,6 +1144,7 @@ impl PyBrowserSession {
                 proxy,
                 chrome_executable,
                 extra_args,
+                user_data_dir,
             )
             .await
         })
@@ -1191,7 +1201,16 @@ impl PyBrowserSession {
     // ── async context manager ───────────────────────────────────────────
 
     fn __aenter__<'py>(slf: Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let (inner, mode, stealth_enabled, no_sandbox, proxy, chrome_executable, extra_args) = {
+        let (
+            inner,
+            mode,
+            stealth_enabled,
+            no_sandbox,
+            proxy,
+            chrome_executable,
+            extra_args,
+            user_data_dir,
+        ) = {
             let this = slf.borrow();
             (
                 Arc::clone(&this.inner),
@@ -1201,6 +1220,7 @@ impl PyBrowserSession {
                 this.proxy.clone(),
                 this.chrome_executable.clone(),
                 this.extra_args.clone(),
+                this.user_data_dir.clone(),
             )
         };
         let slf_ref = slf.into_any().unbind();
@@ -1214,6 +1234,7 @@ impl PyBrowserSession {
                 proxy,
                 chrome_executable,
                 extra_args,
+                user_data_dir,
             )
             .await?;
             Ok(slf_ref)
@@ -1885,7 +1906,8 @@ impl PyBrowserPool {
     #[classmethod]
     #[pyo3(signature = (
         browsers, tabs_per_browser, tab_max_uses, tab_max_idle_secs, acquire_timeout_secs,
-        auto_evict, headless, no_sandbox, stealth, ws_urls, proxy, chrome_executable, extra_args
+        auto_evict, headless, no_sandbox, stealth, ws_urls, proxy, chrome_executable, extra_args,
+        user_data_dir
     ))]
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::fn_params_excessive_bools)]
@@ -1904,6 +1926,7 @@ impl PyBrowserPool {
         proxy: Option<String>,
         chrome_executable: Option<String>,
         extra_args: Vec<String>,
+        user_data_dir: Option<String>,
     ) -> PyPoolParamsContext {
         PyPoolParamsContext {
             browsers,
@@ -1919,6 +1942,7 @@ impl PyBrowserPool {
             proxy,
             chrome_executable,
             extra_args,
+            user_data_dir,
             pool_slot: Arc::new(Mutex::new(None)),
         }
     }
@@ -1992,6 +2016,7 @@ pub struct PyPoolParamsContext {
     proxy:                Option<String>,
     chrome_executable:    Option<String>,
     extra_args:           Vec<String>,
+    user_data_dir:        Option<String>,
     pool_slot:            Arc<Mutex<Option<Arc<BrowserPool>>>>,
 }
 
@@ -2018,6 +2043,7 @@ impl PyPoolParamsContext {
         let proxy = this.proxy.clone();
         let chrome_executable = this.chrome_executable.clone();
         let extra_args = this.extra_args.clone();
+        let user_data_dir = this.user_data_dir.clone();
         let pool_slot = Arc::clone(&this.pool_slot);
         drop(this);
 
@@ -2042,6 +2068,9 @@ impl PyPoolParamsContext {
                         }
                         if let Some(ref exe) = chrome_executable {
                             builder = builder.chrome_executable(exe.clone());
+                        }
+                        if let Some(ref dir) = user_data_dir {
+                            builder = builder.user_data_dir(dir.clone());
                         }
                         for arg in &extra_args {
                             builder = builder.arg(arg.clone());
