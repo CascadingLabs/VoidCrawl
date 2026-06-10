@@ -14,9 +14,10 @@
 //!
 //!     cargo test -p voidcrawl-mcp --test cross_origin_eval -- --test-threads=1
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
-use tokio::sync::Mutex;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use tokio::{sync::Mutex, time::sleep};
 use void_crawl_core::BrowserSession;
 use voidcrawl_mcp::{
     AppState, VoidCrawlServer,
@@ -74,10 +75,9 @@ async fn teardown(server: &VoidCrawlServer) {
 /// also match. This mirrors real usage, where a site URL never contains the
 /// `recaptcha/api2/bframe` pattern that only the bframe's own URL carries.
 fn fixture() -> String {
-    use base64::Engine as _;
     let child = "<p>CHILDFRAME</p><div id=secret>42</div>";
     let child_url = data_url(child);
-    let b64 = base64::engine::general_purpose::STANDARD.encode(child_url);
+    let b64 = STANDARD.encode(child_url);
     format!(
         "<h1>parent</h1><iframe id=f></iframe>\
          <script>document.getElementById('f').src = atob('{b64}');</script>"
@@ -129,7 +129,7 @@ async fn eval_js_in_frame_reads_cross_origin_iframe_the_parent_cannot() {
                 from_frame = Some(r);
                 break;
             }
-            _ => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+            _ => sleep(Duration::from_millis(100)).await,
         }
     }
     let from_frame = from_frame.expect("eval_js_in_frame should read the child's secret");
@@ -183,8 +183,7 @@ async fn eval_js_in_frame_errors_when_no_frame_matches() {
 /// silently pick one — frame order is unstable and a decoy frame could hijack
 /// the eval target.
 fn ambiguous_fixture() -> String {
-    use base64::Engine as _;
-    let enc = |html: &str| base64::engine::general_purpose::STANDARD.encode(data_url(html));
+    let enc = |html: &str| STANDARD.encode(data_url(html));
     let a = enc("<p>SHARED-A</p>");
     let b = enc("<p>SHARED-B</p>");
     format!(
@@ -217,7 +216,7 @@ async fn eval_js_in_frame_fails_closed_when_pattern_is_ambiguous() {
                 break;
             }
             // Both frames not registered yet — retry.
-            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+            Err(_) => sleep(Duration::from_millis(100)).await,
         }
     }
     assert!(
