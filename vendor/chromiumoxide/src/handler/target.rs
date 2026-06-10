@@ -575,22 +575,22 @@ impl Target {
             .wait_for_debugger_on_start(true)
             .build()
             .unwrap();
-        let enable_performance = performance::EnableParams::default();
-        let enable_log = cdplog::EnableParams::default();
-        CommandChain::new(
-            vec![
-                (attach.identifier(), serde_json::to_value(attach).unwrap()),
-                (
-                    enable_performance.identifier(),
-                    serde_json::to_value(enable_performance).unwrap(),
-                ),
-                (
-                    enable_log.identifier(),
-                    serde_json::to_value(enable_log).unwrap(),
-                ),
-            ],
-            timeout,
-        )
+        let mut cmds = vec![(attach.identifier(), serde_json::to_value(attach).unwrap())];
+        // VoidCrawl stealth patch (CAS-147 follow-up): Performance.enable and
+        // Log.enable are eager CDP-instrumentation tells a minimal/manual browser
+        // never sends (nodriver enables neither); they are unnecessary for core
+        // function. Skip them in VOIDCRAWL_STEALTH_NO_RUNTIME mode to narrow the
+        // gap to a clean session for anti-bot challenges.
+        if std::env::var_os("VOIDCRAWL_STEALTH_NO_RUNTIME").is_none() {
+            let enable_performance = performance::EnableParams::default();
+            let enable_log = cdplog::EnableParams::default();
+            cmds.push((
+                enable_performance.identifier(),
+                serde_json::to_value(enable_performance).unwrap(),
+            ));
+            cmds.push((enable_log.identifier(), serde_json::to_value(enable_log).unwrap()));
+        }
+        CommandChain::new(cmds, timeout)
     }
 }
 
