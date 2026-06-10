@@ -15,9 +15,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     mesa-vulkan-drivers \
     && rm -rf /var/lib/apt/lists/*
 
-# Chrome deps + infra
+# Chrome deps + infra. dbus: Chrome stalls on autolaunch without a bus.
+# Fonts: a near-empty font set causes fallback stalls and is a fingerprint
+# tell (real desktops have dozens of families).
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    dbus \
     fonts-liberation \
+    fonts-dejavu-core \
+    fonts-noto-core \
+    fonts-noto-color-emoji \
     libnss3 \
     libatk-bridge2.0-0 \
     libxcomposite1 \
@@ -57,7 +63,8 @@ WORKDIR /app
 COPY docker/config/sway-headful /etc/sway/config
 COPY docker/config/supervisord-headful.conf /etc/supervisor/conf.d/supervisord.conf
 COPY docker/entrypoint-headful.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+COPY docker/check-outputs.sh /usr/local/bin/check-outputs.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/check-outputs.sh
 
 # Create runtime dirs
 RUN mkdir -p /tmp/xdg-runtime /tmp/chrome-profile-1 /tmp/chrome-profile-2
@@ -78,15 +85,23 @@ ENV XDG_RUNTIME_DIR=/tmp/xdg-runtime \
     TAB_MAX_USES=50 \
     TAB_MAX_IDLE_SECS=60 \
     CHROME_NO_SANDBOX=1 \
-    # VNC defaults
+    # VNC defaults — one wayvnc+noVNC pair per Chrome output
     VNC_PORT=5900 \
+    VNC_PORT_2=5901 \
     NOVNC_PORT=6080 \
+    NOVNC_PORT_2=6081 \
     VNC_WIDTH=1920 \
     VNC_HEIGHT=1080
 
-EXPOSE 19222 19223 5900 6080
+EXPOSE 19222 19223 5900 5901 6080 6081
 
-HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -sf http://localhost:19222/json/version && curl -sf http://localhost:19223/json/version
+# Healthcheck proves more than "the CDP socket bound": both CDP endpoints
+# answer AND each Chrome is on its own output (check-outputs.sh) — the
+# occlusion regression keeps /json/version green, so CDP-only was blind to it.
+# start-period covers sway bringup + window routing onto the second output.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -sf "http://localhost:${CDP_PORT_1}/json/version" \
+        && curl -sf "http://localhost:${CDP_PORT_2}/json/version" \
+        && /usr/local/bin/check-outputs.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
