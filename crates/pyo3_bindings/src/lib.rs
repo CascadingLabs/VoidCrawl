@@ -616,6 +616,57 @@ impl PyPage {
         self.evaluate_js(py, expression)
     }
 
+    /// Evaluate a JavaScript expression **inside a specific (possibly
+    /// cross-origin) iframe**, selected by a substring of its URL.
+    ///
+    /// The expression runs in that frame's own execution context, so
+    /// ``document`` is the frame's document. This is the only way to read or
+    /// drive an iframe whose ``contentDocument`` is ``null`` from the parent
+    /// under the same-origin policy (e.g. a reCAPTCHA ``bframe`` on a real
+    /// third-party site).
+    ///
+    /// Args:
+    ///     frame_url_pattern: Substring of the target frame's URL, e.g.
+    ///         ``"recaptcha/api2/bframe"``.
+    ///     expression: JavaScript expression; its value is returned as a
+    ///         native Python object (JSON objects → dict, arrays → list, …).
+    ///
+    /// Raises:
+    ///     RuntimeError: if no frame matches, or the matched frame has no
+    ///         scriptable execution context.
+    fn evaluate_js_in_frame<'py>(
+        &self,
+        py: Python<'py>,
+        frame_url_pattern: String,
+        expression: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_page_map!(
+            self,
+            py,
+            |page| page.evaluate_js_in_frame(&frame_url_pattern, &expression),
+            |val| PyJsonValue(val)
+        )
+    }
+
+    /// Alias for :meth:`evaluate_js_in_frame` — short form matching the
+    /// ``eval_js`` / MCP naming.
+    fn eval_js_in_frame<'py>(
+        &self,
+        py: Python<'py>,
+        frame_url_pattern: String,
+        expression: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.evaluate_js_in_frame(py, frame_url_pattern, expression)
+    }
+
+    /// List the URLs of every frame on the page — handy for discovering the
+    /// right `frame_url_pattern` for :meth:`evaluate_js_in_frame`.
+    fn frame_urls<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        with_page_map!(self, py, |page| page.frame_urls(), |urls| PyJsonValue(
+            serde_json::Value::from(urls)
+        ))
+    }
+
     /// Take a PNG screenshot, returned as Python bytes.
     fn screenshot_png<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         with_page_map!(self, py, |page| page.screenshot_png(), |bytes| PyBytesResult(bytes))
@@ -1391,6 +1442,41 @@ impl PyPooledTab {
     /// Alias for :meth:`evaluate_js`.
     fn eval_js<'py>(&self, py: Python<'py>, expression: String) -> PyResult<Bound<'py, PyAny>> {
         self.evaluate_js(py, expression)
+    }
+
+    /// Evaluate JavaScript inside a specific (possibly cross-origin) iframe,
+    /// selected by a substring of its URL. See
+    /// :meth:`Page.evaluate_js_in_frame`.
+    fn evaluate_js_in_frame<'py>(
+        &self,
+        py: Python<'py>,
+        frame_url_pattern: String,
+        expression: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page_map!(
+            self,
+            py,
+            |page| page.evaluate_js_in_frame(&frame_url_pattern, &expression),
+            |val| PyJsonValue(val)
+        )
+    }
+
+    /// Alias for :meth:`evaluate_js_in_frame`.
+    fn eval_js_in_frame<'py>(
+        &self,
+        py: Python<'py>,
+        frame_url_pattern: String,
+        expression: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.evaluate_js_in_frame(py, frame_url_pattern, expression)
+    }
+
+    /// List the URLs of every frame on the page — handy for discovering the
+    /// right `frame_url_pattern` for :meth:`evaluate_js_in_frame`.
+    fn frame_urls<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page_map!(self, py, |page| page.frame_urls(), |urls| PyJsonValue(
+            serde_json::Value::from(urls)
+        ))
     }
 
     fn screenshot_png<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {

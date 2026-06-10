@@ -162,6 +162,29 @@ class PooledTab:
     async def eval_js(self, expression: str) -> object:
         """Alias for :meth:`evaluate_js` — short form used by MCP tooling."""
         ...
+    async def evaluate_js_in_frame(
+        self, frame_url_pattern: str, expression: str
+    ) -> object:
+        """Evaluate *expression* inside a (possibly cross-origin) iframe.
+
+        The frame is selected by a substring of its URL. The expression runs in
+        that frame's own execution context (``document`` is the frame's
+        document) — the way to reach an iframe whose ``contentDocument`` is null
+        from the parent under the same-origin policy.
+
+        Args:
+            frame_url_pattern: Substring of the target frame's URL,
+                e.g. ``"recaptcha/api2/bframe"``.
+            expression: JavaScript expression or IIFE string.
+
+        Raises:
+            RuntimeError: if no frame matches, or the matched frame has no
+                scriptable execution context.
+        """
+        ...
+    async def eval_js_in_frame(self, frame_url_pattern: str, expression: str) -> object:
+        """Alias for :meth:`evaluate_js_in_frame`."""
+        ...
     async def screenshot_png(self) -> bytes:
         """Capture a full-page screenshot as PNG bytes."""
         ...
@@ -474,6 +497,29 @@ class Page:
         ...
     async def eval_js(self, expression: str) -> object:
         """Alias for :meth:`evaluate_js` — short form used by MCP tooling."""
+        ...
+    async def evaluate_js_in_frame(
+        self, frame_url_pattern: str, expression: str
+    ) -> object:
+        """Evaluate *expression* inside a (possibly cross-origin) iframe.
+
+        The frame is selected by a substring of its URL. The expression runs in
+        that frame's own execution context (``document`` is the frame's
+        document) — the way to reach an iframe whose ``contentDocument`` is null
+        from the parent under the same-origin policy.
+
+        Args:
+            frame_url_pattern: Substring of the target frame's URL,
+                e.g. ``"recaptcha/api2/bframe"``.
+            expression: JavaScript expression or IIFE string.
+
+        Raises:
+            RuntimeError: if no frame matches, or the matched frame has no
+                scriptable execution context.
+        """
+        ...
+    async def eval_js_in_frame(self, frame_url_pattern: str, expression: str) -> object:
+        """Alias for :meth:`evaluate_js_in_frame`."""
         ...
     async def screenshot_png(self) -> bytes:
         """Capture a full-page screenshot as PNG bytes."""

@@ -16,6 +16,7 @@ use void_crawl_core::VoidCrawlError;
 pub fn map_err(err: VoidCrawlError) -> ErrorData {
     match err {
         VoidCrawlError::ElementNotFound(s)
+        | VoidCrawlError::FrameNotFound(s)
         | VoidCrawlError::NavigationFailed(s)
         | VoidCrawlError::JsEvalError(s) => ErrorData::invalid_params(s, None),
         VoidCrawlError::Timeout(s) => ErrorData::internal_error(format!("timeout: {s}"), None),

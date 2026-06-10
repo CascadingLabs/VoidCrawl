@@ -54,6 +54,13 @@ pub(crate) const DEFAULT_CHROME_ARGS: &[&str] = &[
     "disable-blink-features=AutomationControlled",
     "disable-infobars",
     "disable-features=IsolateOrigins,site-per-process,TranslateUI",
+    // Keep cross-origin iframes IN-PROCESS so their execution contexts are
+    // reachable from the page target (what `Page::evaluate_js_in_frame` relies
+    // on). `disable-features=site-per-process` alone is not enough: Chrome
+    // still *field-trial*-isolates some origins (notably google.com, hence
+    // reCAPTCHA's bframe), pushing them out-of-process where the page-target
+    // frame tree can't see them. This flag turns those trials off.
+    "disable-site-isolation-trials",
     // ── Safe defaults from chromiumoxide we keep ────────────────────
     "disable-background-networking",
     "disable-background-timer-throttling",

@@ -33,10 +33,10 @@ use chromiumoxide::{
             },
             page::{
                 AddScriptToEvaluateOnNewDocumentParams, CaptureScreenshotFormat,
-                EventLifecycleEvent, PrintToPdfParams, SetBypassCspParams, Viewport,
+                EventLifecycleEvent, FrameId, PrintToPdfParams, SetBypassCspParams, Viewport,
             },
         },
-        js_protocol::runtime::CallFunctionOnParams,
+        js_protocol::runtime::{CallFunctionOnParams, EvaluateParams},
     },
     page::ScreenshotParams,
 };
@@ -823,6 +823,100 @@ impl Page {
             Some(v) => Ok(v.clone()),
             None => Ok(Value::Null),
         }
+    }
+
+    /// Evaluate a JS expression **inside a specific frame's** execution
+    /// context and return the result as a JSON value.
+    ///
+    /// Unlike [`Page::evaluate_js`] — which always runs in the top document —
+    /// this targets the frame whose current URL contains `frame_url_pattern`.
+    /// It is the only way to read or drive a **cross-origin** iframe: that
+    /// frame's `contentDocument` is `null` from the parent under the
+    /// same-origin policy, but CDP can evaluate in the frame's own execution
+    /// context, where the origin check is satisfied. `expression` runs as if
+    /// it were the frame's own page script (`document` is the frame's
+    /// document).
+    ///
+    /// Errors with [`VoidCrawlError::FrameNotFound`] when no frame matches the
+    /// pattern, or when the matched frame has no scriptable execution context
+    /// (e.g. a `sandbox`ed frame without `allow-scripts`, or one not yet
+    /// loaded).
+    pub async fn evaluate_js_in_frame(
+        &self,
+        frame_url_pattern: &str,
+        expression: &str,
+    ) -> Result<Value> {
+        let frame_id = self.resolve_frame(frame_url_pattern).await?;
+        let context_id = self
+            .inner
+            .frame_execution_context(frame_id)
+            .await
+            .map_err(|e| VoidCrawlError::JsEvalError(e.to_string()))?
+            .ok_or_else(|| {
+                VoidCrawlError::FrameNotFound(format!(
+                    "{frame_url_pattern:?}: matched frame has no scriptable execution \
+                     context (sandboxed without allow-scripts, or not yet loaded)"
+                ))
+            })?;
+        let params = EvaluateParams::builder()
+            .expression(expression)
+            .context_id(context_id)
+            .return_by_value(true)
+            .await_promise(true)
+            .build()
+            .map_err(VoidCrawlError::JsEvalError)?;
+        // `evaluate_expression` (not `evaluate`) so chromiumoxide does not
+        // overwrite our explicit `context_id` with the top-document context.
+        let result = self
+            .inner
+            .evaluate_expression(params)
+            .await
+            .map_err(|e| VoidCrawlError::JsEvalError(e.to_string()))?;
+        match result.value() {
+            Some(v) => Ok(v.clone()),
+            None => Ok(Value::Null),
+        }
+    }
+
+    /// Find the first frame whose current URL contains `pattern`.
+    ///
+    /// chromiumoxide's handler already tracks the frame tree and each frame's
+    /// execution context, so this is a cheap lookup with no extra CDP round
+    /// trips beyond reading cached frame URLs.
+    async fn resolve_frame(&self, pattern: &str) -> Result<FrameId> {
+        let frames =
+            self.inner.frames().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        for frame_id in frames {
+            let url = self
+                .inner
+                .frame_url(frame_id.clone())
+                .await
+                .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+            if url.is_some_and(|u| u.contains(pattern)) {
+                return Ok(frame_id);
+            }
+        }
+        Err(VoidCrawlError::FrameNotFound(pattern.to_string()))
+    }
+
+    /// List the URLs of every frame currently tracked on this page (main frame
+    /// first, then child frames). Useful for discovering the right
+    /// `frame_url_pattern` to pass to [`Page::evaluate_js_in_frame`].
+    pub async fn frame_urls(&self) -> Result<Vec<String>> {
+        let frames =
+            self.inner.frames().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        let mut urls = Vec::with_capacity(frames.len());
+        for frame_id in frames {
+            if let Some(url) = self
+                .inner
+                .frame_url(frame_id)
+                .await
+                .map_err(|e| VoidCrawlError::PageError(e.to_string()))?
+            {
+                urls.push(url);
+            }
+        }
+        Ok(urls)
     }
 
     // ── Screenshots & PDF ───────────────────────────────────────────────
