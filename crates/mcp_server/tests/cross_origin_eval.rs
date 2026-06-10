@@ -135,6 +135,22 @@ async fn eval_js_in_frame_reads_cross_origin_iframe_the_parent_cannot() {
     let from_frame = from_frame.expect("eval_js_in_frame should read the child's secret");
     assert_eq!(from_frame.value.as_str(), Some("42"), "frame-scoped read should see the secret");
 
+    // 3. It can DRIVE the frame too, not just read: mutate the child's DOM and read
+    //    the mutation back through the same frame-scoped context.
+    let driven = actions::eval_js_in_frame(
+        &server,
+        EvalJsInFrameArgs {
+            session_id:        SID.to_string(),
+            frame_url_pattern: "CHILDFRAME".to_string(),
+            expression:        "(() => { document.getElementById('secret').textContent = '99'; \
+                                return document.getElementById('secret').textContent; })()"
+                .to_string(),
+        },
+    )
+    .await
+    .expect("eval_js_in_frame drive ok");
+    assert_eq!(driven.value.as_str(), Some("99"), "frame-scoped eval should mutate the child");
+
     teardown(&server).await;
 }
 
@@ -152,11 +168,61 @@ async fn eval_js_in_frame_errors_when_no_frame_matches() {
     )
     .await
     .expect_err("a non-matching pattern must error, not silently run in the top frame");
-    // FrameNotFound maps to invalid_params with the pattern in the message.
+    // FrameNotFound maps to invalid_params; the message is the pattern itself.
     assert!(
-        err.message.contains("frame not found") || err.message.contains("no-such-frame-xyz"),
+        err.message.contains("no-such-frame-xyz"),
         "error should name the missing frame, got: {}",
         err.message
+    );
+
+    teardown(&server).await;
+}
+
+/// Two cross-origin children whose URLs both contain `SHARED`. A substring that
+/// matches more than one frame must fail closed (`AmbiguousFrame`), never
+/// silently pick one — frame order is unstable and a decoy frame could hijack
+/// the eval target.
+fn ambiguous_fixture() -> String {
+    use base64::Engine as _;
+    let enc = |html: &str| base64::engine::general_purpose::STANDARD.encode(data_url(html));
+    let a = enc("<p>SHARED-A</p>");
+    let b = enc("<p>SHARED-B</p>");
+    format!(
+        "<iframe id=a></iframe><iframe id=b></iframe><script>\
+         document.getElementById('a').src = atob('{a}');\
+         document.getElementById('b').src = atob('{b}');</script>"
+    )
+}
+
+#[tokio::test]
+async fn eval_js_in_frame_fails_closed_when_pattern_is_ambiguous() {
+    let server = server_with_page(&ambiguous_fixture()).await;
+
+    // Wait for both children to register, then a pattern matching both must error.
+    let mut err = None;
+    for _ in 0..30 {
+        match actions::eval_js_in_frame(
+            &server,
+            EvalJsInFrameArgs {
+                session_id:        SID.to_string(),
+                frame_url_pattern: "SHARED".to_string(),
+                expression:        "1".to_string(),
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("an ambiguous pattern must not resolve to a single frame"),
+            Err(e) if e.message.contains("matched 2 frames") => {
+                err = Some(e);
+                break;
+            }
+            // Both frames not registered yet — retry.
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+        }
+    }
+    assert!(
+        err.is_some(),
+        "ambiguous pattern should surface AmbiguousFrame once both frames exist"
     );
 
     teardown(&server).await;

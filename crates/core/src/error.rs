@@ -33,6 +33,9 @@ pub enum VoidCrawlError {
     #[error("frame not found: {0}")]
     FrameNotFound(String),
 
+    #[error("ambiguous frame pattern: {0}")]
+    AmbiguousFrame(String),
+
     #[error("timeout: {0}")]
     Timeout(String),
 

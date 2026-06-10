@@ -185,6 +185,13 @@ class PooledTab:
     async def eval_js_in_frame(self, frame_url_pattern: str, expression: str) -> object:
         """Alias for :meth:`evaluate_js_in_frame`."""
         ...
+    async def frame_urls(self) -> list[str]:
+        """List the URLs of every frame on the page, in no particular order.
+
+        Handy for discovering the right ``frame_url_pattern`` to pass to
+        :meth:`evaluate_js_in_frame`.
+        """
+        ...
     async def screenshot_png(self) -> bytes:
         """Capture a full-page screenshot as PNG bytes."""
         ...
@@ -520,6 +527,13 @@ class Page:
         ...
     async def eval_js_in_frame(self, frame_url_pattern: str, expression: str) -> object:
         """Alias for :meth:`evaluate_js_in_frame`."""
+        ...
+    async def frame_urls(self) -> list[str]:
+        """List the URLs of every frame on the page, in no particular order.
+
+        Handy for discovering the right ``frame_url_pattern`` to pass to
+        :meth:`evaluate_js_in_frame`.
+        """
         ...
     async def screenshot_png(self) -> bytes:
         """Capture a full-page screenshot as PNG bytes."""
