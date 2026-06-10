@@ -1,3 +1,16 @@
+## 0.3.6 (2026-06-10)
+
+### Feat
+
+- optional **humanized CDP pointer input** for clicks (CAS-147). A new dependency-free `input` module generates a realistic cursor trajectory between two points — non-linear (arc) curvature, a minimum-jerk velocity profile, small tremor, and an optional dwell — emitted purely as `Input.dispatchMouseEvent` `MouseMoved` steps (no page-world JS). Path generation is deterministic under a seeded SplitMix64 RNG (unit-tested exactly); the live path seeds from wall-clock entropy. New `Page`/`PooledTab` methods `move_mouse(x, y, humanize=False)` and `click_xy(x, y, humanize=False)`, plus a `humanize` flag on `click_by_role` (resolves the element to its box-model centre and uses a trusted compositor click instead of an untrusted DOM `.click()`) and on `click_ax_in_frame`. The MCP `click_visual_coords` and `click_by_role` tools gain a `humanize` option (off by default; default behavior unchanged). Movement length/duration scale with distance and stay bounded for agent workflows. Not yet added: the `tab.mouse.*` namespace sugar.
+- frame-scoped, shadow-piercing accessibility locator: `Page::click_ax_in_frame(frame_url_pattern, role, name, nth)` and `Page::ax_outline_in_frame(frame_url_pattern, depth)` (both on `Page` + `PooledTab` in PyO3). Roots `Accessibility.getFullAXTree` at a resolved (possibly cross-origin) frame — the AX tree is browser-computed and ignores shadow-DOM mode, so it **descends into closed shadow roots** that page JS (`element.shadowRoot` is `null`) and `eval_js_in_frame` cannot read. `click_ax_in_frame` resolves the matched node's `backendDOMNodeId` → `DOM.getBoxModel` → a **trusted compositor `Input.dispatchMouseEvent`** at the box centre (not a DOM `.click()`, which challenge widgets reject as untrusted). This drives **Cloudflare Turnstile's "Verify you are human" checkbox**, which lives in a closed shadow root inside a cross-origin `challenges.cloudflare.com` iframe — without the `attachShadow` force-open patch that trips Turnstile's closed-shadow tamper check (ERROR 600010). Same in-process requirement as `eval_js_in_frame`: cross-origin google.com / cloudflare frames need `extra_args=["disable-site-isolation-trials"]`. An empty `name` matches any node of that `role`.
+
+## 0.3.5 (2026-06-09)
+
+### Feat
+
+- cross-origin iframe JS eval: `Page::evaluate_js_in_frame(frame_url_pattern, expression)` (alias `eval_js_in_frame`) + `Page::frame_urls()`, on `Page` + `PooledTab` (PyO3) and as the `eval_js_in_frame` MCP tool. Runs JS inside a specific (possibly cross-origin) iframe's own CDP execution context, where `document` is that frame's document and the same-origin `contentDocument`-is-null restriction does not apply — the way to read or drive reCAPTCHA's bframe, payment iframes, OAuth frames, and consent walls on real third-party sites. Cross-origin frames must stay in-process; ordinary cross-origin frames are covered by the default flags, but field-trial-isolated origins (notably google.com) need `extra_args=["disable-site-isolation-trials"]`. `VoidCrawlError::FrameNotFound` / `AmbiguousFrame` surface as MCP `invalid_params`. Example: `examples/cross_origin_iframe_eval.py`.
+
 ## 0.3.4 (2026-06-04)
 
 ### Feat

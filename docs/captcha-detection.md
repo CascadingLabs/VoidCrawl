@@ -20,7 +20,12 @@
 ## Known gaps
 
 - **Visual-only challenges** (image puzzles without DOM markers) are missed.
-- **Shadow-root captchas**: the probe doesn't pierce closed shadow roots.
+- **Shadow-root captchas**: this DOM *probe* doesn't pierce closed shadow roots.
+  To *interact* with a widget that lives in one (e.g. Cloudflare Turnstile's
+  checkbox in a closed shadow root inside a cross-origin frame), use the
+  accessibility-tree locators — `ax_outline_in_frame` / `ax_box_in_frame` /
+  `click_ax_in_frame` — which the browser-computed AX tree lets descend into
+  closed roots. See [cross-origin-frames.md](cross-origin-frames.md).
 - **Delayed injection**: if the challenge renders after DOM ready, `detect_captcha` must be called *after* the page settles (use `wait_for_network_idle` first).
 - **DataDome**: some deployments use rotating class names; we only catch the ID-based fingerprint.
 

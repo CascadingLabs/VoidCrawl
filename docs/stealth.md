@@ -53,7 +53,12 @@ consistent*.
 > reports `false` — `undefined` is the tell). Force-opening shadow DOMs broke
 > **Cloudflare Turnstile**, which renders its challenge in a *closed* shadow
 > root and tamper-checks it: forcing it open failed the challenge with
-> `ERROR 600010`. We inject **zero** page-world JS today.
+> `ERROR 600010`. We inject **zero** page-world JS today. To *reach into* a
+> closed shadow root without tampering, use the AX-tree locators
+> (`ax_box_in_frame` / `click_ax_in_frame`) — the browser-computed accessibility
+> tree descends into closed roots, so a trusted compositor click can drive the
+> widget with no shadow patch. See
+> [cross-origin-frames.md](cross-origin-frames.md).
 
 ## The automation signal is in the launch flags
 
@@ -139,7 +144,7 @@ We inject **no** page-world JS, and we leave these alone:
 | `navigator.userAgent` | We use the real UA (Headless stripped) — no version mismatch. |
 | WebGL vendor/renderer | The real GPU string (once hardware-accelerated) beats any fake. |
 | `window.chrome.runtime`, `navigator.permissions`, canvas | Default behavior is already correct; spoofing adds detectable noise. |
-| Shadow DOM mode | We do **not** force-open it (it broke Turnstile). Interacting with a challenge widget works via real compositor clicks at pixel coordinates regardless of shadow mode. |
+| Shadow DOM mode | We do **not** force-open it (it broke Turnstile). Interacting with a challenge widget works via real compositor clicks at pixel coordinates regardless of shadow mode — locate the target inside a closed root with `ax_box_in_frame` / `click_ax_in_frame` (see [cross-origin-frames.md](cross-origin-frames.md)). |
 
 ## Headful vs headless (and managed Turnstile)
 

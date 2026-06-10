@@ -109,6 +109,14 @@ follow-up; it must square `datadome → rotate` with the existing
 [profile policy](profiles.md), and should jitter / vary its escalation so the
 block→retry reaction is not itself a fingerprint.
 
+Once a Cloudflare Turnstile widget actually renders, its "Verify you are human"
+checkbox lives in a **closed shadow root inside a cross-origin
+`challenges.cloudflare.com` iframe** — unreachable by page JS. Drive it with the
+accessibility-tree locator (`ax_box_in_frame` / `click_ax_in_frame`) and a
+trusted compositor click; a centred click mints the `cf-turnstile-response`
+token without any shadow tampering. See
+[cross-origin-frames.md](cross-origin-frames.md).
+
 ## Fixtures & health
 
 - **`fortress.theplumber.dev`** — live anti-bot benchmark. Currently a

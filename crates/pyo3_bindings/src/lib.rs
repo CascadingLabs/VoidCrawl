@@ -882,15 +882,110 @@ impl PyPage {
     /// Click the ``nth`` element (0-based) matching accessibility ``role`` and
     /// accessible ``name`` — the markup-independent analogue of
     /// ``click_element``. Raises if no such node exists.
-    #[pyo3(signature = (role, name, nth=0))]
+    #[pyo3(signature = (role, name, nth=0, humanize=false))]
     fn click_by_role<'py>(
         &self,
         py: Python<'py>,
         role: String,
         name: String,
         nth: usize,
+        humanize: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        with_page!(self, py, |page| page.click_by_role(&role, &name, nth))
+        with_page!(self, py, |page| page.click_by_role(&role, &name, nth, humanize))
+    }
+
+    /// Move the virtual cursor to ``(x, y)``. With ``humanize=True`` it travels
+    /// a realistic curved, min-jerk, lightly-tremored path (multiple CDP
+    /// MouseMoved events) from its last position; otherwise it jumps. No
+    /// page-world JS.
+    #[pyo3(signature = (x, y, humanize=false))]
+    fn move_mouse<'py>(
+        &self,
+        py: Python<'py>,
+        x: f64,
+        y: f64,
+        humanize: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_page!(self, py, |page| page.move_mouse(x, y, humanize))
+    }
+
+    /// Click at ``(x, y)`` with a trusted compositor event (press → release).
+    /// With ``humanize=True`` the cursor first travels a human-like path there.
+    #[pyo3(signature = (x, y, humanize=false))]
+    fn click_xy<'py>(
+        &self,
+        py: Python<'py>,
+        x: f64,
+        y: f64,
+        humanize: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_page!(self, py, |page| page.click_xy(x, y, humanize))
+    }
+
+    /// Click an element by accessibility ``role`` + accessible ``name``
+    /// **inside a specific (possibly cross-origin) frame**, with a real
+    /// compositor click. The cross-frame, shadow-piercing analogue of
+    /// :meth:`click_by_role` — reaches widgets in closed shadow roots inside
+    /// cross-origin iframes (e.g. Cloudflare Turnstile's checkbox). With
+    /// ``humanize=True`` the cursor travels a human-like path to the checkbox.
+    /// Empty ``name`` matches any node of that role. Raises if no such node
+    /// exists.
+    #[pyo3(signature = (frame_url_pattern, role, name, nth=0, humanize=false))]
+    fn click_ax_in_frame<'py>(
+        &self,
+        py: Python<'py>,
+        frame_url_pattern: String,
+        role: String,
+        name: String,
+        nth: usize,
+        humanize: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_page!(self, py, |page| page.click_ax_in_frame(
+            &frame_url_pattern,
+            &role,
+            &name,
+            nth,
+            humanize
+        ))
+    }
+
+    /// Locate an element by accessibility ``role`` + ``name`` inside a specific
+    /// (possibly cross-origin) frame and return its on-page rectangle
+    /// ``[x, y, width, height]`` in CSS pixels — the geometry for driving a
+    /// **humanized** click yourself (curved approach via
+    /// :meth:`dispatch_mouse_event`, press at a jittered point) instead of
+    /// the centre click of :meth:`click_ax_in_frame`. Pierces closed shadow
+    /// roots. Empty ``name`` matches any node of that role.
+    #[pyo3(signature = (frame_url_pattern, role, name, nth=0))]
+    fn ax_box_in_frame<'py>(
+        &self,
+        py: Python<'py>,
+        frame_url_pattern: String,
+        role: String,
+        name: String,
+        nth: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_page_map!(
+            self,
+            py,
+            |page| page.ax_box_in_frame(&frame_url_pattern, &role, &name, nth),
+            |rect| PyJsonValue(serde_json::Value::from(rect))
+        )
+    }
+
+    /// Compact accessibility outline of a specific (possibly cross-origin)
+    /// frame — pierces closed shadow roots. Use it to discover the role /
+    /// accessible name for :meth:`click_ax_in_frame`.
+    #[pyo3(signature = (frame_url_pattern, depth=None))]
+    fn ax_outline_in_frame<'py>(
+        &self,
+        py: Python<'py>,
+        frame_url_pattern: String,
+        depth: Option<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_page_map!(self, py, |page| page.ax_outline_in_frame(&frame_url_pattern, depth), |s| {
+            PyJsonValue(serde_json::Value::from(s))
+        })
     }
 
     /// Override geolocation (and grant the permission). `accuracy` defaults
@@ -1622,15 +1717,106 @@ impl PyPooledTab {
     /// Click the ``nth`` element (0-based) matching accessibility ``role`` and
     /// accessible ``name`` — the markup-independent analogue of
     /// ``click_element``. Raises if no such node exists.
-    #[pyo3(signature = (role, name, nth=0))]
+    #[pyo3(signature = (role, name, nth=0, humanize=false))]
     fn click_by_role<'py>(
         &self,
         py: Python<'py>,
         role: String,
         name: String,
         nth: usize,
+        humanize: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        with_pooled_page!(self, py, |page| page.click_by_role(&role, &name, nth))
+        with_pooled_page!(self, py, |page| page.click_by_role(&role, &name, nth, humanize))
+    }
+
+    /// Move the virtual cursor to ``(x, y)``; ``humanize=True`` for a
+    /// human-like curved path (multiple CDP MouseMoved events). No
+    /// page-world JS.
+    #[pyo3(signature = (x, y, humanize=false))]
+    fn move_mouse<'py>(
+        &self,
+        py: Python<'py>,
+        x: f64,
+        y: f64,
+        humanize: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page!(self, py, |page| page.move_mouse(x, y, humanize))
+    }
+
+    /// Click at ``(x, y)`` with a trusted compositor event; ``humanize=True``
+    /// first travels a human-like path there.
+    #[pyo3(signature = (x, y, humanize=false))]
+    fn click_xy<'py>(
+        &self,
+        py: Python<'py>,
+        x: f64,
+        y: f64,
+        humanize: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page!(self, py, |page| page.click_xy(x, y, humanize))
+    }
+
+    /// Click an element by accessibility ``role`` + accessible ``name``
+    /// **inside a specific (possibly cross-origin) frame**, with a real
+    /// compositor click — the cross-frame, shadow-piercing analogue of
+    /// :meth:`click_by_role` (e.g. Cloudflare Turnstile's checkbox in a closed
+    /// shadow root). Empty ``name`` matches any node of that role.
+    #[pyo3(signature = (frame_url_pattern, role, name, nth=0, humanize=false))]
+    fn click_ax_in_frame<'py>(
+        &self,
+        py: Python<'py>,
+        frame_url_pattern: String,
+        role: String,
+        name: String,
+        nth: usize,
+        humanize: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page!(self, py, |page| page.click_ax_in_frame(
+            &frame_url_pattern,
+            &role,
+            &name,
+            nth,
+            humanize
+        ))
+    }
+
+    /// Locate an element by accessibility ``role`` + ``name`` inside a specific
+    /// frame and return its on-page rectangle ``[x, y, width, height]`` — the
+    /// geometry for a humanized click (see :meth:`click_ax_in_frame`). Pierces
+    /// closed shadow roots. Empty ``name`` matches any node of that role.
+    #[pyo3(signature = (frame_url_pattern, role, name, nth=0))]
+    fn ax_box_in_frame<'py>(
+        &self,
+        py: Python<'py>,
+        frame_url_pattern: String,
+        role: String,
+        name: String,
+        nth: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page_map!(
+            self,
+            py,
+            |page| page.ax_box_in_frame(&frame_url_pattern, &role, &name, nth),
+            |rect| PyJsonValue(serde_json::Value::from(rect))
+        )
+    }
+
+    /// Compact accessibility outline of a specific (possibly cross-origin)
+    /// frame — pierces closed shadow roots; discover roles/names for
+    /// :meth:`click_ax_in_frame`.
+    #[pyo3(signature = (frame_url_pattern, depth=None))]
+    fn ax_outline_in_frame<'py>(
+        &self,
+        py: Python<'py>,
+        frame_url_pattern: String,
+        depth: Option<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page_map!(
+            self,
+            py,
+            |page| page.ax_outline_in_frame(&frame_url_pattern, depth),
+            |s| PyJsonValue(serde_json::Value::from(s))
+        )
     }
 
     /// Override geolocation (and grant the permission). `accuracy` defaults
