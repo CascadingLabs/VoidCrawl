@@ -2,7 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs,
+    fs, future,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
@@ -28,8 +28,8 @@ use chromiumoxide::{
                 DispatchMouseEventType, MouseButton,
             },
             network::{
-                Cookie, CookieParam, DeleteCookiesParams, EventResponseReceived, Headers,
-                ResourceType, SetExtraHttpHeadersParams,
+                Cookie, CookieParam, DeleteCookiesParams, EventRequestWillBeSent,
+                EventResponseReceived, Headers, ResourceType, SetExtraHttpHeadersParams,
             },
             page::{
                 AddScriptToEvaluateOnNewDocumentParams, CaptureScreenshotFormat,
@@ -60,23 +60,212 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct PageResponse {
     /// Outer HTML of `<html>` after the page reached network idle.
-    pub html:        String,
+    pub html: String,
     /// Final URL after any redirects.
-    pub url:         String,
+    pub url: String,
     /// HTTP status code of the last response in the navigation chain.
     pub status_code: Option<u16>,
     /// `true` when at least one HTTP redirect occurred before the final URL.
-    pub redirected:  bool,
+    pub redirected: bool,
     /// Response headers of the final Document response (`name`, `value`),
     /// lowercased names, in arrival order. Empty when no network response was
     /// captured (cache/service-worker/`file://`). Feeds anti-bot fingerprinting
     /// and replay-grade provenance (`cf-ray`, `x-cache`, …).
-    pub headers:     Vec<(String, String)>,
+    pub headers: Vec<(String, String)>,
     /// Signature-based anti-bot / CDN vendor fingerprint of the final response,
     /// computed from `status_code` + `headers` + `html`. `None` when no
     /// network response was captured. Non-fatal: presence is a routing hint,
     /// `challenged` means an active wall — see [`crate::antibot`].
-    pub antibot:     Option<AntibotVerdict>,
+    pub antibot: Option<AntibotVerdict>,
+    /// Data-plane network endpoints (XHR + Fetch request URLs) observed during
+    /// navigation — a sorted, deduplicated set of `scheme://host[:port]/path`
+    /// strings with query/fragment/userinfo stripped and secret-like path
+    /// segments redacted at the source (a replay-grade archive must never
+    /// persist a token; see [`safe_endpoint`] and
+    /// `ENDPOINT_SANITIZER_VERSION`). `None` when capture was not requested
+    /// (opt-in); `Some(empty)` when requested but the page made no
+    /// XHR/fetch calls. The *consumer* templatizes id-bearing path segments
+    /// — this stays a generic, faithful observation.
+    pub endpoints: Option<Vec<String>>,
+    /// `true` when the captured endpoint set hit its cap and further endpoints
+    /// were dropped — so a consumer can tell "made few calls" from "we stopped
+    /// counting". Always `false` when `endpoints` is `None`.
+    pub endpoints_truncated: bool,
+    /// The [`ENDPOINT_SANITIZER_VERSION`] the `endpoints` were redacted under,
+    /// so a long-term archive can reproduce/audit exactly which rules produced
+    /// the set (mirrors `AntibotVerdict::corpus_version`). `None` iff
+    /// `endpoints` is `None` (capture was not requested).
+    pub endpoint_sanitizer_version: Option<&'static str>,
+}
+
+/// Version of the endpoint-sanitization rules ([`safe_endpoint`]). Bump on any
+/// change to the redaction patterns so a captured set is reproducible/auditable
+/// at replay time — mirrors `antibot::CORPUS_VERSION`.
+pub const ENDPOINT_SANITIZER_VERSION: &str = "ep-2026.06.06";
+
+/// Largest distinct-endpoint set kept per navigation; past this, capture stops
+/// and `PageResponse::endpoints_truncated` is set. Bounds memory on chatty
+/// SPAs.
+const MAX_ENDPOINTS: usize = 256;
+
+/// Reduce a raw request URL to a `scheme://host[:port]/path` key with secrets
+/// removed, or `None` if it must not be archived at all.
+///
+/// A replay-grade archive cannot retroactively un-persist a secret, so this
+/// strips at the source — BEFORE the string is ever stored — and is
+/// **redact-by-default** on the path (deny-unknown, not allow-unknown):
+///   * query string + fragment removed (where tokens/PII/cache-busters live),
+///   * userinfo (`user:pass@`) removed,
+///   * non-`http(s)` schemes and loopback/private/CGNAT/`.local` hosts dropped
+///     entirely (an operator-environment leak, not page signal),
+///   * a path segment is KEPT only when it is clearly a short, low-entropy
+///     template token ([`is_safe_segment`]); ANYTHING else — long blobs
+///     (JWT/signed-URL/hash), kv/matrix markers (`;`/`=`/`%`), emails, long
+///     digit runs — becomes `:redacted`.
+///
+/// This is a best-effort *security* filter, not a proof: a short high-entropy
+/// secret can still resemble a word. It deliberately does NOT templatize
+/// ordinary id segments (`/users/123/` keeps `123`) — that semantic
+/// normalization is the *consumer's* fingerprint concern; this function's job
+/// is only to keep secrets out while staying a faithful, generic observation.
+pub fn safe_endpoint(raw_url: &str) -> Option<String> {
+    // Cut everything from the first `?` or `#` — query and fragment never enter.
+    let head = raw_url.split(['?', '#']).next().unwrap_or("");
+
+    let (scheme, rest) = head.split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+
+    // Authority is everything up to the first `/`; the rest is the path.
+    let (authority, path) = match rest.split_once('/') {
+        Some((a, p)) => (a, format!("/{p}")),
+        None => (rest, String::new()),
+    };
+    // Drop userinfo (`user:pass@host`) — embedded credentials — then lowercase
+    // the host:port ONCE (the single source of truth for both the local-host
+    // guard and the emitted key).
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp).to_ascii_lowercase();
+    let host = bare_host(&host_port);
+    if host.is_empty() || is_local_host(host) {
+        return None;
+    }
+
+    let safe_path: String = path
+        .split('/')
+        .map(|seg| if is_safe_segment(seg) { seg } else { ":redacted" })
+        .collect::<Vec<_>>()
+        .join("/");
+
+    Some(format!("{scheme}://{host_port}{safe_path}"))
+}
+
+/// The bare host from a (already-lowercased) `host[:port]` authority, handling
+/// the bracketed IPv6 form `[::1]:9000` → `::1` (a plain `split(':')` would
+/// return `"["` and let loopback IPv6 slip past [`is_local_host`]).
+fn bare_host(host_port: &str) -> &str {
+    if let Some(after) = host_port.strip_prefix('[') {
+        return after.split(']').next().unwrap_or("");
+    }
+    host_port.split(':').next().unwrap_or("")
+}
+
+/// Loopback / private / CGNAT / link-local / mDNS hosts — never archive these
+/// (they describe the crawl operator's machine/network, not the page). `host`
+/// is the bare, lowercased host (no brackets, no port).
+fn is_local_host(host: &str) -> bool {
+    // IPv6 loopback / unspecified / link-local / unique-local (fc00::/7).
+    if host == "::1"
+        || host == "::"
+        || host.starts_with("fe80:")
+        || host.starts_with("fc")
+        || host.starts_with("fd")
+    {
+        return true;
+    }
+    // mDNS `*.local` (compare the final label, not via ends_with — that trips
+    // clippy's file-extension lint and would also match a bare "local").
+    let mdns_local = host.rsplit_once('.').is_some_and(|(_, tld)| tld == "local");
+    if host == "localhost" || host == "0.0.0.0" || mdns_local {
+        return true;
+    }
+    if host.starts_with("127.")
+        || host.starts_with("10.")
+        || host.starts_with("192.168.")
+        || host.starts_with("169.254.")
+    {
+        return true;
+    }
+    // RFC-1918 172.16.0.0/12 and RFC-6598 CGNAT 100.64.0.0/10.
+    let second_octet = |s: &str| s.split('.').nth(1).and_then(|o| o.parse::<u8>().ok());
+    if host.starts_with("172.") {
+        return second_octet(host).is_some_and(|o| (16..=31).contains(&o));
+    }
+    if host.starts_with("100.") {
+        return second_octet(host).is_some_and(|o| (64..=127).contains(&o));
+    }
+    false
+}
+
+/// True when a path segment is clearly a SAFE template token worth keeping —
+/// the allow-list half of the redact-by-default policy. Conservative: anything
+/// that isn't obviously a short, low-entropy lexical/id token is redacted.
+///
+/// Keeps: `finance`, `quoteSummary`, `v10`, `users`, `123`, `AAPL` (the
+/// consumer templatizes ordinary ids). Redacts: JWTs/signed-URLs/hashes (long
+/// or high-entropy), emails / kv / matrix params (`@`/`=`/`;`/`%`), and long
+/// digit runs (card/SSN/phone).
+fn is_safe_segment(seg: &str) -> bool {
+    // Empty (a `//` or trailing `/`) is structure, not content — keep it.
+    if seg.is_empty() {
+        return true;
+    }
+    // Any kv / matrix / userinfo / percent-encoding marker → not a plain token.
+    if seg.contains(['@', '=', ';', '%', ':']) {
+        return false;
+    }
+    // Only ordinary url-path token characters.
+    if !seg.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~')) {
+        return false;
+    }
+    // Long segments are tokens/blobs, not template words (`recommendations` is 15).
+    if seg.len() > 15 {
+        return false;
+    }
+    let digits = seg.chars().filter(char::is_ascii_digit).count();
+    // 9+ digits → SSN / card / phone range (ordinary numeric ids are shorter).
+    if digits >= 9 {
+        return false;
+    }
+    // A 12+ char all-hex blob is a hash/token, never a word.
+    if seg.len() >= 12 && seg.chars().all(|c| c.is_ascii_hexdigit()) {
+        return false;
+    }
+    // A 12+ char segment spanning 3 character classes (lower AND upper AND
+    // digit) is an opaque mixed-case token, not a template word — `oAuth2…`-
+    // style names are rare in paths and over-redacting them is the safe trade.
+    if seg.len() >= 12 {
+        let has_lower = seg.chars().any(|c| c.is_ascii_lowercase());
+        let has_upper = seg.chars().any(|c| c.is_ascii_uppercase());
+        let has_digit = seg.chars().any(|c| c.is_ascii_digit());
+        if has_lower && has_upper && has_digit {
+            return false;
+        }
+    }
+    true
+}
+
+/// Turn the in-loop deduped endpoint set into the final field value: `None`
+/// when capture was off, else a SORTED `Vec` (a stable set — arrival order is a
+/// session/timing tell, and the consumer set-ifies anyway).
+fn finalize_endpoints(seen: &HashSet<String>, capture: bool) -> Option<Vec<String>> {
+    if !capture {
+        return None;
+    }
+    let mut v: Vec<String> = seen.iter().cloned().collect();
+    v.sort();
+    Some(v)
 }
 
 /// Flatten CDP's `Network.Response.headers` (a JSON object of name → string
@@ -324,7 +513,30 @@ impl Page {
         url: &str,
         timeout: Duration,
     ) -> Result<PageResponse> {
-        // Subscribe to BOTH event streams BEFORE navigation so no events slip
+        self.goto_and_wait_for_idle_with_capture(url, timeout, false).await
+    }
+
+    /// Like [`Page::goto_and_wait_for_idle`], but when `capture_endpoints` is
+    /// `true` also records the page's data-plane network endpoint set (XHR +
+    /// Fetch request URLs) onto [`PageResponse::endpoints`].
+    ///
+    /// Capture is **opt-in** so the default fetch path pays no extra cost: the
+    /// `Network.requestWillBeSent` listener is only subscribed when requested.
+    /// It is passive (listen-only — no request interception, invisible to the
+    /// site) and the endpoints are PII-stripped at the source via
+    /// [`safe_endpoint`]. The listener is function-local and dropped on return,
+    /// so nothing leaks across a pooled tab's recycle.
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "a single navigate select-loop reads more clearly inline than split across helpers"
+    )]
+    pub async fn goto_and_wait_for_idle_with_capture(
+        &self,
+        url: &str,
+        timeout: Duration,
+        capture_endpoints: bool,
+    ) -> Result<PageResponse> {
+        // Subscribe to ALL event streams BEFORE navigation so no events slip
         // through the gap between goto() and the listener setup.
         let mut lifecycle = self
             .inner
@@ -338,6 +550,19 @@ impl Page {
             .await
             .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
 
+        // Request listener is gated on the opt-in so the wire/decode cost is
+        // only paid when a caller wants the endpoint set.
+        let mut requests = if capture_endpoints {
+            Some(
+                self.inner
+                    .event_listener::<EventRequestWillBeSent>()
+                    .await
+                    .map_err(|e| VoidCrawlError::PageError(e.to_string()))?,
+            )
+        } else {
+            None
+        };
+
         // Start navigation (non-blocking CDP command)
         self.inner.goto(url).await.map_err(|e| VoidCrawlError::NavigationFailed(e.to_string()))?;
 
@@ -350,6 +575,9 @@ impl Page {
         // Headers of the final (non-redirect) Document response. Overwritten if
         // a later navigation supersedes it, mirroring `status_code`.
         let mut headers: Vec<(String, String)> = Vec::new();
+        // Deduped data-plane endpoint set (only populated when capturing).
+        let mut endpoints: HashSet<String> = HashSet::new();
+        let mut endpoints_truncated = false;
 
         loop {
             tokio::select! {
@@ -391,6 +619,38 @@ impl Page {
                         }
                     }
                 }
+                // Endpoint capture — only polled when capturing (guard ensures
+                // `requests` is Some). Sits BELOW lifecycle so a chatty request
+                // stream can never starve the networkIdle break.
+                //
+                // select! evaluates every branch's future expression even when
+                // its `if` guard is false, so the `None` branch must still yield
+                // a same-typed future that never resolves — pending() parks it
+                // harmlessly (it's unreachable in practice: requests is Some iff
+                // capture_endpoints).
+                maybe_request = async {
+                    match requests.as_mut() {
+                        Some(s) => s.next().await,
+                        None => future::pending().await,
+                    }
+                }, if capture_endpoints => {
+                    if let Some(event) = maybe_request {
+                        if matches!(event.r#type, Some(ResourceType::Xhr | ResourceType::Fetch)) {
+                            if let Some(ep) = safe_endpoint(&event.request.url) {
+                                // A duplicate (already counted) applies no cap
+                                // pressure; only a NEW endpoint past the cap
+                                // flips the truncated flag.
+                                if !endpoints.contains(&ep) {
+                                    if endpoints.len() < MAX_ENDPOINTS {
+                                        endpoints.insert(ep);
+                                    } else {
+                                        endpoints_truncated = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 () = &mut deadline => {
                     if got_almost_idle {
                         break;
@@ -406,6 +666,9 @@ impl Page {
                         redirected: redirect_count > 0,
                         headers,
                         antibot,
+                        endpoints: finalize_endpoints(&endpoints, capture_endpoints),
+                        endpoints_truncated,
+                        endpoint_sanitizer_version: capture_endpoints.then_some(ENDPOINT_SANITIZER_VERSION),
                     });
                 }
             }
@@ -421,6 +684,9 @@ impl Page {
             redirected: redirect_count > 0,
             headers,
             antibot,
+            endpoints: finalize_endpoints(&endpoints, capture_endpoints),
+            endpoints_truncated,
+            endpoint_sanitizer_version: capture_endpoints.then_some(ENDPOINT_SANITIZER_VERSION),
         })
     }
 
@@ -1500,7 +1766,132 @@ mod download_tests {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "test harness")]
 mod tests {
-    use super::{client_hints_for_ua, dehead};
+    use std::collections::HashSet;
+
+    use super::{client_hints_for_ua, dehead, finalize_endpoints, safe_endpoint};
+
+    #[test]
+    fn safe_endpoint_strips_query_and_fragment() {
+        assert_eq!(
+            safe_endpoint("https://api.example.com/v2/search?token=SECRET&q=ada#frag"),
+            Some("https://api.example.com/v2/search".to_string())
+        );
+        // host + scheme lowercased; bare host, no path.
+        assert_eq!(
+            safe_endpoint("HTTPS://API.Example.COM"),
+            Some("https://api.example.com".to_string())
+        );
+        // non-default port is kept (it's infra signature, not a secret).
+        assert_eq!(
+            safe_endpoint("https://api.example.com:8443/v1/quote"),
+            Some("https://api.example.com:8443/v1/quote".to_string())
+        );
+    }
+
+    #[test]
+    fn safe_endpoint_drops_userinfo_and_nonhttp_and_local() {
+        // userinfo (embedded credentials) removed.
+        assert_eq!(
+            safe_endpoint("https://alice:hunter2@host.com/p"),
+            Some("https://host.com/p".to_string())
+        );
+        // non-http(s) schemes are never archived.
+        assert_eq!(safe_endpoint("ws://host.com/socket"), None);
+        assert_eq!(safe_endpoint("data:text/html,hi"), None);
+        // loopback / private / link-local hosts (operator environment) dropped.
+        assert_eq!(safe_endpoint("http://127.0.0.1:9000/api"), None);
+        assert_eq!(safe_endpoint("http://localhost/api"), None);
+        assert_eq!(safe_endpoint("http://192.168.1.5/api"), None);
+        assert_eq!(safe_endpoint("http://172.16.0.9/api"), None);
+        // 172.x outside the private 16-31 band is public — kept.
+        assert!(safe_endpoint("http://172.32.0.1/api").is_some());
+    }
+
+    #[test]
+    fn safe_endpoint_redacts_secret_path_segments() {
+        // JWT-like high-entropy blob.
+        let jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
+        assert_eq!(
+            safe_endpoint(&format!("https://h.com/reset/{jwt}")),
+            Some("https://h.com/reset/:redacted".to_string())
+        );
+        // email PII segment.
+        assert_eq!(
+            safe_endpoint("https://h.com/u/ada@example.com/profile"),
+            Some("https://h.com/u/:redacted/profile".to_string())
+        );
+        // long digit run (card/SSN/phone range).
+        assert_eq!(
+            safe_endpoint("https://h.com/pay/4111111111111111"),
+            Some("https://h.com/pay/:redacted".to_string())
+        );
+        // an ordinary short numeric id is NOT redacted — templatizing is the
+        // consumer's job, not the crawler's.
+        assert_eq!(
+            safe_endpoint("https://h.com/users/123/profile"),
+            Some("https://h.com/users/123/profile".to_string())
+        );
+    }
+
+    #[test]
+    fn safe_endpoint_redacts_by_default_holes() {
+        // Holes a denylist missed; redact-by-default catches them:
+        // a >15-char opaque token (a real key would be kept under the old >=32
+        // rule; a low-entropy stand-in here keeps the secret-scanner happy).
+        assert_eq!(
+            safe_endpoint("https://h.com/v1/keys/tokentokentokentoken"),
+            Some("https://h.com/v1/keys/:redacted".to_string())
+        );
+        // a 16-char all-hex token (2-class, slipped the old digit+alpha gate).
+        assert_eq!(
+            safe_endpoint("https://h.com/t/a1b2c3d4e5f6a7b8"),
+            Some("https://h.com/t/:redacted".to_string())
+        );
+        // matrix-param session id (`;jsessionid=`) — never handled before.
+        assert_eq!(
+            safe_endpoint("https://h.com/store;jsessionid=ABC123/cart"),
+            Some("https://h.com/:redacted/cart".to_string())
+        );
+        // a 12-15 char mixed-case+digit token (under the length/digit/hex caps)
+        // is still an opaque secret → redacted by the 3-character-class rule.
+        assert_eq!(
+            safe_endpoint("https://h.com/s/aB3xK9mP2qR5w"),
+            Some("https://h.com/s/:redacted".to_string())
+        );
+        // template words + a version segment survive (the endpoint skeleton);
+        // path case is preserved (only the host is lowercased).
+        assert_eq!(
+            safe_endpoint("https://q1.finance.yahoo.com/v10/finance/quoteSummary/AAPL"),
+            Some("https://q1.finance.yahoo.com/v10/finance/quoteSummary/AAPL".to_string())
+        );
+    }
+
+    #[test]
+    fn safe_endpoint_handles_ipv6_and_cgnat_local_hosts() {
+        // bracketed IPv6 loopback — `split(':')` would yield "[" and leak it.
+        assert_eq!(safe_endpoint("http://[::1]:9000/api"), None);
+        assert_eq!(safe_endpoint("http://[fe80::1]/api"), None);
+        // CGNAT (RFC-6598) and mDNS .local are operator-network, not the page.
+        assert_eq!(safe_endpoint("http://100.64.0.7/api"), None);
+        assert_eq!(safe_endpoint("http://printer.local/status"), None);
+        // a public IPv6 host is kept (bracket form parsed correctly).
+        assert!(safe_endpoint("http://[2606:4700::1111]/cdn-cgi").is_some());
+    }
+
+    #[test]
+    fn finalize_endpoints_none_when_not_capturing_else_sorted() {
+        let mut seen = HashSet::new();
+        seen.insert("https://b.com/2".to_string());
+        seen.insert("https://a.com/1".to_string());
+        assert_eq!(finalize_endpoints(&seen, false), None);
+        assert_eq!(
+            finalize_endpoints(&seen, true),
+            Some(vec!["https://a.com/1".to_string(), "https://b.com/2".to_string()])
+        );
+        // capturing with nothing seen → Some(empty), distinct from None ("not
+        // captured").
+        assert_eq!(finalize_endpoints(&HashSet::new(), true), Some(vec![]));
+    }
 
     const LINUX_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
     const WIN_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";

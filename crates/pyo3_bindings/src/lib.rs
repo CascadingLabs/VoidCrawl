@@ -207,32 +207,49 @@ impl From<AntibotVerdict> for PyAntibotVerdict {
 ///         names; last value wins on duplicates).
 ///     antibot (AntibotVerdict | None): Anti-bot / CDN vendor fingerprint, or
 ///         ``None`` when no network response was captured.
+///     endpoints (list[str] | None): Data-plane network endpoints (XHR + Fetch
+///         request URLs) — a sorted, deduplicated set of ``scheme://host/path``
+///         with query/fragment/userinfo stripped and secret-like path segments
+///         redacted at the source. ``None`` unless ``capture_endpoints=True``
+///         was passed to ``goto()``; ``[]`` when requested but none were seen.
+///     `endpoints_truncated` (bool): ``True`` when the endpoint set hit its cap
+///         and further endpoints were dropped.
+///     `endpoint_sanitizer_version` (str | None): Which redaction-rule version
+///         produced ``endpoints`` (record it alongside the set for replay-grade
+///         provenance). ``None`` iff ``endpoints`` is ``None``.
 #[pyclass(name = "PageResponse")]
 #[derive(Debug)]
 pub struct PyPageResponse {
     #[pyo3(get)]
-    pub html:        String,
+    pub html: String,
     #[pyo3(get)]
-    pub url:         String,
+    pub url: String,
     #[pyo3(get)]
     pub status_code: Option<u16>,
     #[pyo3(get)]
-    pub redirected:  bool,
+    pub redirected: bool,
     #[pyo3(get)]
-    pub headers:     HashMap<String, String>,
+    pub headers: HashMap<String, String>,
     #[pyo3(get)]
-    pub antibot:     Option<PyAntibotVerdict>,
+    pub antibot: Option<PyAntibotVerdict>,
+    #[pyo3(get)]
+    pub endpoints: Option<Vec<String>>,
+    #[pyo3(get)]
+    pub endpoints_truncated: bool,
+    #[pyo3(get)]
+    pub endpoint_sanitizer_version: Option<String>,
 }
 
 #[pymethods]
 impl PyPageResponse {
     fn __repr__(&self) -> String {
         format!(
-            "PageResponse(url={:?}, status_code={:?}, redirected={}, html_len={})",
+            "PageResponse(url={:?}, status_code={:?}, redirected={}, html_len={}, endpoints={})",
             self.url,
             self.status_code,
             self.redirected,
             self.html.len(),
+            self.endpoints.as_ref().map_or_else(|| "None".to_string(), |e| e.len().to_string()),
         )
     }
 }
@@ -240,12 +257,15 @@ impl PyPageResponse {
 impl From<PageResponse> for PyPageResponse {
     fn from(r: PageResponse) -> Self {
         Self {
-            html:        r.html,
-            url:         r.url,
+            html: r.html,
+            url: r.url,
             status_code: r.status_code,
-            redirected:  r.redirected,
-            headers:     r.headers.into_iter().collect(),
-            antibot:     r.antibot.map(PyAntibotVerdict::from),
+            redirected: r.redirected,
+            headers: r.headers.into_iter().collect(),
+            antibot: r.antibot.map(PyAntibotVerdict::from),
+            endpoints: r.endpoints,
+            endpoints_truncated: r.endpoints_truncated,
+            endpoint_sanitizer_version: r.endpoint_sanitizer_version.map(str::to_string),
         }
     }
 }
@@ -410,6 +430,7 @@ fn parse_key_event_type(s: &str) -> PyResult<DispatchKeyEventType> {
 
 // ── Shared launch logic ─────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn do_launch(
     inner: Arc<Mutex<Option<BrowserSession>>>,
     mode: BrowserMode,
@@ -418,6 +439,7 @@ async fn do_launch(
     proxy: Option<String>,
     chrome_executable: Option<String>,
     extra_args: Vec<String>,
+    user_data_dir: Option<String>,
 ) -> PyResult<()> {
     let stealth =
         if stealth_enabled { StealthConfig::chrome_like() } else { StealthConfig::none() };
@@ -432,6 +454,9 @@ async fn do_launch(
     }
     if let Some(exe) = chrome_executable {
         builder = builder.chrome_executable(exe);
+    }
+    if let Some(dir) = user_data_dir {
+        builder = builder.user_data_dir(dir);
     }
     for arg in extra_args {
         builder = builder.arg(arg);
@@ -536,12 +561,22 @@ impl PyPage {
     /// Returns:
     ///     `PageResponse`: HTML, final URL, HTTP status code, and redirect
     /// flag.
-    #[pyo3(signature = (url, timeout=30.0))]
-    fn goto<'py>(&self, py: Python<'py>, url: String, timeout: f64) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (url, timeout=30.0, capture_endpoints=false))]
+    fn goto<'py>(
+        &self,
+        py: Python<'py>,
+        url: String,
+        timeout: f64,
+        capture_endpoints: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
         with_page_map!(
             self,
             py,
-            |page| page.goto_and_wait_for_idle(&url, Duration::from_secs_f64(timeout)),
+            |page| page.goto_and_wait_for_idle_with_capture(
+                &url,
+                Duration::from_secs_f64(timeout),
+                capture_endpoints
+            ),
             |resp| PyPageResponse::from(resp)
         )
     }
@@ -1035,6 +1070,7 @@ pub struct PyBrowserSession {
     proxy:             Option<String>,
     chrome_executable: Option<String>,
     extra_args:        Vec<String>,
+    user_data_dir:     Option<String>,
 }
 
 impl fmt::Debug for PyBrowserSession {
@@ -1055,8 +1091,10 @@ impl PyBrowserSession {
     ///     proxy: Proxy server URL.
     ///     `chrome_executable`: Path to Chrome/Chromium binary.
     ///     `extra_args`: Additional Chrome command-line arguments.
+    ///     `user_data_dir`: Persistent Chrome user data directory.
     #[new]
-    #[pyo3(signature = (*, headless=true, ws_url=None, stealth=true, no_sandbox=false, proxy=None, chrome_executable=None, extra_args=None))]
+    #[pyo3(signature = (*, headless=true, ws_url=None, stealth=true, no_sandbox=false, proxy=None, chrome_executable=None, extra_args=None, user_data_dir=None))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         headless: bool,
         ws_url: Option<String>,
@@ -1065,6 +1103,7 @@ impl PyBrowserSession {
         proxy: Option<String>,
         chrome_executable: Option<String>,
         extra_args: Option<Vec<String>>,
+        user_data_dir: Option<String>,
     ) -> Self {
         let mode = if let Some(url) = ws_url {
             BrowserMode::RemoteDebug { ws_url: url }
@@ -1082,6 +1121,7 @@ impl PyBrowserSession {
             proxy,
             chrome_executable,
             extra_args: extra_args.unwrap_or_default(),
+            user_data_dir,
         }
     }
 
@@ -1095,6 +1135,7 @@ impl PyBrowserSession {
         let proxy = self.proxy.clone();
         let chrome_executable = self.chrome_executable.clone();
         let extra_args = self.extra_args.clone();
+        let user_data_dir = self.user_data_dir.clone();
 
         future_into_py(py, async move {
             do_launch(
@@ -1105,6 +1146,7 @@ impl PyBrowserSession {
                 proxy,
                 chrome_executable,
                 extra_args,
+                user_data_dir,
             )
             .await
         })
@@ -1161,7 +1203,16 @@ impl PyBrowserSession {
     // ── async context manager ───────────────────────────────────────────
 
     fn __aenter__<'py>(slf: Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let (inner, mode, stealth_enabled, no_sandbox, proxy, chrome_executable, extra_args) = {
+        let (
+            inner,
+            mode,
+            stealth_enabled,
+            no_sandbox,
+            proxy,
+            chrome_executable,
+            extra_args,
+            user_data_dir,
+        ) = {
             let this = slf.borrow();
             (
                 Arc::clone(&this.inner),
@@ -1171,6 +1222,7 @@ impl PyBrowserSession {
                 this.proxy.clone(),
                 this.chrome_executable.clone(),
                 this.extra_args.clone(),
+                this.user_data_dir.clone(),
             )
         };
         let slf_ref = slf.into_any().unbind();
@@ -1184,6 +1236,7 @@ impl PyBrowserSession {
                 proxy,
                 chrome_executable,
                 extra_args,
+                user_data_dir,
             )
             .await?;
             Ok(slf_ref)
@@ -1293,12 +1346,22 @@ impl PyPooledTab {
     /// Faster than calling `navigate()` then `wait_for_network_idle()`
     /// separately because the event listener is set up before navigation
     /// starts.
-    #[pyo3(signature = (url, timeout=30.0))]
-    fn goto<'py>(&self, py: Python<'py>, url: String, timeout: f64) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (url, timeout=30.0, capture_endpoints=false))]
+    fn goto<'py>(
+        &self,
+        py: Python<'py>,
+        url: String,
+        timeout: f64,
+        capture_endpoints: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
         with_pooled_page_map!(
             self,
             py,
-            |page| page.goto_and_wait_for_idle(&url, Duration::from_secs_f64(timeout)),
+            |page| page.goto_and_wait_for_idle_with_capture(
+                &url,
+                Duration::from_secs_f64(timeout),
+                capture_endpoints
+            ),
             |resp| PyPageResponse::from(resp)
         )
     }
@@ -1845,7 +1908,8 @@ impl PyBrowserPool {
     #[classmethod]
     #[pyo3(signature = (
         browsers, tabs_per_browser, tab_max_uses, tab_max_idle_secs, acquire_timeout_secs,
-        auto_evict, headless, no_sandbox, stealth, ws_urls, proxy, chrome_executable, extra_args
+        auto_evict, headless, no_sandbox, stealth, ws_urls, proxy, chrome_executable, extra_args,
+        user_data_dir
     ))]
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::fn_params_excessive_bools)]
@@ -1864,6 +1928,7 @@ impl PyBrowserPool {
         proxy: Option<String>,
         chrome_executable: Option<String>,
         extra_args: Vec<String>,
+        user_data_dir: Option<String>,
     ) -> PyPoolParamsContext {
         PyPoolParamsContext {
             browsers,
@@ -1879,6 +1944,7 @@ impl PyBrowserPool {
             proxy,
             chrome_executable,
             extra_args,
+            user_data_dir,
             pool_slot: Arc::new(Mutex::new(None)),
         }
     }
@@ -1952,6 +2018,7 @@ pub struct PyPoolParamsContext {
     proxy:                Option<String>,
     chrome_executable:    Option<String>,
     extra_args:           Vec<String>,
+    user_data_dir:        Option<String>,
     pool_slot:            Arc<Mutex<Option<Arc<BrowserPool>>>>,
 }
 
@@ -1978,6 +2045,7 @@ impl PyPoolParamsContext {
         let proxy = this.proxy.clone();
         let chrome_executable = this.chrome_executable.clone();
         let extra_args = this.extra_args.clone();
+        let user_data_dir = this.user_data_dir.clone();
         let pool_slot = Arc::clone(&this.pool_slot);
         drop(this);
 
@@ -2002,6 +2070,9 @@ impl PyPoolParamsContext {
                         }
                         if let Some(ref exe) = chrome_executable {
                             builder = builder.chrome_executable(exe.clone());
+                        }
+                        if let Some(ref dir) = user_data_dir {
+                            builder = builder.user_data_dir(dir.clone());
                         }
                         for arg in &extra_args {
                             builder = builder.arg(arg.clone());

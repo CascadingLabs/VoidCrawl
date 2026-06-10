@@ -41,6 +41,16 @@ class PageResponse:
             captured.
         antibot: Anti-bot / CDN vendor fingerprint, or ``None`` when no
             network response was captured.
+        endpoints: Data-plane network endpoints (XHR + Fetch request URLs) —
+            a sorted, deduplicated set of ``scheme://host/path`` with query,
+            fragment, and userinfo stripped and secret-like path segments
+            redacted at the source. ``None`` unless ``capture_endpoints=True``
+            was passed to ``goto``; ``[]`` when requested but none were seen.
+        endpoints_truncated: ``True`` when the endpoint set hit its cap and
+            further endpoints were dropped.
+        endpoint_sanitizer_version: Which redaction-rule version produced
+            ``endpoints`` (record it alongside the set for replay-grade
+            provenance). ``None`` iff ``endpoints`` is ``None``.
     """
 
     html: str
@@ -49,6 +59,9 @@ class PageResponse:
     redirected: bool
     headers: dict[str, str]
     antibot: AntibotVerdict | None
+    endpoints: list[str] | None
+    endpoints_truncated: bool
+    endpoint_sanitizer_version: str | None
 
 class DownloadOutcome:
     """Result of :meth:`Page.download` / :meth:`PooledTab.download`.
@@ -101,7 +114,9 @@ class PooledTab:
 
     use_count: int
 
-    async def goto(self, url: str, timeout: float = 30.0) -> PageResponse:
+    async def goto(
+        self, url: str, timeout: float = 30.0, capture_endpoints: bool = False
+    ) -> PageResponse:
         """Navigate to *url* and wait for network idle in one shot.
 
         Args:
@@ -408,6 +423,7 @@ class BrowserPool:
         proxy: str | None,
         chrome_executable: str | None,
         extra_args: list[str],
+        user_data_dir: str | None,
     ) -> _PoolParamsContext: ...
     async def warmup(self) -> None: ...
     def acquire(self) -> _AcquireContext: ...
@@ -420,7 +436,9 @@ class BrowserPool:
 class Page:
     """A single browser tab created via :meth:`BrowserSession.new_page`."""
 
-    async def goto(self, url: str, timeout: float = 30.0) -> PageResponse:
+    async def goto(
+        self, url: str, timeout: float = 30.0, capture_endpoints: bool = False
+    ) -> PageResponse:
         """Navigate to *url* and wait for network idle in one shot."""
         ...
     async def navigate(self, url: str) -> None:
@@ -661,6 +679,7 @@ class BrowserSession:
         proxy: str | None = None,
         chrome_executable: str | None = None,
         extra_args: list[str] | None = None,
+        user_data_dir: str | None = None,
     ) -> None: ...
     async def launch(self) -> None: ...
     async def new_page(self, url: str) -> Page: ...

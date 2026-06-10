@@ -171,6 +171,8 @@ class BrowserConfig(BaseModel):
         chrome_executable: Path to a custom Chrome/Chromium binary.
             When ``None``, the bundled Chromium discovery is used.
         extra_args: Additional command-line flags forwarded to Chrome.
+        user_data_dir: Persistent Chrome user data directory. Use this for
+            same-profile anti-bot validation and long-lived local sessions.
         ws_url: Connect to an **already-running** Chrome instance via its
             WebSocket debugger URL instead of launching a new one.
         debug: Wrap pages in an interactive step-debugger.  When ``True``,
@@ -206,6 +208,7 @@ class BrowserConfig(BaseModel):
     proxy: str | None = None
     chrome_executable: str | None = None
     extra_args: list[str] = Field(default_factory=list)
+    user_data_dir: str | None = None
     ws_url: str | None = None
     debug: bool = False
     stepping: bool = True
@@ -473,6 +476,7 @@ class BrowserSession:
             proxy=bc.proxy,
             chrome_executable=bc.chrome_executable,
             extra_args=bc.extra_args,
+            user_data_dir=bc.user_data_dir,
             ws_url=bc.ws_url,
         )
         self._inner = await inner.__aenter__()
@@ -580,6 +584,11 @@ class BrowserPool:
     async def __aenter__(self) -> BrowserPool:
         cfg = self._config
         bc = cfg.browser
+        if bc.user_data_dir is not None and (cfg.browsers != 1 or cfg.chrome_ws_urls):
+            raise ValueError(
+                "BrowserConfig.user_data_dir can only be used with a single launched "
+                "browser pool and cannot be combined with chrome_ws_urls"
+            )
         # When connecting to existing Chrome instances, the browser count is
         # determined by the number of URLs, not PoolConfig.browsers.
         effective_browsers = (
@@ -599,6 +608,7 @@ class BrowserPool:
             proxy=bc.proxy,
             chrome_executable=bc.chrome_executable,
             extra_args=bc.extra_args,
+            user_data_dir=bc.user_data_dir,
         )
         self._inner = await ctx.__aenter__()
         return self

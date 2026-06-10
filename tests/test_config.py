@@ -23,6 +23,7 @@ class TestBrowserConfig:
         assert cfg.proxy is None
         assert cfg.chrome_executable is None
         assert cfg.extra_args == []
+        assert cfg.user_data_dir is None
         assert cfg.ws_url is None
         assert cfg.debug is False
         assert cfg.stepping is True
@@ -37,6 +38,7 @@ class TestBrowserConfig:
             proxy="http://proxy:8080",
             chrome_executable="/usr/bin/chromium",
             extra_args=["--disable-extensions"],
+            user_data_dir="/tmp/voidcrawl-profile",
             ws_url="ws://localhost:9222",
             debug=True,
             stepping=False,
@@ -46,6 +48,7 @@ class TestBrowserConfig:
         assert cfg.headless is False
         assert cfg.no_sandbox is True
         assert cfg.proxy == "http://proxy:8080"
+        assert cfg.user_data_dir == "/tmp/voidcrawl-profile"
         assert cfg.ws_url == "ws://localhost:9222"
         assert cfg.debug is True
         assert cfg.stepping is False
@@ -57,6 +60,7 @@ class TestBrowserConfig:
         assert isinstance(d, dict)
         assert "headless" in d
         assert "stealth" in d
+        assert "user_data_dir" in d
 
     def test_extra_args_immutable_default(self) -> None:
         cfg1 = BrowserConfig()
@@ -382,6 +386,24 @@ class TestBrowserPoolConfig:
         pool = BrowserPool(PoolConfig(browsers=2, tabs_per_browser=8))
         assert "browsers=2" in repr(pool)
         assert "tabs_per_browser=8" in repr(pool)
+
+    async def test_user_data_dir_rejects_multi_browser_pool(self) -> None:
+        cfg = PoolConfig(
+            browsers=2,
+            browser=BrowserConfig(user_data_dir="/tmp/voidcrawl-profile"),
+        )
+        with pytest.raises(ValueError, match="user_data_dir"):
+            async with BrowserPool(cfg):
+                pass
+
+    async def test_user_data_dir_rejects_remote_pool(self) -> None:
+        cfg = PoolConfig(
+            chrome_ws_urls=["http://localhost:9222"],
+            browser=BrowserConfig(user_data_dir="/tmp/voidcrawl-profile"),
+        )
+        with pytest.raises(ValueError, match="chrome_ws_urls"):
+            async with BrowserPool(cfg):
+                pass
 
     def test_acquire_not_started_raises(self) -> None:
         pool = BrowserPool(PoolConfig())

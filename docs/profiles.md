@@ -83,7 +83,7 @@ A session can run against either:
   over. Right for authenticated scraping or banking a warm browsing history.
 
 ```python
-from voidcrawl import BrowserSession
+from voidcrawl import BrowserConfig, BrowserSession
 
 # ephemeral (default)
 async with BrowserSession() as s:
@@ -92,11 +92,22 @@ async with BrowserSession() as s:
 # persistent — reuse a dedicated voidcrawl profile dir
 async with BrowserSession() as s:
     page = await s.builder().user_data_dir("~/.config/voidcrawl-acme").new_page(url)
+
+# persistent — declarative, via BrowserConfig
+cfg = BrowserConfig(user_data_dir="~/.config/voidcrawl-acme")
+async with BrowserSession(cfg) as s:
+    ...
 ```
 
 > Pick a directory **dedicated** to voidcrawl. Chrome locks a profile while
 > running, so pointing at your live daily-driver profile while normal Chrome is
 > open fails with a `SingletonLock` conflict.
+
+> `BrowserConfig.user_data_dir` is a single-process profile, so it only applies
+> to a **single launched browser**. A `BrowserPool` rejects it when
+> `browsers != 1` or when `chrome_ws_urls` is set (sharing one locked profile
+> across browsers, or pushing it to a remote Chrome, can't work) — both raise a
+> `ValueError` at start.
 
 ## Profile & proxy rotation (bot-wall hygiene)
 
