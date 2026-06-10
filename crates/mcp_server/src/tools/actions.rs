@@ -171,6 +171,32 @@ pub async fn eval_js(
     Ok(EvalJsResult { value })
 }
 
+#[derive(Debug, Deserialize, JsonSchema, Default)]
+pub struct EvalJsInFrameArgs {
+    pub session_id:        String,
+    /// Substring of the target frame's URL (e.g. "recaptcha/api2/bframe").
+    /// The expression runs inside the first frame whose URL contains this —
+    /// the way to reach a **cross-origin** iframe whose `contentDocument` is
+    /// null from the parent.
+    pub frame_url_pattern: String,
+    /// A JavaScript expression. Runs as the frame's own page script
+    /// (`document` is the frame's document). Its value is returned as JSON.
+    pub expression:        String,
+}
+
+pub async fn eval_js_in_frame(
+    server: &VoidCrawlServer,
+    args: EvalJsInFrameArgs,
+) -> Result<EvalJsResult, ErrorData> {
+    let handle = lookup(server, &args.session_id).await?;
+    let page = handle.page.lock().await;
+    let value = page
+        .evaluate_js_in_frame(&args.frame_url_pattern, &args.expression)
+        .await
+        .map_err(map_err)?;
+    Ok(EvalJsResult { value })
+}
+
 // ── Title ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, JsonSchema, Default)]

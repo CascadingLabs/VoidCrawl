@@ -33,10 +33,10 @@ use chromiumoxide::{
             },
             page::{
                 AddScriptToEvaluateOnNewDocumentParams, CaptureScreenshotFormat,
-                EventLifecycleEvent, PrintToPdfParams, SetBypassCspParams, Viewport,
+                EventLifecycleEvent, FrameId, PrintToPdfParams, SetBypassCspParams, Viewport,
             },
         },
-        js_protocol::runtime::CallFunctionOnParams,
+        js_protocol::runtime::{CallFunctionOnParams, EvaluateParams},
     },
     page::ScreenshotParams,
 };
@@ -823,6 +823,131 @@ impl Page {
             Some(v) => Ok(v.clone()),
             None => Ok(Value::Null),
         }
+    }
+
+    /// Evaluate a JS expression **inside a specific frame's** execution
+    /// context and return the result as a JSON value.
+    ///
+    /// Unlike [`Page::evaluate_js`] — which always runs in the top document —
+    /// this targets the frame whose current URL contains `frame_url_pattern`.
+    /// It is the only way to read or drive a **cross-origin** iframe: that
+    /// frame's `contentDocument` is `null` from the parent under the
+    /// same-origin policy, but CDP can evaluate in the frame's own execution
+    /// context, where the origin check is satisfied. `expression` runs as if
+    /// it were the frame's own page script (`document` is the frame's
+    /// document).
+    ///
+    /// The match must be unique: more than one frame containing
+    /// `frame_url_pattern` returns [`VoidCrawlError::AmbiguousFrame`]; no match
+    /// (or a matched frame with no scriptable execution context — e.g. a
+    /// `sandbox`ed frame without `allow-scripts`, or one not yet loaded)
+    /// returns [`VoidCrawlError::FrameNotFound`].
+    ///
+    /// **In-process requirement.** The target frame must be in the page's
+    /// renderer process for its context to be reachable here. VoidCrawl's
+    /// default flags keep ordinary cross-origin frames in-process, but Chrome
+    /// *field-trial*-isolates a few origins (notably google.com, hence
+    /// reCAPTCHA's bframe) out-of-process regardless; those surface as
+    /// `FrameNotFound`. To reach them, launch the session with
+    /// `extra_args=["disable-site-isolation-trials"]` (an explicit opt-in,
+    /// since it weakens the browser's isolation posture).
+    pub async fn evaluate_js_in_frame(
+        &self,
+        frame_url_pattern: &str,
+        expression: &str,
+    ) -> Result<Value> {
+        let frame_id = self.resolve_frame(frame_url_pattern).await?;
+        let context_id = self
+            .inner
+            .frame_execution_context(frame_id)
+            .await
+            .map_err(|e| VoidCrawlError::JsEvalError(e.to_string()))?
+            .ok_or_else(|| {
+                VoidCrawlError::FrameNotFound(format!(
+                    "{frame_url_pattern:?}: matched frame has no scriptable execution \
+                     context (sandboxed without allow-scripts, or not yet loaded)"
+                ))
+            })?;
+        let params = EvaluateParams::builder()
+            .expression(expression)
+            .context_id(context_id)
+            .return_by_value(true)
+            .await_promise(true)
+            .build()
+            .map_err(VoidCrawlError::JsEvalError)?;
+        // `evaluate_expression` (not `evaluate`) so chromiumoxide does not
+        // overwrite our explicit `context_id` with the top-document context.
+        let result = self
+            .inner
+            .evaluate_expression(params)
+            .await
+            .map_err(|e| VoidCrawlError::JsEvalError(e.to_string()))?;
+        match result.value() {
+            Some(v) => Ok(v.clone()),
+            None => Ok(Value::Null),
+        }
+    }
+
+    /// Resolve the single frame whose URL contains `pattern`.
+    ///
+    /// chromiumoxide's handler already tracks the frame tree and each frame's
+    /// execution context, so this is a cheap lookup with no extra CDP round
+    /// trips beyond reading cached frame URLs.
+    ///
+    /// **Fails closed on ambiguity.** The match must be *unique*: if more than
+    /// one frame's URL contains `pattern`, this returns
+    /// [`VoidCrawlError::AmbiguousFrame`] rather than silently picking one.
+    /// Frame enumeration order is not stable, and a hostile page can embed a
+    /// decoy frame whose URL contains a common substring — so guessing would
+    /// risk running the caller's JS in the wrong (possibly attacker-scripted)
+    /// frame. Use a specific pattern (e.g. `recaptcha/api2/bframe`, not
+    /// `recaptcha`); [`Page::frame_urls`] helps you find one.
+    async fn resolve_frame(&self, pattern: &str) -> Result<FrameId> {
+        let frames =
+            self.inner.frames().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        let mut matched: Vec<(FrameId, String)> = Vec::new();
+        for frame_id in frames {
+            let url = self
+                .inner
+                .frame_url(frame_id.clone())
+                .await
+                .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+            if let Some(url) = url {
+                if url.contains(pattern) {
+                    matched.push((frame_id, url));
+                }
+            }
+        }
+        match matched.len() {
+            0 => Err(VoidCrawlError::FrameNotFound(pattern.to_string())),
+            1 => Ok(matched.swap_remove(0).0),
+            n => {
+                let urls = matched.iter().map(|(_, u)| u.as_str()).collect::<Vec<_>>().join(", ");
+                Err(VoidCrawlError::AmbiguousFrame(format!(
+                    "{pattern:?} matched {n} frames ({urls}); use a more specific substring"
+                )))
+            }
+        }
+    }
+
+    /// List the URLs of every frame currently tracked on this page, in no
+    /// particular order. Useful for discovering the right `frame_url_pattern`
+    /// to pass to [`Page::evaluate_js_in_frame`].
+    pub async fn frame_urls(&self) -> Result<Vec<String>> {
+        let frames =
+            self.inner.frames().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        let mut urls = Vec::with_capacity(frames.len());
+        for frame_id in frames {
+            if let Some(url) = self
+                .inner
+                .frame_url(frame_id)
+                .await
+                .map_err(|e| VoidCrawlError::PageError(e.to_string()))?
+            {
+                urls.push(url);
+            }
+        }
+        Ok(urls)
     }
 
     // ── Screenshots & PDF ───────────────────────────────────────────────

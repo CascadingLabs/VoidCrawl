@@ -192,7 +192,13 @@ class TestNetworkObserverPool:
     async def test_observer_with_pool(self) -> None:
         async with BrowserPool(PoolConfig()) as pool, pool.acquire() as tab:
             resp = await tab.goto("https://qscrape.dev/l2/news")
-            assert resp.status_code == 200
+            # `status_code` is documented as None when the response is served
+            # from disk cache / a service worker or otherwise not captured —
+            # which a recycled pool tab with a warm cache hits intermittently.
+            # This test verifies the observer works with a pooled tab (like its
+            # sibling Session tests, which assert no status); accept the
+            # documented None, but still fail on a real error status.
+            assert resp.status_code in (200, None)
 
             await InstallNetworkObserver().run(tab)
             requests = await CollectNetworkRequests().run(tab)

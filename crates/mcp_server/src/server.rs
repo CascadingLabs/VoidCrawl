@@ -24,9 +24,9 @@ use crate::{
     tools::{
         actions::{
             AxTreeArgs, AxTreeResult, CaptureCaptchaResult, ClickArgs, ClickByRoleArgs,
-            ClickVisualCoordsArgs, DetectCaptchaResult, EvalJsArgs, EvalJsResult, ExtractArgs,
-            ExtractResult, InjectCaptchaTokenArgs, NetworkCaptureResult, OkResult,
-            SessionIdArgs as ActionSessionIdArgs, SolveCaptchaArgs, SolveCaptchaResult,
+            ClickVisualCoordsArgs, DetectCaptchaResult, EvalJsArgs, EvalJsInFrameArgs,
+            EvalJsResult, ExtractArgs, ExtractResult, InjectCaptchaTokenArgs, NetworkCaptureResult,
+            OkResult, SessionIdArgs as ActionSessionIdArgs, SolveCaptchaArgs, SolveCaptchaResult,
             TeleportArgs, TitleResult, TypeTextArgs, WaitIdleArgs,
         },
         download::{
@@ -269,6 +269,21 @@ dispatches keys to whatever currently has focus (pair with click_visual_coords f
         Parameters(args): Parameters<EvalJsArgs>,
     ) -> Result<Json<EvalJsResult>, ErrorData> {
         tools::actions::eval_js(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "eval_js_in_frame",
+        description = "Evaluate a JS expression inside a specific (possibly cross-origin) iframe, \
+                       selected by a substring of its URL. The expression runs in that frame's own \
+                       execution context (`document` is the frame's document) — the way to read or \
+                       drive an iframe whose `contentDocument` is null from the parent. Returns the \
+                       value as JSON."
+    )]
+    pub async fn eval_js_in_frame(
+        &self,
+        Parameters(args): Parameters<EvalJsInFrameArgs>,
+    ) -> Result<Json<EvalJsResult>, ErrorData> {
+        tools::actions::eval_js_in_frame(self, args).await.map(Json)
     }
 
     #[tool(name = "title", description = "Return the current document title of the session.")]
