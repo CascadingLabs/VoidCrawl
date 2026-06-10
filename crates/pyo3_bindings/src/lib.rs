@@ -430,6 +430,7 @@ fn parse_key_event_type(s: &str) -> PyResult<DispatchKeyEventType> {
 
 // ── Shared launch logic ─────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn do_launch(
     inner: Arc<Mutex<Option<BrowserSession>>>,
     mode: BrowserMode,
@@ -1093,6 +1094,7 @@ impl PyBrowserSession {
     ///     `user_data_dir`: Persistent Chrome user data directory.
     #[new]
     #[pyo3(signature = (*, headless=true, ws_url=None, stealth=true, no_sandbox=false, proxy=None, chrome_executable=None, extra_args=None, user_data_dir=None))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         headless: bool,
         ws_url: Option<String>,
