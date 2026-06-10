@@ -122,6 +122,11 @@ class PooledTab:
         Args:
             url: The URL to load.
             timeout: Maximum seconds to wait for network idle.
+            capture_endpoints: When ``True``, record the data-plane network
+                endpoints (XHR + Fetch request URLs) seen during the load
+                and surface them as :attr:`PageResponse.endpoints` —
+                sanitized (query/fragment/userinfo stripped, secret-like
+                path segments redacted), deduplicated, sorted, and capped.
 
         Returns:
             A :class:`PageResponse` with HTML, final URL, status code,
@@ -439,7 +444,15 @@ class Page:
     async def goto(
         self, url: str, timeout: float = 30.0, capture_endpoints: bool = False
     ) -> PageResponse:
-        """Navigate to *url* and wait for network idle in one shot."""
+        """Navigate to *url* and wait for network idle in one shot.
+
+        Args:
+            url: The URL to load.
+            timeout: Maximum seconds to wait for network idle.
+            capture_endpoints: When ``True``, record the data-plane network
+                endpoints (XHR + Fetch request URLs) seen during the load
+                and surface them as :attr:`PageResponse.endpoints`.
+        """
         ...
     async def navigate(self, url: str) -> None:
         """Navigate to *url* without waiting for any load event."""
