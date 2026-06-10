@@ -1,9 +1,19 @@
 # Minimal Sway config for headful Chrome inside a container.
 # No keybindings, decorations, or desktop features needed —
 # this just provides a Wayland compositor for Chrome to render into.
+#
+# One headless output PER Chrome instance (WLR_HEADLESS_OUTPUTS=2).
+# Two fullscreen Chromes on a single output stack: the occluded surface
+# never receives frame callbacks, so its renderer can't produce frames —
+# clicks/screenshots on that browser stall indefinitely (CAS-210).
 
-# Virtual output sized to VNC resolution (set by entrypoint)
-output HEADLESS-1 resolution 1920x1080
+# Virtual outputs sized to VNC resolution (set by entrypoint)
+output HEADLESS-1 resolution 1920x1080 position 0 0
+output HEADLESS-2 resolution 1920x1080 position 1920 0
+
+# Pin one workspace per output
+workspace 1 output HEADLESS-1
+workspace 2 output HEADLESS-2
 
 # No titlebars, no borders — Chrome is the only window
 default_border none
@@ -14,8 +24,12 @@ titlebar_padding 0 0
 # Dark background so VNC shows something sane before Chrome starts
 output * bg #1a1a2e solid_color
 
-# Fullscreen any new window automatically
+# Route each Chrome (app_id set via --class) to its own output,
+# fullscreen; any other window just goes fullscreen wherever it lands.
+for_window [app_id="^chrome-1$"] move workspace number 1, fullscreen enable
+for_window [app_id="^chrome-2$"] move workspace number 2, fullscreen enable
 for_window [app_id=".*"] fullscreen enable
 
 # No idle/screen lock
 exec_always swaymsg output HEADLESS-1 dpms on
+exec_always swaymsg output HEADLESS-2 dpms on

@@ -8,25 +8,31 @@ Run Chrome with a real GUI inside Docker — GPU-accelerated, isolated from your
 ┌─────────────────── Docker container ───────────────────┐
 │                                                        │
 │  Sway (Wayland compositor)                             │
-│    Creates a virtual screen in GPU memory.             │
-│    Chrome draws its windows here — no physical         │
-│    monitor needed. Runs with WLR_BACKENDS=headless     │
-│    so it doesn't try to find a real display.           │
+│    Creates TWO virtual screens in GPU memory — one     │
+│    per Chrome instance. A Chrome occluded by another   │
+│    fullscreen window gets no frame callbacks and its   │
+│    renderer stalls, so each Chrome must own an output. │
+│    Runs with WLR_BACKENDS=headless so it doesn't try   │
+│    to find a real display.                             │
 │                                                        │
-│  Chrome (headful, GPU-accelerated)                     │
-│    Renders pages into Sway's virtual screen using      │
-│    --ozone-platform=wayland. Uses your GPU via         │
-│    /dev/dri passthrough for hardware rendering.        │
-│    Exposes CDP on ports 19222 and 19223.               │
+│  Chrome x2 (headful, GPU-accelerated)                  │
+│    Render pages into their own Sway output using       │
+│    --ozone-platform=wayland (routed by --class).      │
+│    Use your GPU via /dev/dri passthrough.              │
+│    Expose CDP on ports 19222 and 19223.                │
 │                                                        │
-│  wayvnc (VNC server)                                   │
-│    Reads pixels from Sway's virtual screen and         │
-│    streams them to any VNC client on port 5900.        │
-│    Uses --gpu for hardware H.264 encoding.             │
+│  wayvnc x2 (VNC server, one per output)                │
+│    Reads pixels from each virtual screen and streams   │
+│    them on ports 5900 (chrome-1) / 5901 (chrome-2),    │
+│    capped at 30 fps so capture doesn't contend with    │
+│    Chrome rendering. Uses --gpu for hardware encoding. │
 │                                                        │
+│  dbus (system bus)                                     │
+│    Without it every Chrome process stalls on dbus      │
+│    autolaunch attempts.                                │
 └────────────────────────────────────────────────────────┘
          │                              │
-         │ /dev/dri (GPU passthrough)   │ port 5900 (VNC)
+         │ /dev/dri (GPU passthrough)   │ ports 5900/5901 (VNC)
          │ port 19222, 19223 (CDP)      │
          ▼                              ▼
 ┌──── Your host ──────────────────────────────────────────┐
@@ -59,10 +65,18 @@ Once running, you have three things available:
 
 | Port | What | How to use |
 |------|------|------------|
-| `localhost:6080` | **noVNC (browser)** | Open **http://localhost:6080** in any browser to **watch Chrome** |
-| `localhost:5900` | VNC (native) | Or use a VNC client (Remmina, TigerVNC) for lower latency |
+| `localhost:6080` | **noVNC (browser)** | Open **http://localhost:6080** in any browser to **watch Chrome 1** |
+| `localhost:6081` | noVNC (browser) | Same for **Chrome 2** (each browser has its own screen) |
+| `localhost:5900` | VNC (native) | Or use a VNC client (Remmina, TigerVNC) for lower latency — Chrome 1 |
+| `localhost:5901` | VNC (native) | Chrome 2 |
 | `localhost:19222` | CDP | void_crawl connects here to control Chrome browser 1 |
 | `localhost:19223` | CDP | void_crawl connects here to control Chrome browser 2 |
+
+> **All ports bind `127.0.0.1` only.** wayvnc and noVNC stream a live browser
+> that may hold authenticated sessions, with no auth on the wire, so they are
+> not exposed off-box. To watch from another machine, forward the port over
+> SSH rather than opening the bind:
+> `ssh -L 6080:localhost:6080 <host>`, then open `http://localhost:6080` locally.
 
 ## Connecting void_crawl to Docker Chrome
 
