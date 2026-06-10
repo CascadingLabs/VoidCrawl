@@ -57,6 +57,12 @@ impl NetworkManager {
     }
 
     pub fn init_commands(&self) -> CommandChain {
+        // VoidCrawl minimal-stealth mode (CAS-217): skip Network.enable — a CDP tell a
+        // clean browser doesn't send. Trade-off: no network capture / response metadata
+        // / network-idle goto in this mode (nodriver enables no Network domain).
+        if std::env::var_os("VOIDCRAWL_STEALTH_NO_RUNTIME").is_some() {
+            return CommandChain::new(vec![], self.request_timeout);
+        }
         let enable = EnableParams::default();
         let cmds = if self.ignore_httpserrors {
             let ignore = SetIgnoreCertificateErrorsParams::new(true);

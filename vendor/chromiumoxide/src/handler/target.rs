@@ -345,8 +345,17 @@ impl Target {
                 if let Poll::Ready(poll) = cmds.poll(now) {
                     return match poll {
                         None => {
-                            if let Some(isolated_world_cmds) =
-                                self.frame_manager.ensure_isolated_world(UTILITY_WORLD_NAME)
+                            // VoidCrawl minimal-stealth mode (CAS-217): skip the
+                            // isolated-world `addScriptToEvaluateOnNewDocument` — a CDP
+                            // tell. Trade-off: no `evaluate_function` (main-world
+                            // `evaluate_expression` still works) in this mode.
+                            let stealth =
+                                std::env::var_os("VOIDCRAWL_STEALTH_NO_RUNTIME").is_some();
+                            if let Some(isolated_world_cmds) = (!stealth)
+                                .then(|| {
+                                    self.frame_manager.ensure_isolated_world(UTILITY_WORLD_NAME)
+                                })
+                                .flatten()
                             {
                                 *cmds = isolated_world_cmds;
                             } else {
@@ -569,28 +578,35 @@ impl Target {
     }
 
     pub(crate) fn page_init_commands(timeout: Duration) -> CommandChain {
+        // VoidCrawl minimal-stealth mode (CAS-217): a clean CDP browser (nodriver)
+        // auto-passes Cloudflare's Managed Challenge because it enables almost no CDP
+        // domains. `Target.setAutoAttach(waitForDebuggerOnStart)`, `Performance.enable`,
+        // and `Log.enable` are all eager-instrumentation tells. Skip the whole page-init
+        // chain in VOIDCRAWL_STEALTH_NO_RUNTIME mode (we lose child-target/OOPIF
+        // auto-attach, which is fine — cross-origin frame eval is already off in this
+        // mode since it needs Runtime).
+        if std::env::var_os("VOIDCRAWL_STEALTH_NO_RUNTIME").is_some() {
+            return CommandChain::new(vec![], timeout);
+        }
         let attach = SetAutoAttachParams::builder()
             .flatten(true)
             .auto_attach(true)
             .wait_for_debugger_on_start(true)
             .build()
             .unwrap();
-        let mut cmds = vec![(attach.identifier(), serde_json::to_value(attach).unwrap())];
-        // VoidCrawl stealth patch (CAS-147 follow-up): Performance.enable and
-        // Log.enable are eager CDP-instrumentation tells a minimal/manual browser
-        // never sends (nodriver enables neither); they are unnecessary for core
-        // function. Skip them in VOIDCRAWL_STEALTH_NO_RUNTIME mode to narrow the
-        // gap to a clean session for anti-bot challenges.
-        if std::env::var_os("VOIDCRAWL_STEALTH_NO_RUNTIME").is_none() {
-            let enable_performance = performance::EnableParams::default();
-            let enable_log = cdplog::EnableParams::default();
-            cmds.push((
-                enable_performance.identifier(),
-                serde_json::to_value(enable_performance).unwrap(),
-            ));
-            cmds.push((enable_log.identifier(), serde_json::to_value(enable_log).unwrap()));
-        }
-        CommandChain::new(cmds, timeout)
+        let enable_performance = performance::EnableParams::default();
+        let enable_log = cdplog::EnableParams::default();
+        CommandChain::new(
+            vec![
+                (attach.identifier(), serde_json::to_value(attach).unwrap()),
+                (
+                    enable_performance.identifier(),
+                    serde_json::to_value(enable_performance).unwrap(),
+                ),
+                (enable_log.identifier(), serde_json::to_value(enable_log).unwrap()),
+            ],
+            timeout,
+        )
     }
 }
 
