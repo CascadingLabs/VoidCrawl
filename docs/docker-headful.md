@@ -101,6 +101,35 @@ async def main():
 asyncio.run(main())
 ```
 
+## Persistent Chrome profiles
+
+By default each Chrome runs with an **ephemeral** profile in `/tmp` — cookies,
+logins, and Cloudflare clearance are wiped when the container stops.
+
+To **persist** profiles (log in / clear a wall once, then reuse it across
+restarts), set `CHROME_PROFILES_DIR=/profiles`. That points the profiles at the
+`voidcrawl-headful-profiles` Docker volume the compose file already mounts:
+
+```bash
+CHROME_PROFILES_DIR=/profiles ./docker/run-headful.sh -d
+# or compose-native:
+CHROME_PROFILES_DIR=/profiles COMPOSE_PROFILES=amd \
+  docker compose -f docker/docker-compose.headful.yml up -d
+```
+
+Each Chrome gets its own subdir (`chrome-profile-1`, `chrome-profile-2`), so the
+two browsers never contend on the same profile lock. Reset the saved profiles
+(start fresh) with:
+
+```bash
+docker compose -f docker/docker-compose.headful.yml down -v
+```
+
+> A persisted profile keeps a real session — handy for sites behind a login or a
+> one-time human check, and it lets a cleared Cloudflare cookie survive a
+> restart. It also pins one identity; for many isolated identities keep the
+> default ephemeral profiles and rotate per run.
+
 ## Viewing Chrome
 
 ### In your browser (easiest)

@@ -22,6 +22,18 @@ export CDP_PORT_1="${CDP_PORT_1:-${CDP_PORT_BASE}}"
 export CDP_PORT_2="${CDP_PORT_2:-$((CDP_PORT_BASE + 1))}"
 CONF_PATH=/tmp/supervisord-dynamic.conf
 
+# ── Chrome profiles ──────────────────────────────────────────────────────
+# Each Chrome gets its own user-data-dir under CHROME_PROFILES_DIR. Default
+# /tmp (ephemeral — wiped with the container). Set CHROME_PROFILES_DIR=/profiles
+# (a mounted volume) to PERSIST logins, cookies, and Cloudflare clearance
+# across restarts. The static supervisord config reads CHROME_PROFILE_DIR_1/2;
+# the dynamic (scale) config builds its own paths from CHROME_PROFILES_DIR.
+export CHROME_PROFILES_DIR="${CHROME_PROFILES_DIR:-/tmp}"
+export CHROME_PROFILE_DIR_1="${CHROME_PROFILE_DIR_1:-${CHROME_PROFILES_DIR}/chrome-profile-1}"
+export CHROME_PROFILE_DIR_2="${CHROME_PROFILE_DIR_2:-${CHROME_PROFILES_DIR}/chrome-profile-2}"
+mkdir -p "$CHROME_PROFILE_DIR_1" "$CHROME_PROFILE_DIR_2"
+echo "[profiles] base=$CHROME_PROFILES_DIR"
+
 # Fast path: caller set CHROME_WS_URLS (e.g. PoolConfig.from_docker, or the
 # static defaults in docker-compose.yml) → skip scale computation.
 if [[ -n "${CHROME_WS_URLS:-}" ]]; then
@@ -55,6 +67,11 @@ except InsufficientResourcesError as exc:
     sys.exit(1)
 
 report.print_report()
+
+# Create one profile dir per browser (matches generate_supervisord_conf).
+profiles_dir = os.environ.get("CHROME_PROFILES_DIR", "/tmp").rstrip("/") or "/tmp"
+for i in range(report.browsers):
+    os.makedirs(f"{profiles_dir}/chrome-profile-{i + 1}", exist_ok=True)
 
 conf = generate_supervisord_conf(report, base_port=base_port)
 open(conf_path, "w").write(conf)

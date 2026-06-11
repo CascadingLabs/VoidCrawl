@@ -89,7 +89,17 @@ sed -i -E "s/(output HEADLESS-2 .* position )[0-9]+ 0/\1${VNC_WIDTH} 0/" /etc/sw
 # ── 4. Ensure runtime dirs exist ─────────────────────────────────────────
 mkdir -p /tmp/xdg-runtime
 chmod 0700 /tmp/xdg-runtime
-mkdir -p /tmp/chrome-profile-1 /tmp/chrome-profile-2
+
+# Chrome profiles. Each Chrome gets its own user-data-dir under
+# CHROME_PROFILES_DIR. Default /tmp (ephemeral — wiped with the container).
+# Set CHROME_PROFILES_DIR=/profiles (a mounted volume) to PERSIST logins,
+# cookies, and Cloudflare clearance across restarts. supervisord substitutes
+# the exported CHROME_PROFILE_DIR_1/2 into each Chrome's --user-data-dir.
+CHROME_PROFILES_DIR="${CHROME_PROFILES_DIR:-/tmp}"
+export CHROME_PROFILE_DIR_1="${CHROME_PROFILE_DIR_1:-${CHROME_PROFILES_DIR}/chrome-profile-1}"
+export CHROME_PROFILE_DIR_2="${CHROME_PROFILE_DIR_2:-${CHROME_PROFILES_DIR}/chrome-profile-2}"
+mkdir -p "$CHROME_PROFILE_DIR_1" "$CHROME_PROFILE_DIR_2"
+echo "[profiles] base=$CHROME_PROFILES_DIR  chrome-1=$CHROME_PROFILE_DIR_1  chrome-2=$CHROME_PROFILE_DIR_2"
 
 # System dbus for Chrome — without a reachable bus every Chrome process
 # burns time on dbus autolaunch attempts.
