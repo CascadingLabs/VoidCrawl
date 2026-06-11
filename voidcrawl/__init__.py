@@ -175,6 +175,11 @@ class BrowserConfig(BaseModel):
             same-profile anti-bot validation and long-lived local sessions.
         ws_url: Connect to an **already-running** Chrome instance via its
             WebSocket debugger URL instead of launching a new one.
+        port: Pin Chrome's ``--remote-debugging-port`` for a *launched*
+            browser, so another process can attach to it via ``ws_url`` and
+            adopt one of its tabs with
+            :meth:`BrowserSession.attach_page`. ``None`` (default) lets the OS
+            pick a free ephemeral port.
         debug: Wrap pages in an interactive step-debugger.  When ``True``,
             :meth:`BrowserSession.new_page` returns a
             :class:`~voidcrawl.debug.DebugPage` and
@@ -210,6 +215,7 @@ class BrowserConfig(BaseModel):
     extra_args: list[str] = Field(default_factory=list)
     user_data_dir: str | None = None
     ws_url: str | None = None
+    port: int | None = None
     debug: bool = False
     stepping: bool = True
     highlight: bool = True
@@ -478,6 +484,7 @@ class BrowserSession:
             extra_args=bc.extra_args,
             user_data_dir=bc.user_data_dir,
             ws_url=bc.ws_url,
+            port=bc.port,
         )
         self._inner = await inner.__aenter__()
         return self
@@ -520,6 +527,41 @@ class BrowserSession:
                 step_delay=bc.step_delay,
             )
         return page
+
+    async def attach_page(self, target_id: str) -> Page:
+        """Adopt an **existing** tab by its CDP ``target_id``.
+
+        Unlike :meth:`new_page`, this opens no new tab and does not re-apply
+        stealth — it wraps the live tab the browser already has. Use it from a
+        second process attached via :attr:`BrowserConfig.ws_url` to drive the
+        exact tab another driver is on (e.g. to solve a captcha in place, so the
+        minted token lands in that tab). Obtain ``target_id`` from
+        :meth:`Page.target_id` (or from the VoidCrawl MCP ``session_open``
+        result).
+
+        Args:
+            target_id: The CDP target id of the tab to adopt.
+
+        Returns:
+            A :class:`Page` handle bound to the existing tab.
+        """
+        if self._inner is None:
+            raise RuntimeError("BrowserSession not started — use async with")
+        return await self._inner.attach_page(target_id)
+
+    async def websocket_url(self) -> str:
+        """The browser's CDP WebSocket endpoint (``ws://…``).
+
+        Hand this to another process (with a tab's ``target_id``) so it can
+        attach to the *same* Chrome via ``BrowserConfig(ws_url=…)`` and adopt
+        that tab with :meth:`attach_page`.
+
+        Returns:
+            The ``ws://`` debugger URL of the underlying browser.
+        """
+        if self._inner is None:
+            raise RuntimeError("BrowserSession not started — use async with")
+        return await self._inner.websocket_url()
 
     async def version(self) -> str:
         """Return the browser version string (e.g. ``"Chrome/126.0.6478.126"``).

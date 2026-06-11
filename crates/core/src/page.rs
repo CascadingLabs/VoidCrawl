@@ -423,6 +423,16 @@ impl Page {
         self.download_armed.load(Ordering::Relaxed)
     }
 
+    /// The CDP target id of the underlying page, as a string.
+    ///
+    /// Stable across same-tab navigations, so another connection (a second
+    /// process attached to the same Chrome via `ws_url`) can re-adopt this
+    /// exact tab with
+    /// [`BrowserSession::attach_page`](crate::BrowserSession::attach_page).
+    pub fn target_id(&self) -> String {
+        self.inner.target_id().inner().clone()
+    }
+
     /// Apply stealth settings to this page.
     pub(crate) async fn apply_stealth(&self, cfg: &StealthConfig) -> Result<()> {
         // 1. Built-in stealth (patches navigator.webdriver etc.)

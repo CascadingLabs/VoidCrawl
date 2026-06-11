@@ -119,6 +119,7 @@ class BrowserConfig:
     extra_args: list[str]
     user_data_dir: str | None
     ws_url: str | None
+    port: int | None
     debug: bool
     stepping: bool
     highlight: bool
@@ -135,6 +136,7 @@ class BrowserConfig:
         extra_args: list[str] = ...,
         user_data_dir: str | None = None,
         ws_url: str | None = None,
+        port: int | None = None,
         debug: bool = False,
         stepping: bool = True,
         highlight: bool = True,
@@ -197,6 +199,8 @@ class BrowserSession:
         self, exc_type: object, exc_val: object, exc_tb: object
     ) -> bool: ...
     async def new_page(self, url: str) -> Page: ...
+    async def attach_page(self, target_id: str) -> Page: ...
+    async def websocket_url(self) -> str: ...
     async def version(self) -> str: ...
     async def close(self) -> None: ...
 

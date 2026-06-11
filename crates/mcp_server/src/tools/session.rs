@@ -40,11 +40,26 @@ pub struct SessionOpenArgs {
     /// daily-driver profile while normal Chrome is open will fail.
     #[serde(default)]
     pub user_data_dir: Option<String>,
+    /// Pin Chrome's `--remote-debugging-port` so another process can attach to
+    /// this session's browser via the returned `websocket_url` (e.g. the
+    /// OpenSesame solver MCP, to solve a captcha on this exact tab). Omit to
+    /// let the OS pick a free ephemeral port — the `websocket_url` is
+    /// returned either way.
+    #[serde(default)]
+    pub port:          Option<u16>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct SessionOpenResult {
-    pub session_id: String,
+    pub session_id:    String,
+    /// CDP WebSocket endpoint of this session's browser. Hand this together
+    /// with `target_id` to an external solver so it can attach to the *same*
+    /// Chrome and adopt this tab without opening a new one.
+    pub websocket_url: String,
+    /// The pinned remote-debugging port, if one was requested via `port`.
+    pub port:          Option<u16>,
+    /// CDP target id of this session's page — the exact tab to adopt.
+    pub target_id:     String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Default)]
@@ -91,6 +106,9 @@ pub async fn open(
 ) -> Result<SessionOpenResult, ErrorData> {
     let mut builder = BrowserSession::builder();
     builder = if args.headful { builder.headful() } else { builder.headless() };
+    if let Some(p) = args.port {
+        builder = builder.port(p);
+    }
     if let Some(proxy) = args.proxy {
         builder = builder.proxy(proxy);
     }
@@ -99,6 +117,10 @@ pub async fn open(
     }
     let session = builder.launch().await.map_err(map_err)?;
     let page = session.new_blank_page().await.map_err(map_err)?;
+    // Read the attach coordinates before the session/page are moved into the
+    // handle, so callers can hand this exact tab to an external solver.
+    let websocket_url = session.websocket_url().await;
+    let target_id = page.target_id();
     let id = Uuid::new_v4().to_string();
     let handle = Arc::new(DedicatedSession {
         session:          Arc::new(session),
@@ -106,7 +128,7 @@ pub async fn open(
         pending_download: Mutex::new(None),
     });
     server.state().sessions.insert(id.clone(), handle).await;
-    Ok(SessionOpenResult { session_id: id })
+    Ok(SessionOpenResult { session_id: id, websocket_url, port: args.port, target_id })
 }
 
 pub async fn navigate(
