@@ -58,9 +58,9 @@ use crate::{
 /// Wall-clock-derived seed for live humanized pointer paths. Tests seed the
 /// generator explicitly for determinism; production just wants variety.
 fn runtime_seed() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0x1234_5678_9ABC_DEF0, |d| d.as_secs() ^ u64::from(d.subsec_nanos()).rotate_left(32))
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0x1234_5678_9ABC_DEF0, |d| {
+        d.as_secs() ^ u64::from(d.subsec_nanos()).rotate_left(32)
+    })
 }
 
 /// The result of a [`Page::goto_and_wait_for_idle`] call.
@@ -1550,10 +1550,8 @@ impl Page {
             )
             .await?;
         }
-        *self
-            .cursor
-            .lock()
-            .map_err(|_| VoidCrawlError::Other("cursor lock poisoned".into()))? = (x, y);
+        *self.cursor.lock().map_err(|_| VoidCrawlError::Other("cursor lock poisoned".into()))? =
+            (x, y);
         Ok(())
     }
 

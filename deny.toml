@@ -29,8 +29,6 @@ skip = [
     { name = "getrandom" },
     # r-efi: pulled in by getrandom 0.3 and 0.4 at different versions — transitive
     { name = "r-efi" },
-    # reqwest: we pin 0.12; chromiumoxide pulls in 0.13 — unresolvable without upstream change
-    { name = "reqwest" },
     # windows-sys: ring needs 0.52, tokio/tempfile ecosystem needs 0.61 — transitive
     { name = "windows-sys" },
 ]
