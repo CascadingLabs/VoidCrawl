@@ -36,6 +36,20 @@ If the render node's group differs from `render`, set it: the compose uses
 `group_add: ["render"]`; replace with the numeric GID from
 `stat -c '%g' /dev/dri/renderD128` if needed.
 
+### Persistent profiles (optional)
+
+By default the farm's Chromes use ephemeral `/tmp` profiles. To persist cookies,
+logins, and Cloudflare clearance across restarts, set
+`CHROME_PROFILES_DIR=/profiles` — it points the profiles at the
+`voidcrawl-headless-profiles` volume the compose file already mounts:
+
+```bash
+CHROME_PROFILES_DIR=/profiles docker compose -f docker/docker-compose.yml up -d
+# reset the saved profiles: docker compose -f docker/docker-compose.yml down -v
+```
+
+Each browser gets its own subdir (`chrome-profile-1`, `chrome-profile-2`, …).
+
 ## 2. Point the MCP at the farm
 
 In your host MCP config (`.mcp.json` / Claude Code / Codex / opencode), set

@@ -39,3 +39,9 @@ similar_names = "allow"
 doc_lazy_continuation = "allow"
 needless_raw_string_hashes = "allow"
 too_many_lines = "allow"
+
+# Vendored chromiumoxide with VoidCrawl's minimal-CDP stealth patch surface.
+# The fork still launches or attaches to stock Chrome/Chromium; it only changes
+# selected CDP-client behavior when VOIDCRAWL_STEALTH_NO_RUNTIME is set.
+[patch.crates-io]
+chromiumoxide = { path = "vendor/chromiumoxide" }

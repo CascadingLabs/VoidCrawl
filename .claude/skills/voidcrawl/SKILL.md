@@ -187,6 +187,16 @@ happen (visual-only captchas, novel markers). Default agent contract:
   then a cleaner IP via proxy).
 - IP reputation is a separate axis from fingerprint: a flagged/datacenter IP can
   still get challenged even when headful + clean. Lever = residential proxy.
+- **Reaching into cross-origin / closed-shadow frames** (Python/Rust API, not
+  MCP tools): `eval_js_in_frame` (also an MCP tool) runs JS inside a specific
+  iframe's own context to read/drive a cross-origin DOM (reCAPTCHA `bframe`,
+  payment/OAuth iframes); the AX-tree locators `ax_outline_in_frame` /
+  `ax_box_in_frame` / `click_ax_in_frame` go further and **pierce closed shadow
+  roots** the browser-computed AX tree can see but page JS can't — e.g.
+  Cloudflare Turnstile's checkbox in a closed shadow root inside a cross-origin
+  frame. They click with a *trusted compositor* event (no shadow tampering, so
+  no Turnstile `ERROR 600010`). Both need the isolated frame in-process: launch
+  with `extra_args=["disable-site-isolation-trials"]`.
 - `capture_captcha` / `solve_captcha` / `inject_captcha_token` exist for
   pipeline flows that integrate an external solver — not the default path,
   don't reach for them in ordinary scraping.

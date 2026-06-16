@@ -6,6 +6,7 @@ pub mod antibot;
 pub mod ax;
 pub mod captcha;
 pub mod error;
+pub mod input;
 pub mod page;
 pub mod pool;
 pub mod profile;

@@ -4,20 +4,23 @@ use std::{
     collections::{HashMap, HashSet},
     fs, future,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use chromiumoxide::{
     Page as CdpPage,
     cdp::{
         browser_protocol::{
-            accessibility::{AxNode, GetFullAxTreeParams, QueryAxTreeParams},
+            accessibility::{AxNode, AxValue, GetFullAxTreeParams, QueryAxTreeParams},
             browser::{
                 PermissionDescriptor, PermissionSetting, SetDownloadBehaviorBehavior,
                 SetDownloadBehaviorParams, SetPermissionParams,
             },
-            dom::{GetDocumentParams, ResolveNodeParams},
+            dom::{BackendNodeId, GetBoxModelParams, GetDocumentParams, ResolveNodeParams},
             emulation::{
                 SetDeviceMetricsOverrideParams, SetGeolocationOverrideParams,
                 SetLocaleOverrideParams, SetTimezoneOverrideParams, SetUserAgentOverrideParams,
@@ -48,8 +51,17 @@ use crate::{
     antibot::{self, AntibotVerdict},
     ax::compact_outline,
     error::{Result, VoidCrawlError},
+    input::{HumanizeOptions, Rng, humanized_path},
     stealth::StealthConfig,
 };
+
+/// Wall-clock-derived seed for live humanized pointer paths. Tests seed the
+/// generator explicitly for determinism; production just wants variety.
+fn runtime_seed() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0x1234_5678_9ABC_DEF0, |d| {
+        d.as_secs() ^ u64::from(d.subsec_nanos()).rotate_left(32)
+    })
+}
 
 /// The result of a [`Page::goto_and_wait_for_idle`] call.
 ///
@@ -346,7 +358,7 @@ pub struct DownloadOutcome {
 /// # async fn f(page: &void_crawl_core::Page) -> void_crawl_core::Result<()> {
 /// # use std::{path::Path, time::Duration};
 /// let cap = page.arm_download(Path::new("/tmp/dl"), 100 << 20).await?;
-/// page.click_by_role("button", "Download all", 0).await?; // the triggering action
+/// page.click_by_role("button", "Download all", 0, false).await?; // the triggering action
 /// let file = cap.wait(page, Duration::from_secs(120)).await?;
 /// # Ok(()) }
 /// ```
@@ -392,12 +404,15 @@ pub struct Page {
     /// and the matching reset. The pool checks this on release to reset an
     /// abandoned download behavior cheaply (no CDP call on the common path).
     download_armed: AtomicBool,
+    /// Last virtual cursor position (CSS px), so a humanized move starts from
+    /// where the pointer actually is. Defaults to the top-left.
+    cursor:         Mutex<(f64, f64)>,
 }
 
 impl Page {
     /// Wrap an existing CDP page.
     pub(crate) fn new(inner: CdpPage) -> Self {
-        Self { inner, download_armed: AtomicBool::new(false) }
+        Self { inner, download_armed: AtomicBool::new(false), cursor: Mutex::new((0.0, 0.0)) }
     }
 
     /// Whether a download is currently armed on this page (set by
@@ -405,6 +420,16 @@ impl Page {
     /// `reset_download_behavior`).
     pub fn is_download_armed(&self) -> bool {
         self.download_armed.load(Ordering::Relaxed)
+    }
+
+    /// The CDP target id of the underlying page, as a string.
+    ///
+    /// Stable across same-tab navigations, so another connection (a second
+    /// process attached to the same Chrome via `ws_url`) can re-adopt this
+    /// exact tab with
+    /// [`BrowserSession::attach_page`](crate::BrowserSession::attach_page).
+    pub fn target_id(&self) -> String {
+        self.inner.target_id().inner().clone()
     }
 
     /// Apply stealth settings to this page.
@@ -1241,8 +1266,21 @@ impl Page {
     /// match (0-based), bridges to the DOM through `backendDOMNodeId`, then
     /// scrolls it into view and clicks it. Errors if no such node exists.
     ///
+    /// With `humanize = true`, the element is scrolled into view and then
+    /// clicked at its box-model centre with a **trusted compositor** event
+    /// along a human-like cursor path (see [`click_xy`]) — rather than the
+    /// DOM `this.click()` used by default. Untrusted `.click()` is fine for
+    /// ordinary forms but rejected by some challenge widgets.
+    ///
     /// [`click_element`]: Self::click_element
-    pub async fn click_by_role(&self, role: &str, name: &str, nth: usize) -> Result<()> {
+    /// [`click_xy`]: Self::click_xy
+    pub async fn click_by_role(
+        &self,
+        role: &str,
+        name: &str,
+        nth: usize,
+        humanize: bool,
+    ) -> Result<()> {
         let nodes = self.query_ax_nodes(Some(role), Some(name)).await?;
         let backends: Vec<_> =
             nodes.iter().filter(|n| !n.ignored).filter_map(|n| n.backend_dom_node_id).collect();
@@ -1253,10 +1291,8 @@ impl Page {
             ))
         })?;
 
-        // Bridge AX node → DOM → JS handle, then act on it directly. Using the
-        // element's own click() (rather than coordinate dispatch) avoids the
-        // box-model math and survives elements that are off-screen until
-        // scrolled into view.
+        // Bridge AX node → DOM → JS handle. Resolve once; both paths scroll it
+        // into view first.
         let resolved = self
             .inner
             .execute(ResolveNodeParams { backend_node_id: Some(backend_id), ..Default::default() })
@@ -1265,6 +1301,42 @@ impl Page {
         let object_id = resolved.result.object.object_id.ok_or_else(|| {
             VoidCrawlError::PageError("AX node could not be resolved to a DOM handle".into())
         })?;
+
+        if humanize {
+            // Scroll into view, then a trusted compositor click at the box centre.
+            let scroll = CallFunctionOnParams::builder()
+                .object_id(object_id)
+                .function_declaration(
+                    "function(){ this.scrollIntoView({block:'center',inline:'center'}); }",
+                )
+                .await_promise(false)
+                .build()
+                .map_err(VoidCrawlError::PageError)?;
+            self.inner
+                .execute(scroll)
+                .await
+                .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+            let bm = self
+                .inner
+                .execute(GetBoxModelParams {
+                    backend_node_id: Some(backend_id),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+            let q = bm.result.model.content.inner();
+            if q.len() < 8 {
+                return Err(VoidCrawlError::PageError(
+                    "element has no box-model content quad".into(),
+                ));
+            }
+            let cx = (q[0] + q[2] + q[4] + q[6]) / 4.0;
+            let cy = (q[1] + q[3] + q[5] + q[7]) / 4.0;
+            return self.click_xy(cx, cy, true).await;
+        }
+
+        // Default: the element's own click() — avoids box-model math and survives
+        // elements that are off-screen until scrolled into view.
         let call = CallFunctionOnParams::builder()
             .object_id(object_id)
             .function_declaration(
@@ -1274,6 +1346,245 @@ impl Page {
             .build()
             .map_err(VoidCrawlError::PageError)?;
         self.inner.execute(call).await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Compact accessibility outline of a specific (possibly cross-origin)
+    /// **frame** — the cross-frame analogue of [`ax_tree_outline`].
+    ///
+    /// Roots `Accessibility.getFullAXTree` at the frame matched by
+    /// `frame_url_pattern` (resolved like [`evaluate_js_in_frame`]). The AX
+    /// tree is browser-computed and ignores shadow-DOM mode, so this
+    /// **pierces closed shadow roots** the page's own JavaScript cannot
+    /// read — use it to discover the `role` / accessible-name to pass to
+    /// [`click_ax_in_frame`].
+    ///
+    /// [`ax_tree_outline`]: Self::ax_tree_outline
+    /// [`evaluate_js_in_frame`]: Self::evaluate_js_in_frame
+    /// [`click_ax_in_frame`]: Self::click_ax_in_frame
+    pub async fn ax_outline_in_frame(
+        &self,
+        frame_url_pattern: &str,
+        depth: Option<i64>,
+    ) -> Result<String> {
+        let frame_id = self.resolve_frame(frame_url_pattern).await?;
+        let resp = self
+            .inner
+            .execute(GetFullAxTreeParams { depth, frame_id: Some(frame_id) })
+            .await
+            .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        let nodes = serde_json::to_value(&resp.result.nodes)
+            .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        Ok(compact_outline(nodes.as_array().map_or(&[][..], Vec::as_slice)))
+    }
+
+    /// Locate an element by accessibility `role` + accessible `name` **inside a
+    /// specific (possibly cross-origin) frame** and click it with a real
+    /// **compositor** mouse event. The cross-frame, shadow-piercing analogue of
+    /// [`click_by_role`].
+    ///
+    /// `Accessibility.getFullAXTree` rooted at the resolved frame descends into
+    /// that frame's tree **including closed shadow roots** (the AX tree is
+    /// browser-computed and ignores shadow mode), so it reaches widgets that
+    /// `contentDocument` / page-JS cannot — e.g. Cloudflare Turnstile's
+    /// "Verify you are human" checkbox, which lives in a closed shadow root
+    /// inside a cross-origin `challenges.cloudflare.com` iframe. The matched
+    /// node is clicked at its box-model centre via `Input.dispatchMouseEvent`
+    /// (a **trusted** event), *not* a DOM `.click()` — challenge widgets reject
+    /// untrusted clicks, and crucially this does **no page-JS shadow
+    /// tampering**, so it does not trip Turnstile's closed-shadow check
+    /// (ERROR 600010).
+    ///
+    /// An empty `name` matches any node of that `role`. Picks the `nth`
+    /// (0-based) non-ignored match; errors if there is none.
+    ///
+    /// In-process requirement: as with [`evaluate_js_in_frame`], the frame must
+    /// be in the page's renderer process — cross-origin google.com / cloudflare
+    /// frames need the session launched with `disable-site-isolation-trials`.
+    ///
+    /// [`click_by_role`]: Self::click_by_role
+    /// [`evaluate_js_in_frame`]: Self::evaluate_js_in_frame
+    pub async fn click_ax_in_frame(
+        &self,
+        frame_url_pattern: &str,
+        role: &str,
+        name: &str,
+        nth: usize,
+        humanize: bool,
+    ) -> Result<()> {
+        let q = self.ax_content_quad_in_frame(frame_url_pattern, role, name, nth).await?;
+        let cx = (q[0] + q[2] + q[4] + q[6]) / 4.0;
+        let cy = (q[1] + q[3] + q[5] + q[7]) / 4.0;
+        // Trusted compositor click (optionally humanized approach).
+        self.click_xy(cx, cy, humanize).await
+    }
+
+    /// Locate an element by accessibility `role` + `name` **inside a specific
+    /// frame** and return its on-page rectangle `[x, y, width, height]` in CSS
+    /// pixels — the geometry needed to drive a **humanized** click yourself
+    /// (e.g. move the cursor along a curved path with [`dispatch_mouse_event`]
+    /// and press at a jittered point inside the box), rather than the single
+    /// centre click of [`click_ax_in_frame`].
+    ///
+    /// Same cross-frame, closed-shadow-piercing resolution as
+    /// [`click_ax_in_frame`]; an empty `name` matches any node of that `role`.
+    ///
+    /// [`dispatch_mouse_event`]: Self::dispatch_mouse_event
+    /// [`click_ax_in_frame`]: Self::click_ax_in_frame
+    pub async fn ax_box_in_frame(
+        &self,
+        frame_url_pattern: &str,
+        role: &str,
+        name: &str,
+        nth: usize,
+    ) -> Result<Vec<f64>> {
+        let q = self.ax_content_quad_in_frame(frame_url_pattern, role, name, nth).await?;
+        let xs = [q[0], q[2], q[4], q[6]];
+        let ys = [q[1], q[3], q[5], q[7]];
+        let left = xs.iter().copied().fold(f64::INFINITY, f64::min);
+        let top = ys.iter().copied().fold(f64::INFINITY, f64::min);
+        let right = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let bottom = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        Ok(vec![left, top, right - left, bottom - top])
+    }
+
+    /// Resolve a frame-scoped AX `role`+`name` match to its box-model content
+    /// quad `[x1,y1, x2,y2, x3,y3, x4,y4]` in page coordinates.
+    async fn ax_content_quad_in_frame(
+        &self,
+        frame_url_pattern: &str,
+        role: &str,
+        name: &str,
+        nth: usize,
+    ) -> Result<Vec<f64>> {
+        let backend_id = self.ax_backend_in_frame(frame_url_pattern, role, name, nth).await?;
+        let bm = self
+            .inner
+            .execute(GetBoxModelParams { backend_node_id: Some(backend_id), ..Default::default() })
+            .await
+            .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        let quad = bm.result.model.content.inner().clone();
+        if quad.len() < 8 {
+            return Err(VoidCrawlError::PageError("AX node has no box-model content quad".into()));
+        }
+        Ok(quad)
+    }
+
+    /// Resolve a frame-scoped AX `role`+`name` match to its `backendDOMNodeId`.
+    async fn ax_backend_in_frame(
+        &self,
+        frame_url_pattern: &str,
+        role: &str,
+        name: &str,
+        nth: usize,
+    ) -> Result<BackendNodeId> {
+        fn ax_text(v: Option<&AxValue>) -> &str {
+            v.and_then(|a| a.value.as_ref()).and_then(Value::as_str).unwrap_or("")
+        }
+        let frame_id = self.resolve_frame(frame_url_pattern).await?;
+        let resp = self
+            .inner
+            .execute(GetFullAxTreeParams { depth: None, frame_id: Some(frame_id) })
+            .await
+            .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        let matched = resp
+            .result
+            .nodes
+            .iter()
+            .filter(|n| {
+                !n.ignored
+                    && ax_text(n.role.as_ref()) == role
+                    && (name.is_empty() || ax_text(n.name.as_ref()) == name)
+            })
+            .filter_map(|n| n.backend_dom_node_id)
+            .nth(nth);
+        matched.ok_or_else(|| {
+            VoidCrawlError::PageError(format!(
+                "no AX node with role={role:?} name={name:?} at index {nth} in frame {frame_url_pattern:?}"
+            ))
+        })
+    }
+
+    // ── Humanized pointer input (CAS-147) ───────────────────────────────
+
+    /// Move the virtual cursor to `(x, y)` via CDP `Input.dispatchMouseEvent`.
+    ///
+    /// With `humanize = true` the cursor travels a realistic path from its last
+    /// position — non-linear (arc) curvature, a minimum-jerk velocity profile,
+    /// small tremor, and a brief dwell — as multiple `MouseMoved` events
+    /// ([`crate::input`]). With `humanize = false` it jumps in a single event.
+    /// **No page-world JS** is injected. The path length/duration scale with
+    /// distance and stay bounded for agent workflows.
+    pub async fn move_mouse(&self, x: f64, y: f64, humanize: bool) -> Result<()> {
+        if humanize {
+            let start = *self
+                .cursor
+                .lock()
+                .map_err(|_| VoidCrawlError::Other("cursor lock poisoned".into()))?;
+            let mut rng = Rng::seed(runtime_seed());
+            let path = humanized_path(start, (x, y), &HumanizeOptions::default(), &mut rng);
+            for step in path {
+                time::sleep(Duration::from_millis(step.delay_ms)).await;
+                self.dispatch_mouse_event(
+                    DispatchMouseEventType::MouseMoved,
+                    step.x,
+                    step.y,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await?;
+            }
+        } else {
+            self.dispatch_mouse_event(
+                DispatchMouseEventType::MouseMoved,
+                x,
+                y,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await?;
+        }
+        *self.cursor.lock().map_err(|_| VoidCrawlError::Other("cursor lock poisoned".into()))? =
+            (x, y);
+        Ok(())
+    }
+
+    /// Click at `(x, y)` with a **trusted** compositor event (press → release).
+    /// With `humanize = true`, the cursor first travels a human-like path to
+    /// the point (see [`move_mouse`]). The analogue of
+    /// `click_visual_coords`.
+    ///
+    /// [`move_mouse`]: Self::move_mouse
+    pub async fn click_xy(&self, x: f64, y: f64, humanize: bool) -> Result<()> {
+        self.move_mouse(x, y, humanize).await?;
+        self.dispatch_mouse_event(
+            DispatchMouseEventType::MousePressed,
+            x,
+            y,
+            Some(MouseButton::Left),
+            Some(1),
+            None,
+            None,
+            None,
+        )
+        .await?;
+        self.dispatch_mouse_event(
+            DispatchMouseEventType::MouseReleased,
+            x,
+            y,
+            Some(MouseButton::Left),
+            Some(1),
+            None,
+            None,
+            None,
+        )
+        .await?;
         Ok(())
     }
 

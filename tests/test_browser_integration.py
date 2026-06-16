@@ -9,18 +9,89 @@ Run with:
 
 from __future__ import annotations
 
+import contextlib
+import http.server
 import shutil
+import socketserver
+import threading
+from typing import TYPE_CHECKING
 
 import pytest
 
 from voidcrawl import BrowserConfig, BrowserPool, BrowserSession, PoolConfig
 from voidcrawl.actions import CollectNetworkRequests, InstallNetworkObserver
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
 _chrome_available = shutil.which("google-chrome") or shutil.which("chromium")
 
 pytestmark = pytest.mark.skipif(
     not _chrome_available, reason="Chrome/Chromium not found on PATH"
 )
+
+
+class _NetworkFixtureHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        if self.path == "/":
+            self._send(
+                "text/html",
+                b"""<!doctype html>
+<html>
+  <head>
+    <title>VoidCrawl network fixture</title>
+    <link rel="stylesheet" href="/style.css">
+  </head>
+  <body>
+    <main>network fixture</main>
+    <script src="/app.js"></script>
+  </body>
+</html>
+""",
+            )
+        elif self.path == "/style.css":
+            self._send("text/css", b"main { color: rgb(10 20 30); }\n")
+        elif self.path == "/app.js":
+            self._send(
+                "application/javascript",
+                (
+                    b"fetch('/api/data')"
+                    b".then(r => r.json())"
+                    b".then(d => { window.fixtureData = d; });\n"
+                ),
+            )
+        elif self.path == "/api/data":
+            self._send("application/json", b'{"ok":true,"source":"voidcrawl-test"}\n')
+        else:
+            self.send_error(404)
+
+    def log_message(self, fmt: str, *args: object) -> None:
+        return
+
+    def _send(self, content_type: str, body: bytes) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+@pytest.fixture
+def network_fixture_url(unused_tcp_port: int) -> Iterator[str]:
+    server = socketserver.ThreadingTCPServer(
+        ("127.0.0.1", unused_tcp_port),
+        _NetworkFixtureHandler,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        yield f"http://127.0.0.1:{unused_tcp_port}/"
+    finally:
+        server.shutdown()
+        server.server_close()
+        with contextlib.suppress(RuntimeError):
+            thread.join(timeout=2)
 
 
 # ── Cookie tests (BrowserSession) ───────────────────────────────────────
@@ -131,24 +202,26 @@ class TestCookiesPool:
 
 class TestNetworkObserverIntegration:
     @pytest.mark.asyncio
-    async def test_observer_captures_requests(self) -> None:
+    async def test_observer_captures_requests(self, network_fixture_url: str) -> None:
         """Install after navigation; buffered: true picks up past entries."""
         async with BrowserSession(BrowserConfig()) as browser:
-            # Use a JS-rendered page that loads many sub-resources
-            page = await browser.new_page("https://qscrape.dev/l2/news")
+            page = await browser.new_page(network_fixture_url)
             await page.wait_for_network_idle()
 
             await InstallNetworkObserver().run(page)
             requests = await CollectNetworkRequests().run(page)
 
             assert isinstance(requests, list)
-            assert len(requests) > 0  # qscrape loads many JS/CSS
+            names = {entry["name"] for entry in requests}
+            assert f"{network_fixture_url}style.css" in names
+            assert f"{network_fixture_url}app.js" in names
+            assert f"{network_fixture_url}api/data" in names
             await page.close()
 
     @pytest.mark.asyncio
-    async def test_observer_clear_resets_log(self) -> None:
+    async def test_observer_clear_resets_log(self, network_fixture_url: str) -> None:
         async with BrowserSession(BrowserConfig()) as browser:
-            page = await browser.new_page("https://qscrape.dev/l2/news")
+            page = await browser.new_page(network_fixture_url)
             await page.wait_for_network_idle()
 
             await InstallNetworkObserver().run(page)
@@ -164,10 +237,13 @@ class TestNetworkObserverIntegration:
             await page.close()
 
     @pytest.mark.asyncio
-    async def test_observer_entries_have_expected_keys(self) -> None:
+    async def test_observer_entries_have_expected_keys(
+        self,
+        network_fixture_url: str,
+    ) -> None:
         """Verify that captured entries contain the expected fields."""
         async with BrowserSession(BrowserConfig()) as browser:
-            page = await browser.new_page("https://qscrape.dev/l2/news")
+            page = await browser.new_page(network_fixture_url)
             await page.wait_for_network_idle()
 
             await InstallNetworkObserver().run(page)
@@ -189,9 +265,9 @@ class TestNetworkObserverIntegration:
 
 class TestNetworkObserverPool:
     @pytest.mark.asyncio
-    async def test_observer_with_pool(self) -> None:
+    async def test_observer_with_pool(self, network_fixture_url: str) -> None:
         async with BrowserPool(PoolConfig()) as pool, pool.acquire() as tab:
-            resp = await tab.goto("https://qscrape.dev/l2/news")
+            resp = await tab.goto(network_fixture_url)
             # `status_code` is documented as None when the response is served
             # from disk cache / a service worker or otherwise not captured —
             # which a recycled pool tab with a warm cache hits intermittently.

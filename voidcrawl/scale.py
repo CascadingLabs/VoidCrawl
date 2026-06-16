@@ -478,6 +478,9 @@ def generate_supervisord_conf(report: ScaleReport, base_port: int | None = None)
     if base_port is None:
         base_port = _default_base_port()
     chrome = "/usr/bin/chromium"
+    # Per-Chrome profile dir under CHROME_PROFILES_DIR (default /tmp, ephemeral;
+    # set to a mounted volume like /profiles to persist logins/cookies/clearance).
+    profiles_dir = os.environ.get("CHROME_PROFILES_DIR", "/tmp").rstrip("/") or "/tmp"
     # Hardware GPU via ANGLE/Vulkan (NOT --disable-gpu, which forces SwiftShader
     # software WebGL — a strong bot signal). Requires Mesa drivers in the image
     # + /dev/dri passthrough (see docker/Dockerfile and docker-compose.yml).
@@ -512,7 +515,7 @@ def generate_supervisord_conf(report: ScaleReport, base_port: int | None = None)
         cmd = (
             f"{chrome} {headless_flag}{base_flags}"
             f" --remote-debugging-port={port}"
-            f" --user-data-dir=/tmp/chrome-profile-{i + 1}"
+            f" --user-data-dir={profiles_dir}/chrome-profile-{i + 1}"
         )
         sections += [
             f"[program:{name}]",

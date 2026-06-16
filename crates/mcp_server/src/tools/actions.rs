@@ -68,6 +68,10 @@ pub struct ClickVisualCoordsArgs {
     pub x:          f64,
     /// Y coordinate in CSS pixels (pre-DPR).
     pub y:          f64,
+    /// When true, the cursor first travels a humanized curved path to (x, y)
+    /// (multiple MouseMoved events) before the click. Off by default.
+    #[serde(default)]
+    pub humanize:   bool,
 }
 
 pub async fn click_visual_coords(
@@ -76,33 +80,10 @@ pub async fn click_visual_coords(
 ) -> Result<OkResult, ErrorData> {
     let handle = lookup(server, &args.session_id).await?;
     let page = handle.page.lock().await;
-    // mousePressed + mouseReleased at (x, y) with left button. Matches
-    // the CDP recipe that React-rendered forms respond to when CSS
-    // selector clicks fail silently.
-    page.dispatch_mouse_event(
-        DispatchMouseEventType::MousePressed,
-        args.x,
-        args.y,
-        Some(MouseButton::Left),
-        Some(1),
-        None,
-        None,
-        None,
-    )
-    .await
-    .map_err(map_err)?;
-    page.dispatch_mouse_event(
-        DispatchMouseEventType::MouseReleased,
-        args.x,
-        args.y,
-        Some(MouseButton::Left),
-        Some(1),
-        None,
-        None,
-        None,
-    )
-    .await
-    .map_err(map_err)?;
+    // Trusted compositor click at (x, y): the CDP recipe that React-rendered
+    // forms respond to when CSS selector clicks fail silently. `humanize` adds a
+    // realistic cursor approach first.
+    page.click_xy(args.x, args.y, args.humanize).await.map_err(map_err)?;
     Ok(OkResult { ok: true })
 }
 
@@ -311,6 +292,10 @@ pub struct ClickByRoleArgs {
     /// 0-based index when several nodes match the same role + name.
     #[serde(default)]
     pub nth:        Option<usize>,
+    /// When true, click at the element's box-model centre with a humanized
+    /// compositor pointer path instead of a DOM `.click()`. Off by default.
+    #[serde(default)]
+    pub humanize:   bool,
 }
 
 pub async fn click_by_role(
@@ -319,7 +304,9 @@ pub async fn click_by_role(
 ) -> Result<OkResult, ErrorData> {
     let handle = lookup(server, &args.session_id).await?;
     let page = handle.page.lock().await;
-    page.click_by_role(&args.role, &args.name, args.nth.unwrap_or(0)).await.map_err(map_err)?;
+    page.click_by_role(&args.role, &args.name, args.nth.unwrap_or(0), args.humanize)
+        .await
+        .map_err(map_err)?;
     Ok(OkResult { ok: true })
 }
 

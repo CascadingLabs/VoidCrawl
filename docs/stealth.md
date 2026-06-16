@@ -53,7 +53,12 @@ consistent*.
 > reports `false` — `undefined` is the tell). Force-opening shadow DOMs broke
 > **Cloudflare Turnstile**, which renders its challenge in a *closed* shadow
 > root and tamper-checks it: forcing it open failed the challenge with
-> `ERROR 600010`. We inject **zero** page-world JS today.
+> `ERROR 600010`. We inject **zero** page-world JS today. To *reach into* a
+> closed shadow root without tampering, use the AX-tree locators
+> (`ax_box_in_frame` / `click_ax_in_frame`) — the browser-computed accessibility
+> tree descends into closed roots, so a trusted compositor click can drive the
+> widget with no shadow patch. See
+> [cross-origin-frames.md](cross-origin-frames.md).
 
 ## The automation signal is in the launch flags
 
@@ -139,7 +144,7 @@ We inject **no** page-world JS, and we leave these alone:
 | `navigator.userAgent` | We use the real UA (Headless stripped) — no version mismatch. |
 | WebGL vendor/renderer | The real GPU string (once hardware-accelerated) beats any fake. |
 | `window.chrome.runtime`, `navigator.permissions`, canvas | Default behavior is already correct; spoofing adds detectable noise. |
-| Shadow DOM mode | We do **not** force-open it (it broke Turnstile). Interacting with a challenge widget works via real compositor clicks at pixel coordinates regardless of shadow mode. |
+| Shadow DOM mode | We do **not** force-open it (it broke Turnstile). Interacting with a challenge widget works via real compositor clicks at pixel coordinates regardless of shadow mode — locate the target inside a closed root with `ax_box_in_frame` / `click_ax_in_frame` (see [cross-origin-frames.md](cross-origin-frames.md)). |
 
 ## Headful vs headless (and managed Turnstile)
 
@@ -175,6 +180,56 @@ async with BrowserPool.from_env() as pool:
 
 For a headless *farm* that still needs to clear Turnstile, run the **headful
 GPU container** ([docker-headful.md](docker-headful.md)) rather than headless.
+
+> The pass above is the Turnstile **widget** in managed mode. The full-page
+> **Managed Challenge / Challenge Page** interstitial ("Just a moment…", served
+> by the edge in front of a route) is harder — headful + GPU is *not* enough for
+> it. See the next section.
+
+## Minimal CDP footprint (full-page Managed Challenge)  — `VOIDCRAWL_STEALTH_NO_RUNTIME`
+
+The full-page Cloudflare **Managed Challenge** interstitial is decided by
+**CDP/automation detection**, not by rendering, GPU, profile, or clicks. We
+verified this exhaustively against `2captcha.com/demo/cloudflare-turnstile-challenge`:
+real headful + real AMD-GPU WebGL + `navigator.webdriver=false` + a warmed/cookied
+profile + a humanized compositor click + even a real OS (xdotool) click — **all
+stayed walled**. A *clean* CDP browser (nodriver), which enables almost no CDP
+domain, **auto-passes it in ~4s with no click** (3/3). The differentiator is **how
+loud the CDP control channel is**.
+
+The tells Cloudflare/DataDome detect are the CDP domains chromiumoxide enables
+eagerly on every page:
+
+| CDP enable | Why it's a tell | In minimal mode |
+|---|---|---|
+| `Runtime.enable` | emits `Runtime.consoleAPICalled` (the canonical CDP-automation signal) | **skipped** — `Runtime.evaluate` still works in the main world |
+| `Network.enable` | a clean browser doesn't subscribe | **skipped** (lose network capture / response metadata / network-idle goto) |
+| `Performance.enable`, `Log.enable` | eager instrumentation | **skipped** (no loss) |
+| `Target.setAutoAttach(waitForDebuggerOnStart)` | automation-shaped | **skipped** (lose OOPIF auto-attach) |
+| isolated-world `addScriptToEvaluateOnNewDocument` | persistent injected script | **skipped** (lose `evaluate_function`) |
+
+Set **`VOIDCRAWL_STEALTH_NO_RUNTIME=1`** before launching to enable the minimal
+mode (a vendored chromiumoxide patch reads it at session init). VoidCrawl then
+enables only `Page` + on-demand `Accessibility`/`DOM`/`Input`, and **auto-passes
+the Managed Challenge like nodriver** (verified 3/3). `eval_js` still works.
+
+```python
+import os
+os.environ["VOIDCRAWL_STEALTH_NO_RUNTIME"] = "1"   # before BrowserSession launches Chrome
+from voidcrawl import BrowserConfig, BrowserSession
+
+async with BrowserSession(BrowserConfig(headless=False, stealth=True)) as b:
+    page = await b.new_page("about:blank")
+    await page.navigate("https://site-behind-a-cloudflare-challenge.com")  # Network off → don't await idle
+    # the interstitial clears on its own in a few seconds; poll the title:
+    # while "just a moment" in (await page.eval_js("document.title")).lower(): await asyncio.sleep(1)
+```
+
+Trade-offs (acceptable for *challenge traversal*, not bulk crawling): no network
+capture / network-idle `goto`, no cross-origin `evaluate_js_in_frame` (needs
+Runtime), no `evaluate_function`, no OOPIF auto-attach. Default behavior is
+unchanged when the env var is unset. (CAS-217. A future release promotes this to a
+first-class `BrowserConfig` flag.)
 
 ## Overriding the defaults
 

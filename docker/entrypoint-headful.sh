@@ -74,16 +74,38 @@ esac
 # ── 3. Configure VNC resolution ──────────────────────────────────────────
 VNC_WIDTH="${VNC_WIDTH:-1920}"
 VNC_HEIGHT="${VNC_HEIGHT:-1080}"
-echo "[vnc] Resolution: ${VNC_WIDTH}x${VNC_HEIGHT} on port ${VNC_PORT:-5900}"
+export VNC_PORT_2="${VNC_PORT_2:-5901}"
+export NOVNC_PORT_2="${NOVNC_PORT_2:-6081}"
+echo "[vnc] Resolution: ${VNC_WIDTH}x${VNC_HEIGHT} on ports ${VNC_PORT:-5900} (chrome-1) / ${VNC_PORT_2} (chrome-2)"
 
-# Update Sway output resolution
+# Update Sway output resolution (both headless outputs); keep HEADLESS-2
+# positioned exactly one screen-width to the right of HEADLESS-1 so the
+# outputs abut without overlapping (an overlap re-creates the occlusion).
+# The position rewrite anchors on the HEADLESS-2 line, not on a literal
+# width, so it stays correct if the config's default resolution changes.
 sed -i "s/resolution [0-9]*x[0-9]*/resolution ${VNC_WIDTH}x${VNC_HEIGHT}/" /etc/sway/config
+sed -i -E "s/(output HEADLESS-2 .* position )[0-9]+ 0/\1${VNC_WIDTH} 0/" /etc/sway/config
 
 # ── 4. Ensure runtime dirs exist ─────────────────────────────────────────
 mkdir -p /tmp/xdg-runtime
 chmod 0700 /tmp/xdg-runtime
-mkdir -p /tmp/chrome-profile-1 /tmp/chrome-profile-2
+
+# Chrome profiles. Each Chrome gets its own user-data-dir under
+# CHROME_PROFILES_DIR. Default /tmp (ephemeral — wiped with the container).
+# Set CHROME_PROFILES_DIR=/profiles (a mounted volume) to PERSIST logins,
+# cookies, and Cloudflare clearance across restarts. supervisord substitutes
+# the exported CHROME_PROFILE_DIR_1/2 into each Chrome's --user-data-dir.
+CHROME_PROFILES_DIR="${CHROME_PROFILES_DIR:-/tmp}"
+export CHROME_PROFILE_DIR_1="${CHROME_PROFILE_DIR_1:-${CHROME_PROFILES_DIR}/chrome-profile-1}"
+export CHROME_PROFILE_DIR_2="${CHROME_PROFILE_DIR_2:-${CHROME_PROFILES_DIR}/chrome-profile-2}"
+mkdir -p "$CHROME_PROFILE_DIR_1" "$CHROME_PROFILE_DIR_2"
+echo "[profiles] base=$CHROME_PROFILES_DIR  chrome-1=$CHROME_PROFILE_DIR_1  chrome-2=$CHROME_PROFILE_DIR_2"
+
+# System dbus for Chrome — without a reachable bus every Chrome process
+# burns time on dbus autolaunch attempts.
+mkdir -p /run/dbus
+dbus-uuidgen --ensure
 
 # ── 5. Start supervisord ─────────────────────────────────────────────────
-echo "[start] Launching sway → wayvnc → chrome"
+echo "[start] Launching dbus → sway → wayvnc x2 → chrome x2"
 exec supervisord -c /etc/supervisor/conf.d/supervisord.conf

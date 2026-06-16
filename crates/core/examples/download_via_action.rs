@@ -43,10 +43,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let capture = page.arm_download(quarantine.path(), max_bytes).await?;
 
     println!("  clicking the \"Download\" button …");
-    page.click_by_role("button", "Download", 0).await?;
+    page.click_by_role("button", "Download", 0, false).await?;
     // Drive may interpose a "Download anyway" virus-scan interstitial for files
     // it can't scan — clicking it is just another action in the same flow.
-    let _ = page.click_by_role("button", "Download anyway", 0).await;
+    let _ = page.click_by_role("button", "Download anyway", 0, false).await;
 
     println!("  waiting for the download to land …");
     let outcome = capture.wait(&page, Duration::from_secs(90)).await?;

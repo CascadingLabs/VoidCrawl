@@ -366,8 +366,29 @@ def _extract_all_names(pkg: griffe.Module) -> list[str]:
     return [n for n in pkg.members if not n.startswith("_")]
 
 
+def _resolve_doc_target(
+    name: str,
+    obj: Object,
+    ext_stubs: griffe.Module,
+) -> Object | None:
+    """Resolve a public symbol to the object rendered in docs."""
+    if isinstance(obj, griffe.Alias) and obj.target_path.startswith("voidcrawl._ext."):
+        return cast("Object | None", ext_stubs.members.get(name))
+
+    try:
+        return (
+            cast("Object", obj.final_target) if isinstance(obj, griffe.Alias) else obj
+        )
+    except griffe.AliasResolutionError:
+        return None
+
+
 def _build_sections(exclude: set[str], repo_url: str, ref: str) -> dict[str, list[str]]:
     """Load the package and populate per-section content lists."""
+    ext_stubs = cast(
+        "griffe.Module",
+        griffe.load("voidcrawl._ext", search_paths=[str(_REPO_ROOT)]),
+    )
     pkg = cast("griffe.Module", griffe.load("voidcrawl"))
 
     # Merge __all__ from voidcrawl, voidcrawl.actions, voidcrawl.debug
@@ -404,7 +425,9 @@ def _build_sections(exclude: set[str], repo_url: str, ref: str) -> dict[str, lis
                 break
         if obj is None:
             continue
-        target = obj.final_target if isinstance(obj, griffe.Alias) else obj
+        target = _resolve_doc_target(name, cast("Object", obj), ext_stubs)
+        if target is None:
+            continue
         _classify(name, cast("Object", target), exclude, sections, repo_url, ref)
 
     return sections
@@ -438,7 +461,7 @@ def generate_split(
             "",
         ]
         parts.extend(content_lines)
-        result[filename] = "\n".join(parts) + "\n"
+        result[filename] = "\n".join(parts).rstrip() + "\n"
 
     return result
 
@@ -468,7 +491,7 @@ def generate(version: str, exclude: set[str], repo_url: str, ref: str) -> str:
         parts.append(f"# {title}\n")
         parts.extend(content)
 
-    return "\n".join(parts) + "\n"
+    return "\n".join(parts).rstrip() + "\n"
 
 
 # ---------------------------------------------------------------------------

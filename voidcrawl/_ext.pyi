@@ -249,7 +249,9 @@ class PooledTab:
         exact. Passing neither returns every node under the document root.
         """
         ...
-    async def click_by_role(self, role: str, name: str, nth: int = 0) -> None:
+    async def click_by_role(
+        self, role: str, name: str, nth: int = 0, humanize: bool = False
+    ) -> None:
         """Click the *nth* element matching accessibility ``role`` + ``name``.
 
         Markup-independent analogue of ``click_element``: resolves via the AX
@@ -260,7 +262,66 @@ class PooledTab:
             role: Computed accessibility role, e.g. ``"button"``, ``"link"``.
             name: Computed accessible name (exact match).
             nth: 0-based index when several nodes match.
+            humanize: Click at the element's box-model centre with a humanized
+                compositor pointer path (curved, min-jerk, tremor) instead of a
+                DOM ``.click()``. Off by default.
         """
+        ...
+    async def move_mouse(self, x: float, y: float, humanize: bool = False) -> None:
+        """Move the virtual cursor to ``(x, y)`` via CDP ``Input.dispatchMouseEvent``.
+
+        With ``humanize=True`` the cursor travels a realistic curved, minimum-jerk,
+        lightly-tremored path (multiple ``MouseMoved`` events) from its last
+        position; otherwise it jumps in one event. No page-world JS is injected."""
+        ...
+    async def click_xy(self, x: float, y: float, humanize: bool = False) -> None:
+        """Click at ``(x, y)`` with a trusted compositor event (press → release).
+
+        With ``humanize=True`` the cursor first travels a human-like path there
+        (see :meth:`move_mouse`). The programmatic analogue of the
+        ``click_visual_coords`` MCP tool."""
+        ...
+    async def click_ax_in_frame(
+        self,
+        frame_url_pattern: str,
+        role: str,
+        name: str,
+        nth: int = 0,
+        humanize: bool = False,
+    ) -> None:
+        """Click an element by AX ``role`` + ``name`` inside a specific frame.
+
+        The cross-frame, shadow-piercing analogue of :meth:`click_by_role`:
+        roots the AX tree at the frame matched by ``frame_url_pattern`` and
+        descends into closed shadow roots, then clicks the match at its
+        box-model centre with a real **compositor** mouse event (a trusted
+        click, unlike a DOM ``.click()``). Reaches widgets the page's own JS
+        cannot — e.g. Cloudflare Turnstile's "Verify you are human" checkbox in
+        a closed shadow root inside a cross-origin ``challenges.cloudflare.com``
+        iframe. Empty ``name`` matches any node of that ``role``.
+
+        Cross-origin google.com / cloudflare frames must be in-process: launch
+        the session with ``extra_args=["disable-site-isolation-trials"]``.
+        """
+        ...
+    async def ax_box_in_frame(
+        self, frame_url_pattern: str, role: str, name: str, nth: int = 0
+    ) -> list[float]:
+        """Locate an AX ``role`` + ``name`` inside a frame; return its on-page
+        rectangle ``[x, y, width, height]`` in CSS pixels.
+
+        Same cross-frame, closed-shadow-piercing resolution as
+        :meth:`click_ax_in_frame`, but returns the geometry instead of clicking
+        — so you can drive a **humanized** click yourself (curved approach via
+        :meth:`dispatch_mouse_event`, press at a jittered point in the box).
+        Empty ``name`` matches any node of that ``role``."""
+        ...
+    async def ax_outline_in_frame(
+        self, frame_url_pattern: str, depth: int | None = None
+    ) -> str:
+        """Compact accessibility outline of a specific (possibly cross-origin)
+        frame — pierces closed shadow roots. Discover the role / accessible name
+        to pass to :meth:`click_ax_in_frame`."""
         ...
     async def set_geolocation(
         self, latitude: float, longitude: float, accuracy: float | None = None
@@ -471,6 +532,11 @@ class BrowserPool:
 class Page:
     """A single browser tab created via :meth:`BrowserSession.new_page`."""
 
+    async def target_id(self) -> str:
+        """Return the CDP target id of this page (stable across same-tab
+        navigations). Pass to :meth:`BrowserSession.attach_page` to re-adopt
+        this exact tab from another connection."""
+        ...
     async def goto(
         self, url: str, timeout: float = 30.0, capture_endpoints: bool = False
     ) -> PageResponse:
@@ -636,7 +702,9 @@ class Page:
         exact. Passing neither returns every node under the document root.
         """
         ...
-    async def click_by_role(self, role: str, name: str, nth: int = 0) -> None:
+    async def click_by_role(
+        self, role: str, name: str, nth: int = 0, humanize: bool = False
+    ) -> None:
         """Click the *nth* element matching accessibility ``role`` + ``name``.
 
         Markup-independent analogue of ``click_element``: resolves via the AX
@@ -647,7 +715,66 @@ class Page:
             role: Computed accessibility role, e.g. ``"button"``, ``"link"``.
             name: Computed accessible name (exact match).
             nth: 0-based index when several nodes match.
+            humanize: Click at the element's box-model centre with a humanized
+                compositor pointer path (curved, min-jerk, tremor) instead of a
+                DOM ``.click()``. Off by default.
         """
+        ...
+    async def move_mouse(self, x: float, y: float, humanize: bool = False) -> None:
+        """Move the virtual cursor to ``(x, y)`` via CDP ``Input.dispatchMouseEvent``.
+
+        With ``humanize=True`` the cursor travels a realistic curved, minimum-jerk,
+        lightly-tremored path (multiple ``MouseMoved`` events) from its last
+        position; otherwise it jumps in one event. No page-world JS is injected."""
+        ...
+    async def click_xy(self, x: float, y: float, humanize: bool = False) -> None:
+        """Click at ``(x, y)`` with a trusted compositor event (press → release).
+
+        With ``humanize=True`` the cursor first travels a human-like path there
+        (see :meth:`move_mouse`). The programmatic analogue of the
+        ``click_visual_coords`` MCP tool."""
+        ...
+    async def click_ax_in_frame(
+        self,
+        frame_url_pattern: str,
+        role: str,
+        name: str,
+        nth: int = 0,
+        humanize: bool = False,
+    ) -> None:
+        """Click an element by AX ``role`` + ``name`` inside a specific frame.
+
+        The cross-frame, shadow-piercing analogue of :meth:`click_by_role`:
+        roots the AX tree at the frame matched by ``frame_url_pattern`` and
+        descends into closed shadow roots, then clicks the match at its
+        box-model centre with a real **compositor** mouse event (a trusted
+        click, unlike a DOM ``.click()``). Reaches widgets the page's own JS
+        cannot — e.g. Cloudflare Turnstile's "Verify you are human" checkbox in
+        a closed shadow root inside a cross-origin ``challenges.cloudflare.com``
+        iframe. Empty ``name`` matches any node of that ``role``.
+
+        Cross-origin google.com / cloudflare frames must be in-process: launch
+        the session with ``extra_args=["disable-site-isolation-trials"]``.
+        """
+        ...
+    async def ax_box_in_frame(
+        self, frame_url_pattern: str, role: str, name: str, nth: int = 0
+    ) -> list[float]:
+        """Locate an AX ``role`` + ``name`` inside a frame; return its on-page
+        rectangle ``[x, y, width, height]`` in CSS pixels.
+
+        Same cross-frame, closed-shadow-piercing resolution as
+        :meth:`click_ax_in_frame`, but returns the geometry instead of clicking
+        — so you can drive a **humanized** click yourself (curved approach via
+        :meth:`dispatch_mouse_event`, press at a jittered point in the box).
+        Empty ``name`` matches any node of that ``role``."""
+        ...
+    async def ax_outline_in_frame(
+        self, frame_url_pattern: str, depth: int | None = None
+    ) -> str:
+        """Compact accessibility outline of a specific (possibly cross-origin)
+        frame — pierces closed shadow roots. Discover the role / accessible name
+        to pass to :meth:`click_ax_in_frame`."""
         ...
     async def set_geolocation(
         self, latitude: float, longitude: float, accuracy: float | None = None
@@ -753,9 +880,12 @@ class BrowserSession:
         chrome_executable: str | None = None,
         extra_args: list[str] | None = None,
         user_data_dir: str | None = None,
+        port: int | None = None,
     ) -> None: ...
     async def launch(self) -> None: ...
     async def new_page(self, url: str) -> Page: ...
+    async def attach_page(self, target_id: str) -> Page: ...
+    async def websocket_url(self) -> str: ...
     async def version(self) -> str: ...
     async def close(self) -> None: ...
     async def __aenter__(self) -> BrowserSession: ...

@@ -12,11 +12,12 @@ use std::{
 
 use chromiumoxide::{
     browser::{Browser, BrowserConfig},
+    cdp::browser_protocol::target::TargetId,
     handler::Handler,
 };
 use rustls::crypto::ring::default_provider as ring_crypto_provider;
 use serde_json::Value;
-use tokio::{sync::Mutex, task::JoinHandle};
+use tokio::{sync::Mutex, task::JoinHandle, time};
 
 use crate::{
     error::{Result, VoidCrawlError},
@@ -541,6 +542,39 @@ impl BrowserSession {
         let cdp_pages =
             browser.pages().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
         Ok(cdp_pages.into_iter().map(Page::new).collect())
+    }
+
+    /// The browser's CDP WebSocket endpoint (`ws://…`).
+    ///
+    /// Hand this to another process (together with a tab's
+    /// [`Page::target_id`](crate::Page::target_id)) so it can attach to the
+    /// *same* Chrome via `BrowserConfig { ws_url, .. }` and adopt that exact
+    /// tab with [`attach_page`](Self::attach_page).
+    pub async fn websocket_url(&self) -> String {
+        self.browser.lock().await.websocket_address().clone()
+    }
+
+    /// Adopt an existing tab by its CDP `target_id` (see [`Page::target_id`]).
+    ///
+    /// Unlike [`new_page`](Self::new_page) this opens NO new tab and does NOT
+    /// (re-)apply stealth — it wraps the live tab the browser already has, so a
+    /// solver in a second process (attached via `ws_url`) can drive the exact
+    /// tab the primary driver is on and leave its mutations (e.g. an injected
+    /// captcha token) in place. `fetch_targets` runs first because, on a
+    /// session attached to an already-running Chrome, pre-existing tabs are not
+    /// tracked until fetched.
+    pub async fn attach_page(&self, target_id: &str) -> Result<Page> {
+        self.check_alive()?;
+        let mut browser = self.browser.lock().await;
+        browser.fetch_targets().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        // Targets are registered by `fetch_targets`, but the page handle may
+        // need a beat to settle before it is usable.
+        time::sleep(Duration::from_millis(100)).await;
+        let cdp_page = browser
+            .get_page(TargetId::new(target_id))
+            .await
+            .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        Ok(Page::new(cdp_page))
     }
 
     /// Get browser version string.

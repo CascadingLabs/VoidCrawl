@@ -1,6 +1,6 @@
 [package]
 name = "void_crawl"
-version = "0.3.5"
+version = "0.3.6"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -14,9 +14,9 @@ name = "void_crawl"
 crate-type = ["cdylib"]
 
 [dependencies]
-void_crawl_core = { path = "../core", version = "0.3.5" }
-pyo3 = { version = "0.28", features = ["extension-module", "generate-import-lib"] }
-pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
+void_crawl_core = { path = "../core", version = "0.3.6" }
+pyo3 = { version = "0.29", features = ["extension-module", "generate-import-lib"] }
+pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
 tokio = { version = "1", features = ["sync"] }
 serde_json = "1"
 futures = "0.3"
