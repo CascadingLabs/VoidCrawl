@@ -10,6 +10,12 @@
 //! Generation is deterministic under a seeded [`Rng`] so it can be unit-tested
 //! exactly; the live path seeds from wall-clock entropy at the call site.
 
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+
 /// One step along a humanized path: an absolute target plus the delay to wait
 /// *before* dispatching it (ms).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -173,7 +179,8 @@ mod tests {
         assert!(path.len() >= 6, "got {} steps", path.len());
         // The move that places the cursor on target is exact.
         let move_steps = &path[..path.len() - 1];
-        let landing = move_steps.last().unwrap();
+        assert!(!move_steps.is_empty(), "humanized path should include movement steps");
+        let landing = move_steps[move_steps.len() - 1];
         assert!((landing.x - B.0).abs() < 1e-9 && (landing.y - B.1).abs() < 1e-9);
     }
 

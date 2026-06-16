@@ -83,6 +83,9 @@ async def acquire_profile(
         ProfileNotFound: No matching profile directory in the platform
             default dirs.
     """
+    if not any(profile_name == name for profile_name, _ in list_profiles()):
+        raise ProfileNotFound(f"profile not found: {name}")
+
     return await py_acquire_profile(name, lease_timeout, headless)
 
 

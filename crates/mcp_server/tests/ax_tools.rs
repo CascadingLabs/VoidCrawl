@@ -123,6 +123,7 @@ async fn click_by_role_clicks_and_reports_ok() {
             role:       "button".into(),
             name:       "Subscribe".into(),
             nth:        None,
+            humanize:   false,
         },
     )
     .await
@@ -152,6 +153,7 @@ async fn click_by_role_no_match_errors() {
             role:       "button".into(),
             name:       "Missing".into(),
             nth:        None,
+            humanize:   false,
         },
     )
     .await

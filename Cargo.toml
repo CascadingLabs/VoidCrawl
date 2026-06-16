@@ -40,8 +40,8 @@ doc_lazy_continuation = "allow"
 needless_raw_string_hashes = "allow"
 too_many_lines = "allow"
 
-# Vendored chromiumoxide with a stealth patch: skip `Runtime.enable` when
-# VOIDCRAWL_STEALTH_NO_RUNTIME is set (the CDP automation tell Cloudflare detects).
-# Identical to crates.io chromiumoxide 0.9.1 otherwise.
+# Vendored chromiumoxide with VoidCrawl's minimal-CDP stealth patch surface.
+# The fork still launches or attaches to stock Chrome/Chromium; it only changes
+# selected CDP-client behavior when VOIDCRAWL_STEALTH_NO_RUNTIME is set.
 [patch.crates-io]
 chromiumoxide = { path = "vendor/chromiumoxide" }

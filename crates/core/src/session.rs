@@ -17,7 +17,7 @@ use chromiumoxide::{
 };
 use rustls::crypto::ring::default_provider as ring_crypto_provider;
 use serde_json::Value;
-use tokio::{sync::Mutex, task::JoinHandle};
+use tokio::{sync::Mutex, task::JoinHandle, time};
 
 use crate::{
     error::{Result, VoidCrawlError},
@@ -569,7 +569,7 @@ impl BrowserSession {
         browser.fetch_targets().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
         // Targets are registered by `fetch_targets`, but the page handle may
         // need a beat to settle before it is usable.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        time::sleep(Duration::from_millis(100)).await;
         let cdp_page = browser
             .get_page(TargetId::new(target_id))
             .await

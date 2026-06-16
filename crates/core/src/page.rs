@@ -60,8 +60,7 @@ use crate::{
 fn runtime_seed() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0x1234_5678_9ABC_DEF0)
+        .map_or(0x1234_5678_9ABC_DEF0, |d| d.as_secs() ^ u64::from(d.subsec_nanos()).rotate_left(32))
 }
 
 /// The result of a [`Page::goto_and_wait_for_idle`] call.
@@ -359,7 +358,7 @@ pub struct DownloadOutcome {
 /// # async fn f(page: &void_crawl_core::Page) -> void_crawl_core::Result<()> {
 /// # use std::{path::Path, time::Duration};
 /// let cap = page.arm_download(Path::new("/tmp/dl"), 100 << 20).await?;
-/// page.click_by_role("button", "Download all", 0).await?; // the triggering action
+/// page.click_by_role("button", "Download all", 0, false).await?; // the triggering action
 /// let file = cap.wait(page, Duration::from_secs(120)).await?;
 /// # Ok(()) }
 /// ```
@@ -1479,8 +1478,8 @@ impl Page {
         name: &str,
         nth: usize,
     ) -> Result<BackendNodeId> {
-        fn ax_text(v: &Option<AxValue>) -> &str {
-            v.as_ref().and_then(|a| a.value.as_ref()).and_then(Value::as_str).unwrap_or("")
+        fn ax_text(v: Option<&AxValue>) -> &str {
+            v.and_then(|a| a.value.as_ref()).and_then(Value::as_str).unwrap_or("")
         }
         let frame_id = self.resolve_frame(frame_url_pattern).await?;
         let resp = self
@@ -1494,8 +1493,8 @@ impl Page {
             .iter()
             .filter(|n| {
                 !n.ignored
-                    && ax_text(&n.role) == role
-                    && (name.is_empty() || ax_text(&n.name) == name)
+                    && ax_text(n.role.as_ref()) == role
+                    && (name.is_empty() || ax_text(n.name.as_ref()) == name)
             })
             .filter_map(|n| n.backend_dom_node_id)
             .nth(nth);
@@ -1518,7 +1517,10 @@ impl Page {
     /// distance and stay bounded for agent workflows.
     pub async fn move_mouse(&self, x: f64, y: f64, humanize: bool) -> Result<()> {
         if humanize {
-            let start = { *self.cursor.lock().expect("cursor poisoned") };
+            let start = *self
+                .cursor
+                .lock()
+                .map_err(|_| VoidCrawlError::Other("cursor lock poisoned".into()))?;
             let mut rng = Rng::seed(runtime_seed());
             let path = humanized_path(start, (x, y), &HumanizeOptions::default(), &mut rng);
             for step in path {
@@ -1548,7 +1550,10 @@ impl Page {
             )
             .await?;
         }
-        *self.cursor.lock().expect("cursor poisoned") = (x, y);
+        *self
+            .cursor
+            .lock()
+            .map_err(|_| VoidCrawlError::Other("cursor lock poisoned".into()))? = (x, y);
         Ok(())
     }
 

@@ -130,7 +130,9 @@ async fn click_by_role_clicks_the_named_element() {
         </body></html>";
     let page = page_with(html, &session).await;
 
-    page.click_by_role("button", "Subscribe", 0).await.expect("click_by_role failed");
+    page.click_by_role("button", "Subscribe", 0, false)
+        .await
+        .expect("click_by_role failed");
     let hits = page.evaluate_js("window.__hits").await.expect("eval failed");
     assert_eq!(hits, Value::from(1), "the button's onclick should have fired once");
 
@@ -148,7 +150,9 @@ async fn click_by_role_disambiguates_with_nth() {
         </body></html>";
     let page = page_with(html, &session).await;
 
-    page.click_by_role("button", "Go", 1).await.expect("click_by_role nth=1 failed");
+    page.click_by_role("button", "Go", 1, false)
+        .await
+        .expect("click_by_role nth=1 failed");
     let which = page.evaluate_js("window.__which").await.expect("eval failed");
     assert_eq!(which, Value::from("second"), "nth=1 should click the second match");
 
@@ -162,7 +166,9 @@ async fn click_by_role_errors_when_no_match() {
     let html = "<!doctype html><html><body><button>Only</button></body></html>";
     let page = page_with(html, &session).await;
 
-    let err = page.click_by_role("button", "Missing", 0).await.expect_err("should error");
+    let err = page.click_by_role("button", "Missing", 0, false)
+        .await
+        .expect_err("should error");
     let msg = err.to_string();
     assert!(msg.contains("Missing"), "error should name the target: {msg}");
 
