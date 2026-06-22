@@ -72,7 +72,7 @@ jobs:
           rm -rf voidcrawl-docs-repo/reference
 
           cd voidcrawl-docs-repo
-          git add -A api-reference.md reference voidcrawl/reference/api-reference.md
+          git add -A .
 
           if git diff --cached --quiet; then
             echo "No changes to API reference — skipping commit"
@@ -84,7 +84,7 @@ jobs:
 
           # Always tag so CascadingLabsFE can identify doc versions
           git tag -f "${TAG}"
-          git push origin "${TAG}"
+          git push --force origin "${TAG}"
           echo "Tagged VoidCrawl-Docs with ${TAG}"
 
       - name: Trigger submodule update in CascadingLabsFE
