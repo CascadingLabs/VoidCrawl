@@ -1,3 +1,9 @@
+## 0.3.7 (2026-06-21)
+
+### Fix
+
+- docs automation now publishes the generated API reference to the product-scoped `voidcrawl/reference/api-reference.md` path, removes the legacy root and split reference outputs from VoidCrawlDocs, and validates generated GitHub source links against the exact release ref before writing.
+
 ## 0.3.6 (2026-06-10)
 
 ### Feat

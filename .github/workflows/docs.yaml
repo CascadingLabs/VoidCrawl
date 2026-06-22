@@ -43,27 +43,19 @@ jobs:
             echo "tag=${VER}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Generate API reference (combined)
+      - name: Generate API reference
         run: |
           uv run --no-project --with "griffe>=2" python scripts/generate_api_docs.py \
-            --output api-reference.md \
+            --output voidcrawl/reference/api-reference.md \
             --version "${{ steps.version.outputs.tag }}" \
-            --exclude "${{ github.event.inputs.exclude || '' }}"
-
-      - name: Generate API reference (split)
-        run: |
-          uv run --no-project --with "griffe>=2" python scripts/generate_api_docs.py \
-            --output-dir reference \
-            --version "${{ steps.version.outputs.tag }}" \
+            --ref "${{ steps.version.outputs.tag }}" \
             --exclude "${{ github.event.inputs.exclude || '' }}"
 
       - name: Upload generated docs
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
         with:
           name: api-reference
-          path: |
-            api-reference.md
-            reference/
+          path: voidcrawl/reference/api-reference.md
 
       - name: Clone VoidCrawl-Docs and push
         env:
@@ -74,12 +66,13 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
           git clone "https://x-access-token:${DOCS_DEPLOY_TOKEN}@github.com/CascadingLabs/VoidCrawlDocs.git" voidcrawl-docs-repo
-          cp api-reference.md voidcrawl-docs-repo/api-reference.md
-          mkdir -p voidcrawl-docs-repo/reference
-          cp reference/*.md voidcrawl-docs-repo/reference/
+          mkdir -p voidcrawl-docs-repo/voidcrawl/reference
+          cp voidcrawl/reference/api-reference.md voidcrawl-docs-repo/voidcrawl/reference/api-reference.md
+          rm -f voidcrawl-docs-repo/api-reference.md
+          rm -rf voidcrawl-docs-repo/reference
 
           cd voidcrawl-docs-repo
-          git add api-reference.md reference/
+          git add -A api-reference.md reference voidcrawl/reference/api-reference.md
 
           if git diff --cached --quiet; then
             echo "No changes to API reference — skipping commit"
@@ -90,7 +83,7 @@ jobs:
           fi
 
           # Always tag so CascadingLabsFE can identify doc versions
-          git tag "${TAG}"
+          git tag -f "${TAG}"
           git push origin "${TAG}"
           echo "Tagged VoidCrawl-Docs with ${TAG}"
 
