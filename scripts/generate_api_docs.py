@@ -194,21 +194,25 @@ def _gh_link(obj: Object, repo_url: str, ref: str) -> str:
         return ""
     # Symbols defined in the compiled native extension resolve to the
     # build artifact (e.g. ``voidcrawl/_ext.cpython-313-x86_64-linux-gnu.so``),
-    # which isn't checked into the repo.  Redirect to the sibling ``.pyi``
-    # stub when one exists; its line numbers don't map to the binary, so
-    # drop the line anchor in that case.
+    # which isn't checked into the repo. Redirect to the sibling ``.pyi``
+    # stub before reading source text; its line numbers don't map to the
+    # binary, so drop the line anchor in that case.
+    if rel.suffix == ".so":
+        stub = rel.with_name(rel.name.split(".", 1)[0] + ".pyi")
+        if (_REPO_ROOT / stub).exists():
+            rel = stub
+            url = f"{repo_url}/blob/{ref}/{rel.as_posix()}"
+            return (
+                f' <a href="{url}" target="_blank" rel="noopener noreferrer"'
+                f' title="View source on GitHub">{_GITHUB_ICON}</a>'
+            )
+        return ""
+
     lineno = _declaration_lineno(obj, rel)
     anchor = f"#L{lineno}" if lineno else ""
     name = getattr(obj, "name", "")
     if lineno and not _line_is_declaration_at_ref(ref, rel, lineno, name):
         anchor = ""
-    if rel.suffix == ".so":
-        stub = rel.with_name(rel.name.split(".", 1)[0] + ".pyi")
-        if (_REPO_ROOT / stub).exists():
-            rel = stub
-            anchor = ""
-        else:
-            return ""
     url = f"{repo_url}/blob/{ref}/{rel.as_posix()}{anchor}"
     return (
         f' <a href="{url}" target="_blank" rel="noopener noreferrer"'
