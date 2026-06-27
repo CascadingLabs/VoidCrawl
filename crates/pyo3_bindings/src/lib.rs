@@ -25,8 +25,8 @@ use void_crawl_core::{
     AntibotEvidence, AntibotVerdict, BrowserMode, BrowserPool, BrowserSession, CookieParam,
     DEFAULT_MAX_BYTES, DeleteCookiesParams, DispatchKeyEventType, DispatchMouseEventType,
     DownloadCapture, DownloadOutcome, MouseButton, Page, PageResponse, PoolConfig, PooledTab,
-    ProfileHandle, ProfileInfo, ScanConfig, ScanReport, StealthConfig, Verdict, acquire_profile,
-    list_profiles, scan_bytes, scan_path,
+    ProfileHandle, ProfileInfo, ProfileRegistry, ScanConfig, ScanReport, StealthConfig, Verdict,
+    acquire_profile, list_profiles, scan_bytes, scan_path,
 };
 
 // ── Error conversion ────────────────────────────────────────────────────
@@ -2516,6 +2516,96 @@ fn py_acquire_profile(
     })
 }
 
+fn registry_from_root(root: Option<String>) -> ProfileRegistry {
+    root.map(ProfileRegistry::new).unwrap_or_else(ProfileRegistry::default)
+}
+
+fn to_json_string<T: serde::Serialize>(value: &T) -> PyResult<String> {
+    serde_json::to_string(value).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+}
+
+#[pyfunction]
+#[pyo3(signature = (root=None))]
+fn py_profile_registry_root(root: Option<String>) -> String {
+    registry_from_root(root).root().display().to_string()
+}
+
+#[pyfunction]
+#[pyo3(signature = (root=None))]
+fn py_profile_registry_list(root: Option<String>) -> PyResult<String> {
+    let result = registry_from_root(root).list_profiles().map_err(to_py_err)?;
+    to_json_string(&result)
+}
+
+#[pyfunction]
+#[pyo3(signature = (id, description=None, labels=None, root=None))]
+fn py_profile_registry_create(
+    id: String,
+    description: Option<String>,
+    labels: Option<Vec<String>>,
+    root: Option<String>,
+) -> PyResult<String> {
+    let result = registry_from_root(root)
+        .create_profile(&id, description, labels.unwrap_or_default())
+        .map_err(to_py_err)?;
+    to_json_string(&result)
+}
+
+#[pyfunction]
+#[pyo3(signature = (id, root=None))]
+fn py_profile_registry_describe(id: String, root: Option<String>) -> PyResult<String> {
+    let result = registry_from_root(root).describe_profile(&id).map_err(to_py_err)?;
+    to_json_string(&result)
+}
+
+#[pyfunction]
+#[pyo3(signature = (source_id_or_path, id, description=None, labels=None, root=None))]
+fn py_profile_registry_clone(
+    source_id_or_path: String,
+    id: String,
+    description: Option<String>,
+    labels: Option<Vec<String>>,
+    root: Option<String>,
+) -> PyResult<String> {
+    let result = registry_from_root(root)
+        .clone_profile(&source_id_or_path, &id, description, labels.unwrap_or_default())
+        .map_err(to_py_err)?;
+    to_json_string(&result)
+}
+
+#[pyfunction]
+#[pyo3(signature = (id, root=None))]
+fn py_profile_registry_delete(id: String, root: Option<String>) -> PyResult<bool> {
+    registry_from_root(root).delete_profile(&id).map_err(to_py_err)
+}
+
+#[pyfunction]
+#[pyo3(signature = (root=None))]
+fn py_profile_pool_list(root: Option<String>) -> PyResult<String> {
+    let result = registry_from_root(root).list_pools().map_err(to_py_err)?;
+    to_json_string(&result)
+}
+
+#[pyfunction]
+#[pyo3(signature = (name, profile_ids, max_active=3, root=None))]
+fn py_profile_pool_create(
+    name: String,
+    profile_ids: Vec<String>,
+    max_active: usize,
+    root: Option<String>,
+) -> PyResult<String> {
+    let result =
+        registry_from_root(root).create_pool(&name, profile_ids, max_active).map_err(to_py_err)?;
+    to_json_string(&result)
+}
+
+#[pyfunction]
+#[pyo3(signature = (name, root=None))]
+fn py_profile_pool_describe(name: String, root: Option<String>) -> PyResult<String> {
+    let result = registry_from_root(root).resolve_pool(&name).map_err(to_py_err)?;
+    to_json_string(&result)
+}
+
 /// Handle on a leased Chrome profile. Use as an async context manager,
 /// or call ``release()`` explicitly.
 #[pyclass(name = "ProfileHandle")]
@@ -2645,6 +2735,15 @@ fn _ext(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyProfileHandle>()?;
     m.add_function(wrap_pyfunction!(py_list_profiles, m)?)?;
     m.add_function(wrap_pyfunction!(py_acquire_profile, m)?)?;
+    m.add_function(wrap_pyfunction!(py_profile_registry_root, m)?)?;
+    m.add_function(wrap_pyfunction!(py_profile_registry_list, m)?)?;
+    m.add_function(wrap_pyfunction!(py_profile_registry_create, m)?)?;
+    m.add_function(wrap_pyfunction!(py_profile_registry_describe, m)?)?;
+    m.add_function(wrap_pyfunction!(py_profile_registry_clone, m)?)?;
+    m.add_function(wrap_pyfunction!(py_profile_registry_delete, m)?)?;
+    m.add_function(wrap_pyfunction!(py_profile_pool_list, m)?)?;
+    m.add_function(wrap_pyfunction!(py_profile_pool_create, m)?)?;
+    m.add_function(wrap_pyfunction!(py_profile_pool_describe, m)?)?;
     m.add_function(wrap_pyfunction!(py_scan_file, m)?)?;
     m.add_function(wrap_pyfunction!(py_scan_bytes, m)?)?;
     let py = m.py();

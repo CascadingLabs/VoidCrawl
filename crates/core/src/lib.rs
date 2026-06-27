@@ -5,8 +5,10 @@
 pub mod antibot;
 pub mod ax;
 pub mod captcha;
+pub mod challenge;
 pub mod error;
 pub mod input;
+pub mod managed_profile;
 pub mod page;
 pub mod pool;
 pub mod profile;
@@ -19,11 +21,19 @@ pub use antibot::{AntibotVerdict, Evidence as AntibotEvidence, classify as class
 pub use captcha::{
     CaptchaInfo, CaptchaKind, WidgetRect, capture_captcha, detect_captcha, inject_captcha_token,
 };
+pub use challenge::{
+    AttachCoordinates, ChallengeSnapshot, ChallengeStatus, DomCaptchaSnapshot, ResolutionOutcome,
+    ResolutionRequest, ResolverType, captcha_is_active,
+};
 pub use chromiumoxide::cdp::browser_protocol::{
     input::{DispatchKeyEventType, DispatchMouseEventType, MouseButton},
     network::{Cookie, CookieParam, DeleteCookiesParams},
 };
 pub use error::{Result, VoidCrawlError};
+pub use managed_profile::{
+    ManagedProfile, ManagedProfileDescription, ManagedProfileLease, ProfilePool, ProfileRegistry,
+    ProfileStatus, ResolvedProfilePool, default_profile_root,
+};
 pub use page::{
     Bbox, DownloadCapture, DownloadOutcome, Page, PageResponse, ScreenshotOptions, ScreenshotOutput,
 };

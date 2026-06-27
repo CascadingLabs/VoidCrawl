@@ -8,7 +8,10 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use tempfile::TempDir;
 use tokio::sync::{Mutex, RwLock};
-use void_crawl_core::{BrowserSession, DownloadCapture, Page};
+use void_crawl_core::{
+    AntibotVerdict, BrowserSession, ChallengeSnapshot, DownloadCapture, ManagedProfileLease, Page,
+    ResolutionOutcome,
+};
 
 pub type SessionId = String;
 
@@ -22,11 +25,30 @@ pub struct PendingDownload {
     pub max_bytes:  u64,
 }
 
+/// Last document navigation metadata kept so a later `capture_challenge` call
+/// can combine response-side anti-bot evidence with DOM-side captcha evidence.
+#[derive(Debug, Clone)]
+pub struct LastNavigation {
+    pub url:         String,
+    pub status_code: Option<u16>,
+    pub antibot:     Option<AntibotVerdict>,
+}
+
+/// Challenge event currently owned by a session.
+#[derive(Debug, Clone)]
+pub struct PendingChallenge {
+    pub snapshot: ChallengeSnapshot,
+    pub outcome:  Option<ResolutionOutcome>,
+}
+
 /// Owned state for one stateful MCP session.
 #[derive(Debug)]
 pub struct DedicatedSession {
     pub session:          Arc<BrowserSession>,
     pub page:             Mutex<Page>,
+    pub profile_lease:    Option<ManagedProfileLease>,
+    pub last_navigation:  Mutex<Option<LastNavigation>>,
+    pub challenge:        Mutex<Option<PendingChallenge>>,
     /// A download armed via `download_arm`, pending its `download_wait`.
     pub pending_download: Mutex<Option<PendingDownload>>,
 }

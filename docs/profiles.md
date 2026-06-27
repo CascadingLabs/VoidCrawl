@@ -63,13 +63,23 @@ Chrome itself locks a profile via `SingletonLock` when it runs. If your **real**
 
 `voidcrawl`'s own lock (`.voidcrawl.lock` in the profile dir) only arbitrates between voidcrawl processes.
 
-## MCP server pinning
+## MCP profiles
 
-`voidcrawl-mcp` accepts `--profile NAME` (or `VOIDCRAWL_PROFILE=NAME` env) to bind the whole server to one profile at startup. Profile management is **not** exposed to MCP clients — agents don't acquire profiles, pipelines do.
+`voidcrawl-mcp` accepts `--profile NAME` (or `VOIDCRAWL_PROFILE=NAME` env) to bind the whole server to one native Chrome profile at startup. MCP clients cannot enumerate or switch your daily Chrome profiles.
 
 ```bash
 voidcrawl-mcp --profile "Default"
 ```
+
+For agent-controlled persistent state, use **VoidCrawl-managed profiles** instead. They live under `VOIDCRAWL_PROFILE_ROOT` (default platform data dir) and are standalone Chrome `user_data_dir` roots, not subprofiles inside your daily Chrome directory.
+
+MCP tools:
+
+- `profile_create`, `profile_list`, `profile_describe`, `profile_clone`, `profile_delete`
+- `profile_pool_create`, `profile_pool_list`, `profile_pool_describe`
+- `session_open` with `profile_id` or `profile_pool`
+
+Managed profile tools return metadata only. They never return cookies, local storage, or saved passwords.
 
 ## Ephemeral vs. persistent profiles
 
@@ -130,8 +140,7 @@ score — one block makes the next likelier. The levers, in order of impact:
    cookies + pacing); space `fetch_many` batches against managed domains rather
    than firing them back-to-back.
 
-There is no built-in rotator — rotation is a caller/pipeline pattern: keep a
-pool of `(proxy, user_data_dir)` identities and pick one per task.
+For MCP sessions, `profile_pool_create` gives you a bounded round-robin pool of managed profiles and `session_open(profile_pool=...)` leases one available profile. For Python-only flows, rotation can still be a caller pattern: keep a pool of `(proxy, user_data_dir)` identities and pick one per task.
 
 ## Warm profiles & Cloudflare `cf_clearance` — what they do and don't fix
 

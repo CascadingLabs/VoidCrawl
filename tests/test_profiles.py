@@ -14,6 +14,7 @@ from voidcrawl import (
     ProfileBusy,
     ProfileLeaseExpired,
     ProfileNotFound,
+    ProfileRegistry,
     VoidCrawlError,
     acquire_profile,
     list_profiles,
@@ -42,3 +43,32 @@ def test_exception_hierarchy() -> None:
 async def test_acquire_unknown_profile_raises_not_found() -> None:
     with pytest.raises(ProfileNotFound):
         await acquire_profile("NoSuchProfileXYZ_9999", lease_timeout=0.0)
+
+
+def test_managed_profile_registry_crud_and_pool(tmp_path) -> None:
+    registry = ProfileRegistry(str(tmp_path))
+
+    created = registry.create_profile(
+        "google-001",
+        description="SERP login",
+        labels=("serp", "google"),
+    )
+
+    assert created["id"] == "google-001"
+    assert created["description"] == "SERP login"
+    assert created["labels"] == ["serp", "google"]
+    assert created["status"] == "available"
+
+    listed = registry.list_profiles()
+    assert [profile["id"] for profile in listed] == ["google-001"]
+
+    pool = registry.create_pool("google-serp", ["google-001"])
+    assert pool["name"] == "google-serp"
+    assert pool["profile_ids"] == ["google-001"]
+    assert pool["max_active"] == 3
+
+    resolved = registry.resolve_pool("google-serp")
+    assert resolved["profiles"][0]["id"] == "google-001"
+
+    assert registry.delete_profile("google-001") is True
+    assert registry.list_profiles() == []

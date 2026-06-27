@@ -16,6 +16,7 @@ use rmcp::{
     model::{CallToolResult, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
 };
+use void_crawl_core::{ManagedProfileDescription, ProfilePool, ResolvedProfilePool};
 
 use crate::{
     errors::map_err,
@@ -29,16 +30,26 @@ use crate::{
             OkResult, SessionIdArgs as ActionSessionIdArgs, SolveCaptchaArgs, SolveCaptchaResult,
             TeleportArgs, TitleResult, TypeTextArgs, WaitIdleArgs,
         },
+        challenge::{
+            CaptureChallengeArgs, CaptureChallengeResult, MarkChallengeArgs, ResolutionResult,
+            WaitChallengeArgs, WaitChallengeResult,
+        },
         download::{
             DownloadArgs, DownloadArmArgs, DownloadArmResult, DownloadResult, DownloadWaitArgs,
         },
         fetch::{FetchArgs, FetchManyArgs, FetchManyResult, FetchResult},
         introspect::PoolStatus,
+        profile_registry::{
+            ProfileCloneArgs, ProfileCreateArgs, ProfileDeleteArgs, ProfileDeleteResult,
+            ProfileDescribeArgs, ProfileListArgs, ProfileListResult, ProfilePoolCreateArgs,
+            ProfilePoolDescribeArgs, ProfilePoolListArgs, ProfilePoolListResult,
+        },
         screenshot::ScreenshotArgs,
         session::{
             SessionCloseResult, SessionContentResult, SessionIdArgs, SessionNavigateArgs,
             SessionNavigateResult, SessionOpenArgs, SessionOpenResult,
         },
+        snapshot::{FetchSnapshotArgs, PageSnapshot, SessionSnapshotArgs},
     },
 };
 
@@ -87,6 +98,19 @@ you oversubscribed the pool; cap batches at `max_tabs` (see pool_status) for ful
         Parameters(args): Parameters<FetchManyArgs>,
     ) -> Result<Json<FetchManyResult>, ErrorData> {
         Ok(Json(tools::fetch::run_many(self, args).await))
+    }
+
+    #[tool(
+        name = "fetch_snapshot",
+        description = "Fetch a URL with stealth headless Chrome and return a compact rendered-page \
+snapshot: headings, text_blocks, links, controls, forms, metadata, and truncation stats. Use as \
+the first pass for large pages; use fetch only when you truly need raw HTML."
+    )]
+    pub async fn fetch_snapshot(
+        &self,
+        Parameters(args): Parameters<FetchSnapshotArgs>,
+    ) -> Result<Json<PageSnapshot>, ErrorData> {
+        tools::snapshot::fetch(self, args).await.map(Json).map_err(map_err)
     }
 
     #[tool(
@@ -149,12 +173,94 @@ on action downloads (no Content-Type is observed), so `clean` is not a malware-f
     }
 
     #[tool(
+        name = "profile_list",
+        description = "List VoidCrawl-managed Chromium profiles. Returns metadata only; cookies and storage values are never exposed."
+    )]
+    pub async fn profile_list(
+        &self,
+        Parameters(args): Parameters<ProfileListArgs>,
+    ) -> Result<Json<ProfileListResult>, ErrorData> {
+        tools::profile_registry::list(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "profile_create",
+        description = "Create a standalone VoidCrawl-managed Chromium profile under the managed profile root."
+    )]
+    pub async fn profile_create(
+        &self,
+        Parameters(args): Parameters<ProfileCreateArgs>,
+    ) -> Result<Json<ManagedProfileDescription>, ErrorData> {
+        tools::profile_registry::create(self, args).await.map(Json)
+    }
+
+    #[tool(name = "profile_describe", description = "Describe one managed Chromium profile.")]
+    pub async fn profile_describe(
+        &self,
+        Parameters(args): Parameters<ProfileDescribeArgs>,
+    ) -> Result<Json<ManagedProfileDescription>, ErrorData> {
+        tools::profile_registry::describe(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "profile_clone",
+        description = "Clone a managed profile id or source user-data-dir path into a new VoidCrawl-managed profile."
+    )]
+    pub async fn profile_clone(
+        &self,
+        Parameters(args): Parameters<ProfileCloneArgs>,
+    ) -> Result<Json<ManagedProfileDescription>, ErrorData> {
+        tools::profile_registry::clone(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "profile_delete",
+        description = "Delete a managed profile if it is not currently leased."
+    )]
+    pub async fn profile_delete(
+        &self,
+        Parameters(args): Parameters<ProfileDeleteArgs>,
+    ) -> Result<Json<ProfileDeleteResult>, ErrorData> {
+        tools::profile_registry::delete(self, args).await.map(Json)
+    }
+
+    #[tool(name = "profile_pool_list", description = "List managed Chromium profile pools.")]
+    pub async fn profile_pool_list(
+        &self,
+        Parameters(args): Parameters<ProfilePoolListArgs>,
+    ) -> Result<Json<ProfilePoolListResult>, ErrorData> {
+        tools::profile_registry::pool_list(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "profile_pool_create",
+        description = "Create or replace a named ordered managed-profile pool. Default max_active is 3."
+    )]
+    pub async fn profile_pool_create(
+        &self,
+        Parameters(args): Parameters<ProfilePoolCreateArgs>,
+    ) -> Result<Json<ProfilePool>, ErrorData> {
+        tools::profile_registry::pool_create(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "profile_pool_describe",
+        description = "Describe a named managed-profile pool and its profile metadata."
+    )]
+    pub async fn profile_pool_describe(
+        &self,
+        Parameters(args): Parameters<ProfilePoolDescribeArgs>,
+    ) -> Result<Json<ResolvedProfilePool>, ErrorData> {
+        tools::profile_registry::pool_describe(self, args).await.map(Json)
+    }
+
+    #[tool(
         name = "session_open",
         description = "Open a new stateful browser session with a dedicated Chrome instance. \
 Returns a session_id used by session_navigate / session_content / session_close. \
-Pass `user_data_dir` to mount a persistent profile (e.g. one already logged into LinkedIn); \
-omit it for an ephemeral cookieless profile. Set `headful=true` to bring up a visible window \
-(useful for a one-time manual login into the persistent profile)."
+Pass `profile_id` or `profile_pool` to lease a VoidCrawl-managed profile, or `user_data_dir` \
+for an explicit path; omit all for an ephemeral cookieless profile. Set `headful=true` to bring \
+up a visible window (useful for a one-time manual login into the persistent profile)."
     )]
     pub async fn session_open(
         &self,
@@ -184,6 +290,19 @@ wait_for accepts 'networkidle' (default) or 'selector:<css>' (event-driven, no p
         Parameters(args): Parameters<SessionIdArgs>,
     ) -> Result<Json<SessionContentResult>, ErrorData> {
         tools::session::content(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "session_snapshot",
+        description = "Return a compact rendered-page snapshot for the current stateful session: \
+headings, text_blocks, links, controls, forms, metadata, and truncation stats. Use after clicking, \
+pagination, login, or other stateful flows; use session_content only when raw HTML is required."
+    )]
+    pub async fn session_snapshot(
+        &self,
+        Parameters(args): Parameters<SessionSnapshotArgs>,
+    ) -> Result<Json<PageSnapshot>, ErrorData> {
+        tools::snapshot::session(self, args).await.map(Json)
     }
 
     #[tool(
@@ -414,6 +533,59 @@ explicitly ('turnstile'/'recaptcha'/'hcaptcha') to skip re-detection."
     ) -> Result<Json<OkResult>, ErrorData> {
         tools::actions::inject_captcha_token_tool(self, args).await.map(Json)
     }
+
+    #[tool(
+        name = "capture_challenge",
+        description = "Capture the current session's active anti-bot/captcha challenge as a \
+neutral event. Combines the last session_navigate anti-bot verdict with a live DOM captcha probe, \
+and returns same-tab attach coordinates {websocket_url,target_id,session_id} plus optional vnc_url \
+and novnc_url. V1 flow: open noVNC/VNC, clear the wall manually, then call \
+mark_challenge_resolved and wait_for_challenge_resolution. Presence-only CDN signals do not create \
+a blocking event."
+    )]
+    pub async fn capture_challenge(
+        &self,
+        Parameters(args): Parameters<CaptureChallengeArgs>,
+    ) -> Result<Json<CaptureChallengeResult>, ErrorData> {
+        tools::challenge::capture(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "mark_challenge_resolved",
+        description = "Mark a captured challenge event resolved after the operator or resolver \
+clears it in the same tab. Defaults resolver=manual_vnc; later phases can pass yosoi_recipe, \
+open_sesame_session_actor, or agent_mcp."
+    )]
+    pub async fn mark_challenge_resolved(
+        &self,
+        Parameters(args): Parameters<MarkChallengeArgs>,
+    ) -> Result<Json<ResolutionResult>, ErrorData> {
+        tools::challenge::mark_resolved(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "mark_challenge_failed",
+        description = "Mark a captured challenge event failed. Use when manual VNC/noVNC or an \
+automated resolver cannot clear the wall; callers can then rotate identity or fail with evidence."
+    )]
+    pub async fn mark_challenge_failed(
+        &self,
+        Parameters(args): Parameters<MarkChallengeArgs>,
+    ) -> Result<Json<ResolutionResult>, ErrorData> {
+        tools::challenge::mark_failed(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "wait_for_challenge_resolution",
+        description = "Wait for mark_challenge_resolved/failed on an active challenge event. When \
+resolved, re-probes the DOM by default so callers can confirm the wall is gone before resuming."
+    )]
+    pub async fn wait_for_challenge_resolution(
+        &self,
+        Parameters(args): Parameters<WaitChallengeArgs>,
+    ) -> Result<Json<WaitChallengeResult>, ErrorData> {
+        tools::challenge::wait_for_resolution(self, args).await.map(Json)
+    }
 }
 
 #[tool_handler]
@@ -435,22 +607,28 @@ impl ServerHandler for VoidCrawlServer {
         info.instructions = Some(
             "Stealthy headless Chrome over a shared, fingerprint-patched tab pool — a drop-in \
 replacement for Playwright / Chromium MCP.\n\n\
-WORKFLOW. Stateless scrape: `fetch` (one URL) or `fetch_many` (parallel; returns \
+WORKFLOW. Stateless perception: `fetch_snapshot` for a compact rendered-page snapshot. Stateless \
+raw scrape: `fetch` (one URL) or `fetch_many` (parallel; returns \
 {results:[{ok,result,error}]} in input order — per-item errors don't abort the batch, and \
 status_code is nested under each item's `result`). Stateful flows (login, pagination, clicking): \
-`session_open` → `session_navigate` → … → `session_close`. ALWAYS session_close; sessions are \
-cookie-isolated.\n\n\
-PERCEIVE → ACT → EXTRACT. To see a page, call `session_ax_tree` — a compact role/name outline, \
-far cheaper than HTML (don't dump raw HTML to reason over a page). If `named_count` is low vs \
-`node_count` the accessibility tree is thin; fall back to `screenshot`. To click: `click` (CSS \
-selector) or `click_by_role` (accessibility role + accessible name — durable across redesigns); \
-last resort `click_visual_coords` for React forms that ignore synthetic clicks. To extract data, \
-run `extract` / `eval_js` with a JS expression and return data, not markup.\n\n\
+`session_open` → `session_navigate` → `session_snapshot` / actions → … → `session_close`. ALWAYS \
+session_close; sessions are cookie-isolated.\n\n\
+PERCEIVE → ACT → EXTRACT. To inspect a large rendered page, prefer `fetch_snapshot` first, or \
+`session_snapshot` after clicking/pagination/login flows. For role/name interaction targeting, \
+call `session_ax_tree` — a compact outline of the accessibility tree. If `named_count` is low vs \
+`node_count` the accessibility tree is thin; fall back to `session_snapshot` or `screenshot`. Use \
+raw `fetch` / `session_content` only when you truly need markup. To click: `click` (CSS selector) \
+or `click_by_role` (accessibility role + accessible name — durable across redesigns); last resort \
+`click_visual_coords` for React forms that ignore synthetic clicks. To extract data, run `extract` \
+/ `eval_js` with a JS expression and return data, not markup.\n\n\
 GOTCHAS. `click_by_role` name matching is EXACT (case + whitespace) — read the exact name from \
 `session_ax_tree` first; use `nth` for duplicates. After an in-page (SPA) click, \
 `wait_for_network_idle` may run to its full timeout — pass a short `timeout_secs` or use \
 `wait_for:\"selector:<css>\"`. On a captcha error, surface it and rotate proxy/profile; don't \
-retry the same URL and don't try to solve."
+retry the same URL. For operator handoff, use `capture_challenge` to get same-tab attach \
+coordinates plus VNC/noVNC links, clear the wall manually, then call \
+`mark_challenge_resolved` and `wait_for_challenge_resolution`. Phase-3 automated resolvers \
+attach to the same `{websocket_url,target_id}` and must mark resolved or failed."
                 .into(),
         );
         info

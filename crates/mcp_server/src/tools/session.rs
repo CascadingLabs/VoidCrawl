@@ -10,12 +10,14 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
-use void_crawl_core::{AntibotVerdict, BrowserSession, VoidCrawlError};
+use void_crawl_core::{
+    AntibotVerdict, BrowserSession, ManagedProfileLease, ProfileRegistry, VoidCrawlError,
+};
 
 use crate::{
     errors::map_err,
     server::VoidCrawlServer,
-    sessions::DedicatedSession,
+    sessions::{DedicatedSession, LastNavigation},
     tools::{fetch::AntibotInfo, wait},
 };
 
@@ -40,6 +42,14 @@ pub struct SessionOpenArgs {
     /// daily-driver profile while normal Chrome is open will fail.
     #[serde(default)]
     pub user_data_dir: Option<String>,
+    /// VoidCrawl-managed profile id. Mutually exclusive with `profile_pool`
+    /// and `user_data_dir`.
+    #[serde(default)]
+    pub profile_id:    Option<String>,
+    /// VoidCrawl-managed profile pool. Leases one available profile from the
+    /// pool's active window and returns the selected `profile_id`.
+    #[serde(default)]
+    pub profile_pool:  Option<String>,
     /// Pin Chrome's `--remote-debugging-port` so another process can attach to
     /// this session's browser via the returned `websocket_url` (e.g. the
     /// OpenSesame solver MCP, to solve a captcha on this exact tab). Omit to
@@ -60,6 +70,9 @@ pub struct SessionOpenResult {
     pub port:          Option<u16>,
     /// CDP target id of this session's page — the exact tab to adopt.
     pub target_id:     String,
+    /// Selected VoidCrawl-managed profile id when `profile_id` or
+    /// `profile_pool` was used.
+    pub profile_id:    Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Default)]
@@ -104,6 +117,21 @@ pub async fn open(
     server: &VoidCrawlServer,
     args: SessionOpenArgs,
 ) -> Result<SessionOpenResult, ErrorData> {
+    let profile_inputs = [
+        args.user_data_dir.as_ref().map(|_| "user_data_dir"),
+        args.profile_id.as_ref().map(|_| "profile_id"),
+        args.profile_pool.as_ref().map(|_| "profile_pool"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    if profile_inputs.len() > 1 {
+        return Err(ErrorData::invalid_params(
+            format!("profile inputs are mutually exclusive: {}", profile_inputs.join(", ")),
+            None,
+        ));
+    }
+
     let mut builder = BrowserSession::builder();
     builder = if args.headful { builder.headful() } else { builder.headless() };
     if let Some(p) = args.port {
@@ -112,7 +140,19 @@ pub async fn open(
     if let Some(proxy) = args.proxy {
         builder = builder.proxy(proxy);
     }
-    if let Some(path) = args.user_data_dir {
+    let mut profile_lease: Option<ManagedProfileLease> = None;
+    let mut selected_profile_id: Option<String> = None;
+    if let Some(profile_id) = args.profile_id {
+        let lease = ProfileRegistry::default().acquire_profile(&profile_id).map_err(map_err)?;
+        selected_profile_id = Some(lease.id().to_string());
+        builder = builder.user_data_dir(lease.path());
+        profile_lease = Some(lease);
+    } else if let Some(pool_name) = args.profile_pool {
+        let lease = ProfileRegistry::default().acquire_from_pool(&pool_name).map_err(map_err)?;
+        selected_profile_id = Some(lease.id().to_string());
+        builder = builder.user_data_dir(lease.path());
+        profile_lease = Some(lease);
+    } else if let Some(path) = args.user_data_dir {
         builder = builder.user_data_dir(expand_tilde(&path));
     }
     let session = builder.launch().await.map_err(map_err)?;
@@ -123,12 +163,21 @@ pub async fn open(
     let target_id = page.target_id();
     let id = Uuid::new_v4().to_string();
     let handle = Arc::new(DedicatedSession {
-        session:          Arc::new(session),
-        page:             Mutex::new(page),
+        session: Arc::new(session),
+        page: Mutex::new(page),
+        profile_lease,
+        last_navigation: Mutex::new(None),
+        challenge: Mutex::new(None),
         pending_download: Mutex::new(None),
     });
     server.state().sessions.insert(id.clone(), handle).await;
-    Ok(SessionOpenResult { session_id: id, websocket_url, port: args.port, target_id })
+    Ok(SessionOpenResult {
+        session_id: id,
+        websocket_url,
+        port: args.port,
+        target_id,
+        profile_id: selected_profile_id,
+    })
 }
 
 pub async fn navigate(
@@ -140,6 +189,12 @@ pub async fn navigate(
     let timeout = Duration::from_secs(args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
     let resp = page.goto_and_wait_for_idle(&args.url, timeout).await.map_err(map_err)?;
     wait::apply_post_navigate(&page, args.wait_for.as_deref(), timeout).await.map_err(map_err)?;
+    let last_navigation = LastNavigation {
+        url:         resp.url.clone(),
+        status_code: resp.status_code,
+        antibot:     resp.antibot.clone().filter(AntibotVerdict::detected),
+    };
+    *handle.last_navigation.lock().await = Some(last_navigation);
     let antibot = resp.antibot.filter(AntibotVerdict::detected).map(AntibotInfo::from);
     Ok(SessionNavigateResult {
         url: resp.url,

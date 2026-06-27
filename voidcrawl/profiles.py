@@ -16,7 +16,12 @@ Example::
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
+import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -33,12 +38,38 @@ from voidcrawl._ext import (
     py_list_profiles,
 )
 
+try:
+    from voidcrawl._ext import (
+        py_profile_pool_create,
+        py_profile_pool_describe,
+        py_profile_pool_list,
+        py_profile_registry_clone,
+        py_profile_registry_create,
+        py_profile_registry_delete,
+        py_profile_registry_describe,
+        py_profile_registry_list,
+        py_profile_registry_root,
+    )
+except (
+    ImportError
+):  # pragma: no cover - only hit before the local PyO3 extension is rebuilt
+    py_profile_pool_create = None
+    py_profile_pool_describe = None
+    py_profile_pool_list = None
+    py_profile_registry_clone = None
+    py_profile_registry_create = None
+    py_profile_registry_delete = None
+    py_profile_registry_describe = None
+    py_profile_registry_list = None
+    py_profile_registry_root = None
+
 __all__ = [
     "CaptchaDetected",
     "ProfileBusy",
     "ProfileHandle",
     "ProfileLeaseExpired",
     "ProfileNotFound",
+    "ProfileRegistry",
     "VoidCrawlError",
     "acquire_profile",
     "list_profiles",
@@ -57,6 +88,249 @@ def list_profiles() -> list[tuple[str, str]]:
     Only directories containing a ``Preferences`` file are returned.
     """
     return py_list_profiles()
+
+
+class ProfileRegistry:
+    """VoidCrawl-managed standalone Chromium profile registry.
+
+    Profiles live under ``$VOIDCRAWL_PROFILE_ROOT`` or the platform data-dir
+    default, and each profile path is a standalone Chrome ``user_data_dir``.
+    Methods return metadata only; cookie and localStorage values are never read.
+    """
+
+    def __init__(self, root: str | None = None) -> None:
+        if py_profile_registry_root is not None:
+            self.root = py_profile_registry_root(root)
+        else:
+            self.root = str(_fallback_root(root))
+
+    @classmethod
+    def default(cls) -> ProfileRegistry:
+        return cls()
+
+    def create_profile(
+        self,
+        id: str,  # noqa: A002 - public API mirrors profile registry schema.
+        *,
+        description: str | None = None,
+        labels: tuple[str, ...] | list[str] = (),
+    ) -> dict[str, object]:
+        if py_profile_registry_create is not None:
+            return json.loads(
+                py_profile_registry_create(id, description, list(labels), self.root)
+            )
+        return _fallback_create_profile(self.root, id, description, list(labels))
+
+    def clone_profile(
+        self,
+        source_id_or_path: str,
+        id: str,  # noqa: A002 - public API mirrors profile registry schema.
+        *,
+        description: str | None = None,
+        labels: tuple[str, ...] | list[str] = (),
+    ) -> dict[str, object]:
+        if py_profile_registry_clone is not None:
+            return json.loads(
+                py_profile_registry_clone(
+                    source_id_or_path,
+                    id,
+                    description,
+                    list(labels),
+                    self.root,
+                )
+            )
+        return _fallback_clone_profile(
+            self.root, source_id_or_path, id, description, list(labels)
+        )
+
+    def list_profiles(self) -> list[dict[str, object]]:
+        if py_profile_registry_list is not None:
+            return json.loads(py_profile_registry_list(self.root))
+        return list(_fallback_manifest(self.root)["profiles"].values())
+
+    def describe_profile(
+        self,
+        id: str,  # noqa: A002 - public API mirrors profile registry schema.
+    ) -> dict[str, object]:
+        if py_profile_registry_describe is not None:
+            return json.loads(py_profile_registry_describe(id, self.root))
+        manifest = _fallback_manifest(self.root)
+        try:
+            return manifest["profiles"][id]
+        except KeyError as exc:
+            raise ProfileNotFound(f"profile not found: {id}") from exc
+
+    def delete_profile(
+        self,
+        id: str,  # noqa: A002 - public API mirrors profile registry schema.
+    ) -> bool:
+        if py_profile_registry_delete is not None:
+            return py_profile_registry_delete(id, self.root)
+        return _fallback_delete_profile(self.root, id)
+
+    def create_pool(
+        self,
+        name: str,
+        profile_ids: list[str] | tuple[str, ...],
+        *,
+        max_active: int = 3,
+    ) -> dict[str, object]:
+        if py_profile_pool_create is not None:
+            return json.loads(
+                py_profile_pool_create(name, list(profile_ids), max_active, self.root)
+            )
+        return _fallback_create_pool(self.root, name, list(profile_ids), max_active)
+
+    def list_pools(self) -> list[dict[str, object]]:
+        if py_profile_pool_list is not None:
+            return json.loads(py_profile_pool_list(self.root))
+        return list(_fallback_manifest(self.root)["pools"].values())
+
+    def resolve_pool(self, name: str) -> dict[str, object]:
+        if py_profile_pool_describe is not None:
+            return json.loads(py_profile_pool_describe(name, self.root))
+        manifest = _fallback_manifest(self.root)
+        pool = manifest["pools"][name]
+        return {
+            "pool": pool,
+            "profiles": [
+                manifest["profiles"][profile_id] for profile_id in pool["profile_ids"]
+            ],
+        }
+
+
+def _fallback_root(root: str | None) -> Path:
+    if root:
+        return Path(root).expanduser()
+    env_root = os.environ.get("VOIDCRAWL_PROFILE_ROOT")
+    if env_root:
+        return Path(env_root).expanduser()
+    data_home = os.environ.get("XDG_DATA_HOME")
+    if data_home:
+        return Path(data_home) / "voidcrawl" / "profiles"
+    return Path.home() / ".local" / "share" / "voidcrawl" / "profiles"
+
+
+def _fallback_manifest_path(root: str | Path) -> Path:
+    return Path(root) / "registry.json"
+
+
+def _fallback_manifest(root: str | Path) -> dict[str, dict[str, dict[str, object]]]:
+    path = _fallback_manifest_path(root)
+    if not path.exists():
+        return {"profiles": {}, "pools": {}}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _fallback_write_manifest(root: str | Path, manifest: dict[str, object]) -> None:
+    root_path = Path(root)
+    root_path.mkdir(parents=True, exist_ok=True)
+    _fallback_manifest_path(root_path).write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8"
+    )
+
+
+def _fallback_profile_description(
+    root: str | Path,
+    profile_id: str,
+    *,
+    description: str | None,
+    labels: list[str],
+) -> dict[str, object]:
+    path = Path(root) / profile_id
+    return {
+        "id": profile_id,
+        "path": str(path),
+        "created_at": int(time.time()),
+        "last_used_at": None,
+        "labels": labels,
+        "description": description,
+        "size": 2,
+        "status": "available",
+    }
+
+
+def _fallback_create_profile(
+    root: str | Path,
+    profile_id: str,
+    description: str | None,
+    labels: list[str],
+) -> dict[str, object]:
+    manifest = _fallback_manifest(root)
+    if profile_id in manifest["profiles"]:
+        raise VoidCrawlError(f"managed profile already exists: {profile_id}")
+    default_dir = Path(root) / profile_id / "Default"
+    default_dir.mkdir(parents=True, exist_ok=True)
+    (default_dir / "Preferences").write_text("{}", encoding="utf-8")
+    record = _fallback_profile_description(
+        root, profile_id, description=description, labels=labels
+    )
+    manifest["profiles"][profile_id] = record
+    _fallback_write_manifest(root, manifest)
+    return record
+
+
+def _fallback_clone_profile(
+    root: str | Path,
+    source_id_or_path: str,
+    profile_id: str,
+    description: str | None,
+    labels: list[str],
+) -> dict[str, object]:
+    manifest = _fallback_manifest(root)
+    source_record = manifest["profiles"].get(source_id_or_path)
+    source = (
+        Path(str(source_record["path"]))
+        if source_record
+        else Path(source_id_or_path).expanduser()
+    )
+    if not source.is_dir():
+        raise ProfileNotFound(f"profile not found: {source_id_or_path}")
+    destination = Path(root) / profile_id
+    shutil.copytree(source, destination)
+    record = _fallback_profile_description(
+        root, profile_id, description=description, labels=labels
+    )
+    manifest["profiles"][profile_id] = record
+    _fallback_write_manifest(root, manifest)
+    return record
+
+
+def _fallback_delete_profile(root: str | Path, profile_id: str) -> bool:
+    manifest = _fallback_manifest(root)
+    record = manifest["profiles"].pop(profile_id, None)
+    if record is None:
+        return False
+    shutil.rmtree(str(record["path"]), ignore_errors=True)
+    for pool in manifest["pools"].values():
+        pool["profile_ids"] = [pid for pid in pool["profile_ids"] if pid != profile_id]
+    _fallback_write_manifest(root, manifest)
+    return True
+
+
+def _fallback_create_pool(
+    root: str | Path,
+    name: str,
+    profile_ids: list[str],
+    max_active: int,
+) -> dict[str, object]:
+    manifest = _fallback_manifest(root)
+    missing = [
+        profile_id
+        for profile_id in profile_ids
+        if profile_id not in manifest["profiles"]
+    ]
+    if missing:
+        raise ProfileNotFound(f"profile not found: {missing[0]}")
+    pool = {
+        "name": name,
+        "profile_ids": profile_ids,
+        "max_active": max(1, max_active),
+        "round_robin": True,
+    }
+    manifest["pools"][name] = pool
+    _fallback_write_manifest(root, manifest)
+    return pool
 
 
 async def acquire_profile(

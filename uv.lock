@@ -1155,7 +1155,7 @@ wheels = [
 
 [[package]]
 name = "voidcrawl"
-version = "0.3.7"
+version = "0.3.8"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
@@ -1213,7 +1213,7 @@ dev = [
 
 [[package]]
 name = "voidcrawl-mcp"
-version = "0.3.7"
+version = "0.3.8"
 source = { editable = "crates/mcp_server" }
 
 [[package]]

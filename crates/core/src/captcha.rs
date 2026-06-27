@@ -18,6 +18,7 @@
 //! upstream. See `docs/captcha-detection.md` for the full list and
 //! known gaps.
 
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::{error::Result, page::Page};
@@ -59,7 +60,7 @@ impl CaptchaKind {
 }
 
 /// Axis-aligned widget rectangle in CSS pixels (viewport coordinates).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct WidgetRect {
     pub x:      f64,
     pub y:      f64,

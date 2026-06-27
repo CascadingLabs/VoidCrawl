@@ -46,6 +46,9 @@ async fn server_with_page(html: &str) -> VoidCrawlServer {
     let handle = Arc::new(DedicatedSession {
         session:          Arc::new(session),
         page:             Mutex::new(page),
+        profile_lease:    None,
+        last_navigation:  Mutex::new(None),
+        challenge:        Mutex::new(None),
         pending_download: Mutex::new(None),
     });
     let sessions = Arc::new(SessionRegistry::default());

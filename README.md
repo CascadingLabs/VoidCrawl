@@ -157,6 +157,7 @@ uv run pytest tests/ -v
 
 - [Full API reference](docs/api-reference.md)
 - [Anti-bot / CDN detection](docs/antibot.md)
+- [Challenge escalation with VNC/noVNC](docs/challenge-escalation.md)
 - [Cross-origin & closed-shadow frames](docs/cross-origin-frames.md)
 - [Examples](examples/)
 

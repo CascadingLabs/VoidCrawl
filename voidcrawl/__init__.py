@@ -53,7 +53,12 @@ from voidcrawl._ext import (
     BrowserSession as _BrowserSession,
 )
 from voidcrawl.actions._protocol import JsTab, Tab
-from voidcrawl.profiles import acquire_profile, list_profiles, with_profile
+from voidcrawl.profiles import (
+    ProfileRegistry,
+    acquire_profile,
+    list_profiles,
+    with_profile,
+)
 from voidcrawl.scale import ScaleProfile, ScaleReport
 from voidcrawl.schema import Attr, Schema, Text, safe_url, strip_tags
 
@@ -78,6 +83,7 @@ __all__ = [
     "ProfileHandle",
     "ProfileLeaseExpired",
     "ProfileNotFound",
+    "ProfileRegistry",
     "ScaleProfile",
     "ScaleReport",
     "ScanReport",

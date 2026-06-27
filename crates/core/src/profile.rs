@@ -263,6 +263,18 @@ fn is_profile_dir(path: &Path) -> bool {
     path.is_dir() && path.join("Preferences").is_file()
 }
 
+pub(crate) fn expand_tilde(path: &str) -> String {
+    let Some(rest) = path.strip_prefix('~') else { return path.to_owned() };
+    let Ok(home) = env::var("HOME") else { return path.to_owned() };
+    if rest.is_empty() {
+        home
+    } else if let Some(tail) = rest.strip_prefix('/') {
+        format!("{home}/{tail}")
+    } else {
+        path.to_owned()
+    }
+}
+
 /// Platform-specific Chrome user-data directory roots. Returns every
 /// plausible base so users with Chrome + Chromium + Chrome Canary
 /// installed all work.

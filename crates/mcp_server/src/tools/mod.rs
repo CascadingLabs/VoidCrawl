@@ -5,9 +5,12 @@
 //! (e.g. `fetch_router`). `server.rs` composes them in `new()`.
 
 pub mod actions;
+pub mod challenge;
 pub mod download;
 pub mod fetch;
 pub mod introspect;
+pub mod profile_registry;
 pub mod screenshot;
 pub mod session;
+pub mod snapshot;
 pub mod wait;

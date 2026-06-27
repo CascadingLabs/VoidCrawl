@@ -111,4 +111,5 @@ python examples/antibot_detection.py   # which CDN/anti-bot vendor is walling a 
 - [API Reference](api-reference.md) — full method signatures and return types
 - [Stealth & Anti-Detection](stealth.md) — how stealth mode works and how to tune it
 - [Anti-bot / CDN Detection](antibot.md) — fingerprint which vendor is gating a response (presence vs. active challenge)
+- [Challenge Escalation](challenge-escalation.md) — clear active walls through VNC/noVNC, then resume the same session
 - [Architecture](architecture.md) — how the Rust core, PyO3 bindings, and Python layer fit together
