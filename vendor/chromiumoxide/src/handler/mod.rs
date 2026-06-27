@@ -626,7 +626,7 @@ impl Stream for Handler {
                     }
                     Err(err @ CdpError::InvalidMessage(_, _)) => {
                         if pin.config.ignore_invalid_messages {
-                            tracing::warn!("WS Invalid message: {}", err);
+                            tracing::debug!("WS Invalid message: {}", err);
                         } else {
                             return Poll::Ready(Some(Err(err)));
                         }
