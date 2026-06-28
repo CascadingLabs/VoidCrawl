@@ -158,33 +158,6 @@ pub enum BrowserMode {
     RemoteDebug { ws_url: String },
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum CdpMode {
-    /// Current full chromiumoxide initialization behavior.
-    #[default]
-    Normal,
-    /// Minimal anti-bot-safe CDP footprint: skip eager Runtime, Network, Log,
-    /// Performance, Target auto-attach, and isolated utility-world setup.
-    Minimal,
-}
-
-impl CdpMode {
-    fn from_env_default() -> Self {
-        if env::var_os("VOIDCRAWL_STEALTH_NO_RUNTIME").is_some() {
-            Self::Minimal
-        } else {
-            Self::Normal
-        }
-    }
-
-    const fn as_chromiumoxide(self) -> ChromiumCdpMode {
-        match self {
-            Self::Normal => ChromiumCdpMode::Normal,
-            Self::Minimal => ChromiumCdpMode::Minimal,
-        }
-    }
-}
-
 /// Builder for `BrowserSession`.
 #[derive(Debug, Clone)]
 #[must_use]
@@ -207,7 +180,6 @@ pub struct BrowserSessionBuilder {
     /// existing profile (e.g. one you've logged into `LinkedIn` in) and
     /// leave the directory on disk after the session ends.
     user_data_dir:     Option<PathBuf>,
-    cdp_mode:          CdpMode,
 }
 
 impl Default for BrowserSessionBuilder {
@@ -222,7 +194,6 @@ impl Default for BrowserSessionBuilder {
             window_size:       None,
             port:              None,
             user_data_dir:     None,
-            cdp_mode:          CdpMode::from_env_default(),
         }
     }
 }
@@ -308,11 +279,6 @@ impl BrowserSessionBuilder {
         self
     }
 
-    pub fn cdp_mode(mut self, mode: CdpMode) -> Self {
-        self.cdp_mode = mode;
-        self
-    }
-
     /// Override the stealth viewport dimensions.
     ///
     /// This sets the CDP device metrics override that the page reports to
@@ -336,7 +302,6 @@ impl BrowserSessionBuilder {
             self.window_size,
             self.port,
             self.user_data_dir,
-            self.cdp_mode,
         )
         .await
     }
@@ -350,7 +315,6 @@ pub struct BrowserSession {
     _handler_task:  JoinHandle<()>,
     handler_alive:  Arc<AtomicBool>,
     stealth:        StealthConfig,
-    cdp_mode:       CdpMode,
     /// True when this session attached to an already-running Chrome via
     /// `BrowserMode::RemoteDebug`. In that case `close()` must NOT send
     /// `Browser.close` over CDP — doing so terminates the user's Chromium
@@ -416,7 +380,6 @@ impl BrowserSession {
         window_size: Option<(u32, u32)>,
         port: Option<u16>,
         persistent_user_data_dir: Option<PathBuf>,
-        cdp_mode: CdpMode,
     ) -> Result<Self> {
         let mut owned_user_data_dir: Option<tempfile::TempDir> = None;
 
@@ -424,7 +387,7 @@ impl BrowserSession {
             BrowserMode::RemoteDebug { ws_url } => {
                 let ws = resolve_ws_url(ws_url).await?;
                 let handler_config = HandlerConfig {
-                    cdp_mode: cdp_mode.as_chromiumoxide(),
+                    cdp_mode: ChromiumCdpMode::Minimal,
                     ..HandlerConfig::default()
                 };
                 Browser::connect_with_config(&ws, handler_config)
@@ -437,7 +400,7 @@ impl BrowserSession {
                 // both are instant giveaways to WAFs like Akamai.
                 let mut builder = BrowserConfig::builder()
                     .disable_default_args()
-                    .cdp_mode(cdp_mode.as_chromiumoxide());
+                    .cdp_mode(ChromiumCdpMode::Minimal);
 
                 // Caller-supplied persistent profile vs. ephemeral
                 // `TempDir`. The ephemeral path handles SingletonLock
@@ -528,7 +491,6 @@ impl BrowserSession {
             _handler_task: handler_task,
             handler_alive: alive,
             stealth,
-            cdp_mode,
             attached: matches!(mode, BrowserMode::RemoteDebug { .. }),
             _user_data_dir: owned_user_data_dir,
         })
@@ -550,7 +512,7 @@ impl BrowserSession {
             Page::new(cdp_page)
         }; // browser lock released before navigation
 
-        if let Some(stealth) = self.stealth_for_cdp_mode() {
+        if let Some(stealth) = self.stealth_for_session() {
             page.apply_stealth(&stealth).await?;
         }
         page.navigate(url).await?;
@@ -568,32 +530,27 @@ impl BrowserSession {
                 .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
             Page::new(cdp_page)
         };
-        if let Some(stealth) = self.stealth_for_cdp_mode() {
+        if let Some(stealth) = self.stealth_for_session() {
             page.apply_stealth(&stealth).await?;
         }
         Ok(page)
     }
 
-    fn stealth_for_cdp_mode(&self) -> Option<StealthConfig> {
-        if self.cdp_mode == CdpMode::Minimal {
-            if self.attached {
-                // In remote-debug minimal mode (the Docker/headful parity path),
-                // do not mutate the tab before first real navigation. A normal
-                // attached Chrome already has human UA/window/language, and
-                // avoiding pre-nav Runtime/Network/Emulation commands is closer
-                // to nodriver's low-CDP shape.
-                return None;
-            }
-            let mut cfg = self.stealth.clone();
-            // Launched headless minimal still needs UA/viewport coherence, but
-            // forbids high-signal page-world instrumentation.
-            cfg.use_builtin_stealth = false;
-            cfg.bypass_csp = false;
-            cfg.inject_js = None;
-            Some(cfg)
-        } else {
-            Some(self.stealth.clone())
+    fn stealth_for_session(&self) -> Option<StealthConfig> {
+        if self.attached {
+            // Remote/headful Chrome already has native UA, window, and language
+            // state. Avoid pre-navigation mutations and keep the CDP footprint
+            // close to nodriver/a human operator.
+            return None;
         }
+
+        let mut cfg = self.stealth.clone();
+        // Launched headless still needs UA/viewport coherence, but broad
+        // page-world instrumentation is a higher-signal automation tell.
+        cfg.use_builtin_stealth = false;
+        cfg.bypass_csp = false;
+        cfg.inject_js = None;
+        Some(cfg)
     }
 
     /// List all open pages.

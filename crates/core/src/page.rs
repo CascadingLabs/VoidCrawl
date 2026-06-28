@@ -31,8 +31,9 @@ use chromiumoxide::{
                 DispatchMouseEventType, MouseButton,
             },
             network::{
-                Cookie, CookieParam, DeleteCookiesParams, EventRequestWillBeSent,
-                EventResponseReceived, Headers, ResourceType, SetExtraHttpHeadersParams,
+                Cookie, CookieParam, DeleteCookiesParams, EnableParams as NetworkEnableParams,
+                EventRequestWillBeSent, EventResponseReceived, Headers, ResourceType,
+                SetExtraHttpHeadersParams,
             },
             page::{
                 AddScriptToEvaluateOnNewDocumentParams, CaptureScreenshotFormat,
@@ -108,6 +109,32 @@ pub struct PageResponse {
     /// the set (mirrors `AntibotVerdict::corpus_version`). `None` iff
     /// `endpoints` is `None` (capture was not requested).
     pub endpoint_sanitizer_version: Option<&'static str>,
+}
+
+/// Per-tab CDP instrumentation state.
+///
+/// Tabs start in a human-first, low-CDP state. Calling network-heavy helpers
+/// lazily enables the required CDP domains on that tab and flips these flags;
+/// use this state to route sensitive challenge traversal away from tabs that
+/// have already escalated into instrumentation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "state snapshot intentionally exposes independent routing flags"
+)]
+pub struct TabInstrumentationState {
+    /// `true` while the tab has not enabled higher-signal CDP domains.
+    pub low_cdp:                bool,
+    /// `true` after `Network.enable` has been sent for this target.
+    pub network_enabled:        bool,
+    /// Reserved for future Runtime-domain escalation tracking. `eval_js` uses
+    /// one-shot `Runtime.evaluate` without enabling the Runtime domain.
+    pub runtime_enabled:        bool,
+    /// Reserved for future isolated utility-world escalation tracking.
+    pub utility_world_enabled:  bool,
+    /// `true` if VoidCrawl applied UA/viewport pre-navigation stealth to this
+    /// tab.
+    pub pre_navigation_stealth: bool,
 }
 
 /// Version of the endpoint-sanitization rules ([`safe_endpoint`]). Bump on any
@@ -399,20 +426,28 @@ impl DownloadCapture {
 /// Thin wrapper over `chromiumoxide::Page` exposing a clean async API.
 #[derive(Debug)]
 pub struct Page {
-    inner:          CdpPage,
+    inner:                  CdpPage,
     /// `true` between [`Page::arm_download`] / a `download_to_dir` in flight
     /// and the matching reset. The pool checks this on release to reset an
     /// abandoned download behavior cheaply (no CDP call on the common path).
-    download_armed: AtomicBool,
+    download_armed:         AtomicBool,
     /// Last virtual cursor position (CSS px), so a humanized move starts from
     /// where the pointer actually is. Defaults to the top-left.
-    cursor:         Mutex<(f64, f64)>,
+    cursor:                 Mutex<(f64, f64)>,
+    network_enabled:        AtomicBool,
+    pre_navigation_stealth: AtomicBool,
 }
 
 impl Page {
     /// Wrap an existing CDP page.
     pub(crate) fn new(inner: CdpPage) -> Self {
-        Self { inner, download_armed: AtomicBool::new(false), cursor: Mutex::new((0.0, 0.0)) }
+        Self {
+            inner,
+            download_armed: AtomicBool::new(false),
+            cursor: Mutex::new((0.0, 0.0)),
+            network_enabled: AtomicBool::new(false),
+            pre_navigation_stealth: AtomicBool::new(false),
+        }
     }
 
     /// Whether a download is currently armed on this page (set by
@@ -432,8 +467,33 @@ impl Page {
         self.inner.target_id().inner().clone()
     }
 
+    /// Snapshot this tab's instrumentation state for routing/debugging.
+    pub fn instrumentation_state(&self) -> TabInstrumentationState {
+        let network_enabled = self.network_enabled.load(Ordering::Relaxed);
+        let pre_navigation_stealth = self.pre_navigation_stealth.load(Ordering::Relaxed);
+        TabInstrumentationState {
+            low_cdp: !network_enabled,
+            network_enabled,
+            runtime_enabled: false,
+            utility_world_enabled: false,
+            pre_navigation_stealth,
+        }
+    }
+
+    async fn ensure_network_enabled(&self) -> Result<()> {
+        if !self.network_enabled.load(Ordering::Relaxed) {
+            self.inner
+                .execute(NetworkEnableParams::default())
+                .await
+                .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+            self.network_enabled.store(true, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
     /// Apply stealth settings to this page.
     pub(crate) async fn apply_stealth(&self, cfg: &StealthConfig) -> Result<()> {
+        self.pre_navigation_stealth.store(true, Ordering::Relaxed);
         // 1. Built-in stealth (patches navigator.webdriver etc.)
         if cfg.use_builtin_stealth {
             if let Some(ua) = &cfg.user_agent {
@@ -563,6 +623,7 @@ impl Page {
         timeout: Duration,
         capture_endpoints: bool,
     ) -> Result<PageResponse> {
+        self.ensure_network_enabled().await?;
         // Subscribe to ALL event streams BEFORE navigation so no events slip
         // through the gap between goto() and the listener setup.
         let mut lifecycle = self
@@ -741,6 +802,7 @@ impl Page {
     ///
     /// This is fully async and event-driven — **no polling**.
     pub async fn wait_for_network_idle(&self, timeout: Duration) -> Result<Option<String>> {
+        self.ensure_network_enabled().await?;
         let mut events = self
             .inner
             .event_listener::<EventLifecycleEvent>()
@@ -1741,6 +1803,7 @@ impl Page {
 
     /// Set extra HTTP headers for all subsequent requests from this page.
     pub async fn set_headers(&self, headers: HashMap<String, String>) -> Result<()> {
+        self.ensure_network_enabled().await?;
         let json_val =
             serde_json::to_value(&headers).map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
         let params = SetExtraHttpHeadersParams::new(Headers::new(json_val));

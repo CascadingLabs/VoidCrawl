@@ -7,11 +7,10 @@ stealth across Intel/AMD/NVIDIA boxes) you can instead run Chromium in a
 container and have the MCP **attach** to it over CDP for every call.
 
 The MCP never launches Chromium in this mode; it connects to the containerized
-Chrome farm via `CHROME_WS_URLS`. Per-page stealth (UA / Client-Hints /
-`navigator.webdriver` patches) is still applied over the attached CDP session —
-only the *launch* flags (hardware GPU + anti-automation) come from the
-container, where they're baked into the Chrome launch (`supervisord.conf` /
-`voidcrawl.scale`).
+Chrome farm via `CHROME_WS_URLS`. Attached/headful tabs keep the already-running
+Chrome's native fingerprint and avoid pre-navigation stealth mutations; the
+container supplies the hardware GPU, profile, and launch-surface hygiene baked
+into `supervisord.conf` / `voidcrawl.scale`.
 
 ## 1. Run the Chromium farm
 
@@ -107,17 +106,9 @@ PY
 
 ## Warm profiles (Cloudflare `cf_clearance`, logins)
 
-The farm's profiles are ephemeral (`/tmp/chrome-profile-N`, reset on container
-restart). To persist a warm profile (e.g. to bank a `cf_clearance` cookie or a
-login), mount a volume over the profile dir in `docker-compose.yml`:
-
-```yaml
-    volumes:
-      - ./.voidcrawl-profiles/p1:/tmp/chrome-profile-1
-      - ./.voidcrawl-profiles/p2:/tmp/chrome-profile-2
-```
-
-Note Chrome locks a profile while running — one Chrome per profile dir.
+Use `CHROME_PROFILES_DIR=/profiles` to persist warm profiles in the named Docker
+volume described above. Each Chrome owns one subdirectory under that base. Note
+Chrome locks a profile while running — one Chrome per profile dir.
 
 ## Headful variant
 

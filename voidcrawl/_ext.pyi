@@ -5,9 +5,7 @@ Internal — import from ``voidcrawl`` instead.
 
 from __future__ import annotations
 
-from typing import Any, Literal
-
-CdpMode = Literal["normal", "minimal"]
+from typing import Any
 
 class AntibotVerdict:
     """Signature-based anti-bot / CDN vendor fingerprint of a response.
@@ -64,6 +62,24 @@ class PageResponse:
     endpoints: list[str] | None
     endpoints_truncated: bool
     endpoint_sanitizer_version: str | None
+
+class TabInstrumentationState:
+    """Per-tab CDP instrumentation state for routing sensitive work.
+
+    Attributes:
+        low_cdp: ``True`` while the tab has not enabled higher-signal CDP domains.
+        network_enabled: ``True`` after ``Network.enable`` has been sent.
+        runtime_enabled: Reserved for future Runtime-domain escalation tracking.
+        utility_world_enabled: Reserved for future isolated-world tracking.
+        pre_navigation_stealth: ``True`` if VoidCrawl applied UA/viewport
+            pre-navigation stealth to this tab.
+    """
+
+    low_cdp: bool
+    network_enabled: bool
+    runtime_enabled: bool
+    utility_world_enabled: bool
+    pre_navigation_stealth: bool
 
 class DownloadOutcome:
     """Result of :meth:`Page.download` / :meth:`PooledTab.download`.
@@ -153,6 +169,9 @@ class PooledTab:
         ...
     async def url(self) -> str | None:
         """Return the current page URL, or ``None``."""
+        ...
+    async def instrumentation_state(self) -> TabInstrumentationState:
+        """Return this tab's CDP instrumentation state."""
         ...
     async def evaluate_js(self, expression: str) -> object:
         """Evaluate a JavaScript *expression* and return the result.
@@ -522,7 +541,6 @@ class BrowserPool:
         chrome_executable: str | None,
         extra_args: list[str],
         user_data_dir: str | None,
-        cdp_mode: CdpMode,
     ) -> _PoolParamsContext: ...
     async def warmup(self) -> None: ...
     def acquire(self) -> _AcquireContext: ...
@@ -567,6 +585,9 @@ class Page:
         ...
     async def url(self) -> str | None:
         """Return the current page URL, or ``None``."""
+        ...
+    async def instrumentation_state(self) -> TabInstrumentationState:
+        """Return this tab's CDP instrumentation state."""
         ...
     async def evaluate_js(self, expression: str) -> object:
         """Evaluate a JavaScript *expression* and return the result."""
@@ -878,7 +899,6 @@ class BrowserSession:
         headless: bool = True,
         ws_url: str | None = None,
         stealth: bool = True,
-        cdp_mode: CdpMode = "normal",
         no_sandbox: bool = False,
         proxy: str | None = None,
         chrome_executable: str | None = None,

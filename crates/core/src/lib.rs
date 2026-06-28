@@ -35,7 +35,8 @@ pub use managed_profile::{
     ProfileStatus, ResolvedProfilePool, default_profile_root,
 };
 pub use page::{
-    Bbox, DownloadCapture, DownloadOutcome, Page, PageResponse, ScreenshotOptions, ScreenshotOutput,
+    Bbox, DownloadCapture, DownloadOutcome, Page, PageResponse, ScreenshotOptions,
+    ScreenshotOutput, TabInstrumentationState,
 };
 pub use pool::{BrowserPool, PoolConfig, PooledTab};
 pub use profile::{
@@ -43,5 +44,5 @@ pub use profile::{
     list_profiles, release_profile, resolve_profile,
 };
 pub use scanner::{DEFAULT_MAX_BYTES, ScanConfig, ScanReport, Verdict, scan_bytes, scan_path};
-pub use session::{BrowserMode, BrowserSession, BrowserSessionBuilder, CdpMode};
+pub use session::{BrowserMode, BrowserSession, BrowserSessionBuilder};
 pub use stealth::StealthConfig;

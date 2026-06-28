@@ -103,8 +103,10 @@ impl Target {
         let request_timeout = config.request_timeout;
         let mut network_manager = NetworkManager::new(config.ignore_https_errors, request_timeout);
 
-        network_manager.set_cache_enabled(config.cache_enabled);
-        network_manager.set_request_interception(config.request_intercept);
+        if !config.cdp_mode.is_minimal() {
+            network_manager.set_cache_enabled(config.cache_enabled);
+            network_manager.set_request_interception(config.request_intercept);
+        }
 
         Self {
             info,

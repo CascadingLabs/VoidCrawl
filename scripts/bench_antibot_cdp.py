@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare VoidCrawl normal/minimal CDP against nodriver on anti-bot pages.
+"""Compare VoidCrawl against nodriver on anti-bot pages.
 
 This is an operator benchmark: pass real target URLs explicitly. It records
 whether a page appears passed, challenged, blocked, or errored without embedding
@@ -9,8 +9,7 @@ Examples:
     uv run python scripts/bench_antibot_cdp.py \
       --url https://example-cloudflare-managed-challenge.test \
       --url https://example-datadome-style.test \
-      --runs 3 --headful \
-      --engine voidcrawl-normal --engine voidcrawl-minimal --engine nodriver
+      --runs 3 --headful --engine voidcrawl --engine nodriver
 """
 
 from __future__ import annotations
@@ -26,7 +25,7 @@ from typing import Any, Literal, cast
 
 from voidcrawl import BrowserConfig, BrowserSession
 
-Engine = Literal["voidcrawl-normal", "voidcrawl-minimal", "nodriver"]
+Engine = Literal["voidcrawl", "nodriver"]
 Verdict = Literal["passed", "challenged", "blocked", "error"]
 
 CHALLENGE_MARKERS = (
@@ -113,10 +112,6 @@ def as_fingerprint(value: object) -> dict[str, Any] | None:
 def classify(title: str, html: str) -> Verdict:
     title_text = title.lower().strip()
     body_text = html.lower()
-    if any(marker in title_text for marker in BLOCK_MARKERS):
-        return "blocked"
-    if title_text and not any(marker in title_text for marker in CHALLENGE_MARKERS):
-        return "passed"
     text = f"{title_text}\n{body_text}"
     if any(marker in text for marker in BLOCK_MARKERS):
         return "blocked"
@@ -134,16 +129,19 @@ async def run_voidcrawl(
     settle_secs: float,
     ws_url: str | None,
 ) -> Result:
-    cdp_mode = "minimal" if engine == "voidcrawl-minimal" else "normal"
     start = time.perf_counter()
     try:
         async with BrowserSession(
-            BrowserConfig(headless=not headful, cdp_mode=cdp_mode, ws_url=ws_url)
+            BrowserConfig(headless=not headful, ws_url=ws_url)
         ) as browser:
-            page = await browser.new_page(url)
+            page = await asyncio.wait_for(browser.new_page(url), timeout=timeout)
             await asyncio.sleep(settle_secs)
-            title = await page.title()
-            fingerprint = as_fingerprint(await page.eval_js(FINGERPRINT_JSON_JS))
+            title = await asyncio.wait_for(page.title(), timeout=timeout)
+            fingerprint = as_fingerprint(
+                await asyncio.wait_for(
+                    page.eval_js(FINGERPRINT_JSON_JS), timeout=timeout
+                )
+            )
             html = await asyncio.wait_for(page.content(), timeout=timeout)
         return Result(
             engine,
@@ -169,11 +167,18 @@ async def run_nodriver(
     browser: Any | None = None
     try:
         uc = importlib.import_module("nodriver")
-        browser = await uc.start(headless=not headful)
-        page = await browser.get(url)
+        browser = await asyncio.wait_for(
+            uc.start(headless=not headful), timeout=timeout
+        )
+        page = await asyncio.wait_for(browser.get(url), timeout=timeout)
         await asyncio.sleep(settle_secs)
-        title = cast("str | None", await page.evaluate("document.title"))
-        fingerprint = as_fingerprint(await page.evaluate(FINGERPRINT_JSON_JS))
+        title = cast(
+            "str | None",
+            await asyncio.wait_for(page.evaluate("document.title"), timeout=timeout),
+        )
+        fingerprint = as_fingerprint(
+            await asyncio.wait_for(page.evaluate(FINGERPRINT_JSON_JS), timeout=timeout)
+        )
         html = cast(
             "str | None", await asyncio.wait_for(page.get_content(), timeout=timeout)
         )
@@ -205,7 +210,7 @@ async def main() -> None:
     parser.add_argument(
         "--engine",
         action="append",
-        choices=["voidcrawl-normal", "voidcrawl-minimal", "nodriver"],
+        choices=["voidcrawl", "nodriver"],
         default=[],
     )
     parser.add_argument("--runs", type=int, default=1)
@@ -221,17 +226,11 @@ async def main() -> None:
     )
     parser.add_argument(
         "--voidcrawl-ws-url",
-        help=(
-            "Connect VoidCrawl engines to an existing Docker/remote Chrome CDP endpoint"
-        ),
+        help=("Connect VoidCrawl to an existing Docker/remote Chrome CDP endpoint"),
     )
     args = parser.parse_args()
 
-    engines: list[Engine] = args.engine or [
-        "voidcrawl-normal",
-        "voidcrawl-minimal",
-        "nodriver",
-    ]
+    engines: list[Engine] = args.engine or ["voidcrawl", "nodriver"]
     results: list[Result] = []
     for url in args.url:
         for run in range(1, args.runs + 1):

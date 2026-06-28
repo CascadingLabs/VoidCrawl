@@ -22,7 +22,6 @@ Example:
 from __future__ import annotations
 
 import os
-from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -41,6 +40,7 @@ from voidcrawl._ext import (
     ProfileLeaseExpired,
     ProfileNotFound,
     ScanReport,
+    TabInstrumentationState,
     VoidCrawlError,
     _AcquireContext,
     _PoolParamsContext,
@@ -63,7 +63,6 @@ from voidcrawl.profiles import (
 from voidcrawl.scale import ScaleProfile, ScaleReport
 from voidcrawl.schema import Attr, Schema, Text, safe_url, strip_tags
 
-CdpMode = Literal["normal", "minimal"]
 Selector = Text
 
 __all__ = [
@@ -74,7 +73,6 @@ __all__ = [
     "BrowserPool",
     "BrowserSession",
     "CaptchaDetected",
-    "CdpMode",
     "DownloadCapture",
     "DownloadOutcome",
     "JsTab",
@@ -93,6 +91,7 @@ __all__ = [
     "Schema",
     "Selector",
     "Tab",
+    "TabInstrumentationState",
     "Text",
     "VoidCrawlError",
     "acquire_profile",
@@ -174,8 +173,6 @@ class BrowserConfig(BaseModel):
         headless: Run Chrome without a visible window. Defaults to ``True``.
         stealth: Apply anti-detection patches (navigator overrides, etc.).
             Defaults to ``True``.
-        cdp_mode: ``"normal"`` keeps full chromiumoxide behavior; ``"minimal"``
-            skips high-signal eager CDP domains for anti-bot validation.
         no_sandbox: Disable the Chrome sandbox. Required in some Docker
             environments. Defaults to ``False``.
         proxy: Upstream HTTPS proxy URL, e.g. ``"http://proxy:8080"``.
@@ -220,7 +217,6 @@ class BrowserConfig(BaseModel):
 
     headless: bool = True
     stealth: bool = True
-    cdp_mode: CdpMode = "normal"
     no_sandbox: bool = False
     proxy: str | None = None
     chrome_executable: str | None = None
@@ -490,7 +486,6 @@ class BrowserSession:
         inner = _BrowserSession(
             headless=bc.headless,
             stealth=bc.stealth,
-            cdp_mode=bc.cdp_mode,
             no_sandbox=bc.no_sandbox,
             proxy=bc.proxy,
             chrome_executable=bc.chrome_executable,
@@ -660,7 +655,6 @@ class BrowserPool:
             no_sandbox=bc.no_sandbox,
             stealth=bc.stealth,
             ws_urls=cfg.chrome_ws_urls,
-            cdp_mode=bc.cdp_mode,
             proxy=bc.proxy,
             chrome_executable=bc.chrome_executable,
             extra_args=bc.extra_args,
