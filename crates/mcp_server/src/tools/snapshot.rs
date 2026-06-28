@@ -4,11 +4,15 @@
 //! structure to orient on large rendered pages without pulling raw HTML into
 //! context; schema-grade extraction remains a caller concern.
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use rmcp::ErrorData;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tokio::time::timeout;
 use void_crawl_core::{AntibotVerdict, Page, VoidCrawlError};
 
 use crate::{
@@ -172,7 +176,7 @@ async fn fetch_on_tab(
     let resp = page.goto_and_wait_for_idle(&args.url, total_timeout).await?;
     wait::apply_post_navigate(page, args.wait_for.as_deref(), total_timeout).await?;
     let remaining = total_timeout.saturating_sub(start.elapsed());
-    let raw = tokio::time::timeout(remaining, collect_raw(page))
+    let raw = timeout(remaining, collect_raw(page))
         .await
         .map_err(|_| VoidCrawlError::Timeout("snapshot read exceeded timeout_secs".into()))??;
     let meta = SnapshotMeta {
@@ -202,10 +206,7 @@ pub async fn session(
     Ok(apply_budget(raw, meta, args.max_chars))
 }
 
-async fn lookup(
-    server: &VoidCrawlServer,
-    id: &str,
-) -> Result<std::sync::Arc<DedicatedSession>, ErrorData> {
+async fn lookup(server: &VoidCrawlServer, id: &str) -> Result<Arc<DedicatedSession>, ErrorData> {
     server
         .state()
         .sessions
@@ -318,8 +319,8 @@ fn chars(s: &str) -> usize {
     s.chars().count()
 }
 
-fn opt_chars(s: &Option<String>) -> usize {
-    s.as_deref().map_or(0, chars)
+fn opt_chars(s: Option<&String>) -> usize {
+    s.map_or(0, |value| chars(value))
 }
 
 fn heading_chars(h: &HeadingSnapshot) -> usize {
@@ -336,15 +337,15 @@ fn link_chars(l: &LinkSnapshot) -> usize {
 
 fn control_chars(c: &ControlSnapshot) -> usize {
     chars(&c.tag)
-        + opt_chars(&c.r#type)
-        + opt_chars(&c.role)
-        + opt_chars(&c.name)
-        + opt_chars(&c.placeholder)
+        + opt_chars(c.r#type.as_ref())
+        + opt_chars(c.role.as_ref())
+        + opt_chars(c.name.as_ref())
+        + opt_chars(c.placeholder.as_ref())
         + usize::from(c.disabled)
 }
 
 fn form_chars(f: &FormSnapshot) -> usize {
-    opt_chars(&f.action) + opt_chars(&f.method) + chars_controls(&f.controls)
+    opt_chars(f.action.as_ref()) + opt_chars(f.method.as_ref()) + chars_controls(&f.controls)
 }
 
 fn chars_headings(v: &[HeadingSnapshot]) -> usize {

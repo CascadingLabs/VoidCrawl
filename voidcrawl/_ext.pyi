@@ -913,6 +913,37 @@ class ProfileHandle:
     ) -> None: ...
 
 def py_list_profiles() -> list[tuple[str, str]]: ...
+def py_profile_registry_root(root: str | None = None) -> str: ...
+def py_profile_registry_list(root: str | None = None) -> str: ...
+def py_profile_registry_create(
+    id: str,  # noqa: A002
+    description: str | None = None,
+    labels: list[str] | None = None,
+    root: str | None = None,
+) -> str: ...
+def py_profile_registry_describe(
+    id: str,  # noqa: A002
+    root: str | None = None,
+) -> str: ...
+def py_profile_registry_clone(
+    source_id_or_path: str,
+    id: str,  # noqa: A002
+    description: str | None = None,
+    labels: list[str] | None = None,
+    root: str | None = None,
+) -> str: ...
+def py_profile_registry_delete(
+    id: str,  # noqa: A002
+    root: str | None = None,
+) -> bool: ...
+def py_profile_pool_list(root: str | None = None) -> str: ...
+def py_profile_pool_create(
+    name: str,
+    profile_ids: list[str],
+    max_active: int = 3,
+    root: str | None = None,
+) -> str: ...
+def py_profile_pool_describe(name: str, root: str | None = None) -> str: ...
 async def py_acquire_profile(
     name: str,
     lease_timeout: float = 300.0,

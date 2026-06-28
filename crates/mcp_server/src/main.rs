@@ -24,7 +24,7 @@ use voidcrawl_mcp::{
 /// With no subcommand it runs the server over stdio — how MCP hosts launch
 /// it. `install`/`uninstall` wire it into Claude Code, Codex, and opencode.
 #[derive(Parser, Debug)]
-#[command(name = "voidcrawl-mcp", version, about, long_about = None)]
+#[command(name = "voidcrawl-mcp", version = voidcrawl_mcp::VERSION, about, long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,

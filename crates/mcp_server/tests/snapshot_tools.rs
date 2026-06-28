@@ -6,7 +6,7 @@
 //!
 //!     cargo test -p voidcrawl-mcp --test snapshot_tools -- --test-threads=1
 
-use std::sync::Arc;
+use std::{fmt::Write as _, sync::Arc};
 
 use tokio::sync::Mutex;
 use void_crawl_core::{BrowserPool, BrowserSession, PoolConfig};
@@ -141,9 +141,11 @@ async fn session_snapshot_captures_current_session_page() {
 
 #[tokio::test]
 async fn session_snapshot_truncates_large_pages_with_omission_stats() {
-    let repeated = (0..120)
-        .map(|i| format!("<p>Repeated content block {i} with enough words to become visible.</p>"))
-        .collect::<String>();
+    let mut repeated = String::new();
+    for i in 0..120 {
+        write!(repeated, "<p>Repeated content block {i} with enough words to become visible.</p>")
+            .expect("write to string");
+    }
     let server = server_with_page(&format!("<main><h1>Large</h1>{repeated}</main>")).await;
 
     let snapshot = snapshot::session(

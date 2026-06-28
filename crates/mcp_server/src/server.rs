@@ -19,6 +19,7 @@ use rmcp::{
 use void_crawl_core::{ManagedProfileDescription, ProfilePool, ResolvedProfilePool};
 
 use crate::{
+    VERSION,
     errors::map_err,
     state::AppState,
     tools,
@@ -597,7 +598,7 @@ impl ServerHandler for VoidCrawlServer {
         info.server_info = {
             let mut imp = Implementation::default();
             imp.name = "voidcrawl-mcp".into();
-            imp.version = env!("CARGO_PKG_VERSION").into();
+            imp.version = VERSION.into();
             imp
         };
         // Shipped to EVERY MCP client on connect (Claude, opencode, Codex,

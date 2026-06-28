@@ -104,11 +104,13 @@ struct Manifest {
     pools:    BTreeMap<String, ProfilePool>,
 }
 
-impl ProfileRegistry {
-    pub fn default() -> Self {
+impl Default for ProfileRegistry {
+    fn default() -> Self {
         Self { root: default_profile_root() }
     }
+}
 
+impl ProfileRegistry {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
@@ -144,7 +146,7 @@ impl ProfileRegistry {
                 description,
             };
             manifest.profiles.insert(id.to_string(), profile.clone());
-            self.describe_existing(profile)
+            Self::describe_existing(profile)
         })
     }
 
@@ -165,8 +167,7 @@ impl ProfileRegistry {
             let source = manifest
                 .profiles
                 .get(source_id_or_path)
-                .map(|p| p.path.clone())
-                .unwrap_or_else(|| PathBuf::from(expand_tilde(source_id_or_path)));
+                .map_or_else(|| PathBuf::from(expand_tilde(source_id_or_path)), |p| p.path.clone());
             if !source.is_dir() {
                 return Err(VoidCrawlError::ProfileNotFound {
                     name:     source_id_or_path.to_string(),
@@ -184,13 +185,13 @@ impl ProfileRegistry {
                 description,
             };
             manifest.profiles.insert(id.to_string(), profile.clone());
-            self.describe_existing(profile)
+            Self::describe_existing(profile)
         })
     }
 
     pub fn list_profiles(&self) -> Result<Vec<ManagedProfileDescription>> {
         let manifest = self.load_manifest()?;
-        manifest.profiles.into_values().map(|profile| self.describe_existing(profile)).collect()
+        manifest.profiles.into_values().map(Self::describe_existing).collect()
     }
 
     pub fn describe_profile(&self, id: &str) -> Result<ManagedProfileDescription> {
@@ -200,7 +201,7 @@ impl ProfileRegistry {
                 name:     id.to_string(),
                 searched: vec![self.root.display().to_string()],
             })?;
-        self.describe_existing(profile)
+        Self::describe_existing(profile)
     }
 
     pub fn delete_profile(&self, id: &str) -> Result<bool> {
@@ -222,10 +223,10 @@ impl ProfileRegistry {
             manifest.profiles.remove(id);
             for pool in manifest.pools.values_mut() {
                 pool.profile_ids.retain(|profile_id| profile_id != id);
-                if !pool.profile_ids.is_empty() {
-                    pool.next_index %= pool.profile_ids.len();
-                } else {
+                if pool.profile_ids.is_empty() {
                     pool.next_index = 0;
+                } else {
+                    pool.next_index %= pool.profile_ids.len();
                 }
             }
             Ok(true)
@@ -281,7 +282,7 @@ impl ProfileRegistry {
                     searched: vec![self.root.display().to_string()],
                 }
             })?;
-            profiles.push(self.describe_existing(profile)?);
+            profiles.push(Self::describe_existing(profile)?);
         }
         Ok(ResolvedProfilePool { pool, profiles })
     }
@@ -397,7 +398,7 @@ impl ProfileRegistry {
         Ok(result)
     }
 
-    fn describe_existing(&self, profile: ManagedProfile) -> Result<ManagedProfileDescription> {
+    fn describe_existing(profile: ManagedProfile) -> Result<ManagedProfileDescription> {
         let status = if profile.path.is_dir() {
             lock_status(&profile.path)?
         } else {

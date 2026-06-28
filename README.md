@@ -22,6 +22,9 @@
 
 **CDP browser automation for Python** — a Rust-native Chrome DevTools Protocol client exposed to Python via PyO3.
 
+> [!WARNING]
+> VoidCrawl is research tooling for API design and web reverse engineering. **You assume all legal risk for how you use it.** Respect `robots.txt`, rate limits, and IP bans; and please don't bypass them with Tor or a VPN. Read [DISCLAIMER.md](DISCLAIMER.md) before pointing it at anything.
+
 `void_crawl` replaces Playwright/Selenium with a permissively-licensed (Apache-2.0) stack for rendering JavaScript-heavy pages. Built on [chromiumoxide](https://github.com/mattsse/chromiumoxide) with a shared Tokio runtime.
 
 > **Used by [Yosoi](https://github.com/CascadingLabs/Yosoi)** — an AI-powered selector discovery tool for resilient web scraping.
@@ -160,6 +163,10 @@ uv run pytest tests/ -v
 - [Challenge escalation with VNC/noVNC](docs/challenge-escalation.md)
 - [Cross-origin & closed-shadow frames](docs/cross-origin-frames.md)
 - [Examples](examples/)
+
+## Community
+
+- **Responsible use:** see [DISCLAIMER.md](DISCLAIMER.md)
 
 ## Contact
 

@@ -7,7 +7,12 @@ and that acquire_profile raises ProfileNotFound for unknown names.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
+
 import pytest
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 from voidcrawl import (
     CaptchaDetected,
@@ -45,7 +50,7 @@ async def test_acquire_unknown_profile_raises_not_found() -> None:
         await acquire_profile("NoSuchProfileXYZ_9999", lease_timeout=0.0)
 
 
-def test_managed_profile_registry_crud_and_pool(tmp_path) -> None:
+def test_managed_profile_registry_crud_and_pool(tmp_path: Path) -> None:
     registry = ProfileRegistry(str(tmp_path))
 
     created = registry.create_profile(
@@ -68,7 +73,8 @@ def test_managed_profile_registry_crud_and_pool(tmp_path) -> None:
     assert pool["max_active"] == 3
 
     resolved = registry.resolve_pool("google-serp")
-    assert resolved["profiles"][0]["id"] == "google-001"
+    profiles = cast("list[dict[str, object]]", resolved["profiles"])
+    assert profiles[0]["id"] == "google-001"
 
     assert registry.delete_profile("google-001") is True
     assert registry.list_profiles() == []

@@ -2517,7 +2517,7 @@ fn py_acquire_profile(
 }
 
 fn registry_from_root(root: Option<String>) -> ProfileRegistry {
-    root.map(ProfileRegistry::new).unwrap_or_else(ProfileRegistry::default)
+    root.map_or_else(ProfileRegistry::default, ProfileRegistry::new)
 }
 
 fn to_json_string<T: serde::Serialize>(value: &T) -> PyResult<String> {
@@ -2540,43 +2540,43 @@ fn py_profile_registry_list(root: Option<String>) -> PyResult<String> {
 #[pyfunction]
 #[pyo3(signature = (id, description=None, labels=None, root=None))]
 fn py_profile_registry_create(
-    id: String,
+    id: &str,
     description: Option<String>,
     labels: Option<Vec<String>>,
     root: Option<String>,
 ) -> PyResult<String> {
     let result = registry_from_root(root)
-        .create_profile(&id, description, labels.unwrap_or_default())
+        .create_profile(id, description, labels.unwrap_or_default())
         .map_err(to_py_err)?;
     to_json_string(&result)
 }
 
 #[pyfunction]
 #[pyo3(signature = (id, root=None))]
-fn py_profile_registry_describe(id: String, root: Option<String>) -> PyResult<String> {
-    let result = registry_from_root(root).describe_profile(&id).map_err(to_py_err)?;
+fn py_profile_registry_describe(id: &str, root: Option<String>) -> PyResult<String> {
+    let result = registry_from_root(root).describe_profile(id).map_err(to_py_err)?;
     to_json_string(&result)
 }
 
 #[pyfunction]
 #[pyo3(signature = (source_id_or_path, id, description=None, labels=None, root=None))]
 fn py_profile_registry_clone(
-    source_id_or_path: String,
-    id: String,
+    source_id_or_path: &str,
+    id: &str,
     description: Option<String>,
     labels: Option<Vec<String>>,
     root: Option<String>,
 ) -> PyResult<String> {
     let result = registry_from_root(root)
-        .clone_profile(&source_id_or_path, &id, description, labels.unwrap_or_default())
+        .clone_profile(source_id_or_path, id, description, labels.unwrap_or_default())
         .map_err(to_py_err)?;
     to_json_string(&result)
 }
 
 #[pyfunction]
 #[pyo3(signature = (id, root=None))]
-fn py_profile_registry_delete(id: String, root: Option<String>) -> PyResult<bool> {
-    registry_from_root(root).delete_profile(&id).map_err(to_py_err)
+fn py_profile_registry_delete(id: &str, root: Option<String>) -> PyResult<bool> {
+    registry_from_root(root).delete_profile(id).map_err(to_py_err)
 }
 
 #[pyfunction]
@@ -2589,20 +2589,20 @@ fn py_profile_pool_list(root: Option<String>) -> PyResult<String> {
 #[pyfunction]
 #[pyo3(signature = (name, profile_ids, max_active=3, root=None))]
 fn py_profile_pool_create(
-    name: String,
+    name: &str,
     profile_ids: Vec<String>,
     max_active: usize,
     root: Option<String>,
 ) -> PyResult<String> {
     let result =
-        registry_from_root(root).create_pool(&name, profile_ids, max_active).map_err(to_py_err)?;
+        registry_from_root(root).create_pool(name, profile_ids, max_active).map_err(to_py_err)?;
     to_json_string(&result)
 }
 
 #[pyfunction]
 #[pyo3(signature = (name, root=None))]
-fn py_profile_pool_describe(name: String, root: Option<String>) -> PyResult<String> {
-    let result = registry_from_root(root).resolve_pool(&name).map_err(to_py_err)?;
+fn py_profile_pool_describe(name: &str, root: Option<String>) -> PyResult<String> {
+    let result = registry_from_root(root).resolve_pool(name).map_err(to_py_err)?;
     to_json_string(&result)
 }
 

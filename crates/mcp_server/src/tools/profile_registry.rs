@@ -1,5 +1,7 @@
 //! MCP tools for VoidCrawl-managed Chromium profile metadata and pools.
 
+#![allow(clippy::unused_async)]
+
 use rmcp::ErrorData;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

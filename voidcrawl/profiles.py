@@ -22,7 +22,7 @@ import shutil
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -53,15 +53,18 @@ try:
 except (
     ImportError
 ):  # pragma: no cover - only hit before the local PyO3 extension is rebuilt
-    py_profile_pool_create = None
-    py_profile_pool_describe = None
-    py_profile_pool_list = None
-    py_profile_registry_clone = None
-    py_profile_registry_create = None
-    py_profile_registry_delete = None
-    py_profile_registry_describe = None
-    py_profile_registry_list = None
-    py_profile_registry_root = None
+    py_profile_pool_create = None  # type: ignore[assignment]
+    py_profile_pool_describe = None  # type: ignore[assignment]
+    py_profile_pool_list = None  # type: ignore[assignment]
+    py_profile_registry_clone = None  # type: ignore[assignment]
+    py_profile_registry_create = None  # type: ignore[assignment]
+    py_profile_registry_delete = None  # type: ignore[assignment]
+    py_profile_registry_describe = None  # type: ignore[assignment]
+    py_profile_registry_list = None  # type: ignore[assignment]
+    py_profile_registry_root = None  # type: ignore[assignment]
+
+JsonDict = dict[str, Any]
+RegistryManifest = dict[str, dict[str, JsonDict]]
 
 __all__ = [
     "CaptchaDetected",
@@ -116,8 +119,11 @@ class ProfileRegistry:
         labels: tuple[str, ...] | list[str] = (),
     ) -> dict[str, object]:
         if py_profile_registry_create is not None:
-            return json.loads(
-                py_profile_registry_create(id, description, list(labels), self.root)
+            return cast(
+                "JsonDict",
+                json.loads(
+                    py_profile_registry_create(id, description, list(labels), self.root)
+                ),
             )
         return _fallback_create_profile(self.root, id, description, list(labels))
 
@@ -130,14 +136,17 @@ class ProfileRegistry:
         labels: tuple[str, ...] | list[str] = (),
     ) -> dict[str, object]:
         if py_profile_registry_clone is not None:
-            return json.loads(
-                py_profile_registry_clone(
-                    source_id_or_path,
-                    id,
-                    description,
-                    list(labels),
-                    self.root,
-                )
+            return cast(
+                "JsonDict",
+                json.loads(
+                    py_profile_registry_clone(
+                        source_id_or_path,
+                        id,
+                        description,
+                        list(labels),
+                        self.root,
+                    )
+                ),
             )
         return _fallback_clone_profile(
             self.root, source_id_or_path, id, description, list(labels)
@@ -145,7 +154,9 @@ class ProfileRegistry:
 
     def list_profiles(self) -> list[dict[str, object]]:
         if py_profile_registry_list is not None:
-            return json.loads(py_profile_registry_list(self.root))
+            return cast(
+                "list[JsonDict]", json.loads(py_profile_registry_list(self.root))
+            )
         return list(_fallback_manifest(self.root)["profiles"].values())
 
     def describe_profile(
@@ -153,7 +164,9 @@ class ProfileRegistry:
         id: str,  # noqa: A002 - public API mirrors profile registry schema.
     ) -> dict[str, object]:
         if py_profile_registry_describe is not None:
-            return json.loads(py_profile_registry_describe(id, self.root))
+            return cast(
+                "JsonDict", json.loads(py_profile_registry_describe(id, self.root))
+            )
         manifest = _fallback_manifest(self.root)
         try:
             return manifest["profiles"][id]
@@ -176,25 +189,33 @@ class ProfileRegistry:
         max_active: int = 3,
     ) -> dict[str, object]:
         if py_profile_pool_create is not None:
-            return json.loads(
-                py_profile_pool_create(name, list(profile_ids), max_active, self.root)
+            return cast(
+                "JsonDict",
+                json.loads(
+                    py_profile_pool_create(
+                        name, list(profile_ids), max_active, self.root
+                    )
+                ),
             )
         return _fallback_create_pool(self.root, name, list(profile_ids), max_active)
 
     def list_pools(self) -> list[dict[str, object]]:
         if py_profile_pool_list is not None:
-            return json.loads(py_profile_pool_list(self.root))
+            return cast("list[JsonDict]", json.loads(py_profile_pool_list(self.root)))
         return list(_fallback_manifest(self.root)["pools"].values())
 
     def resolve_pool(self, name: str) -> dict[str, object]:
         if py_profile_pool_describe is not None:
-            return json.loads(py_profile_pool_describe(name, self.root))
+            return cast(
+                "JsonDict", json.loads(py_profile_pool_describe(name, self.root))
+            )
         manifest = _fallback_manifest(self.root)
         pool = manifest["pools"][name]
+        profile_ids = cast("list[str]", pool["profile_ids"])
         return {
             "pool": pool,
             "profiles": [
-                manifest["profiles"][profile_id] for profile_id in pool["profile_ids"]
+                manifest["profiles"][profile_id] for profile_id in profile_ids
             ],
         }
 
@@ -215,14 +236,14 @@ def _fallback_manifest_path(root: str | Path) -> Path:
     return Path(root) / "registry.json"
 
 
-def _fallback_manifest(root: str | Path) -> dict[str, dict[str, dict[str, object]]]:
+def _fallback_manifest(root: str | Path) -> RegistryManifest:
     path = _fallback_manifest_path(root)
     if not path.exists():
         return {"profiles": {}, "pools": {}}
-    return json.loads(path.read_text(encoding="utf-8"))
+    return cast("RegistryManifest", json.loads(path.read_text(encoding="utf-8")))
 
 
-def _fallback_write_manifest(root: str | Path, manifest: dict[str, object]) -> None:
+def _fallback_write_manifest(root: str | Path, manifest: RegistryManifest) -> None:
     root_path = Path(root)
     root_path.mkdir(parents=True, exist_ok=True)
     _fallback_manifest_path(root_path).write_text(
@@ -281,7 +302,7 @@ def _fallback_clone_profile(
     source_record = manifest["profiles"].get(source_id_or_path)
     source = (
         Path(str(source_record["path"]))
-        if source_record
+        if source_record is not None
         else Path(source_id_or_path).expanduser()
     )
     if not source.is_dir():
@@ -303,7 +324,8 @@ def _fallback_delete_profile(root: str | Path, profile_id: str) -> bool:
         return False
     shutil.rmtree(str(record["path"]), ignore_errors=True)
     for pool in manifest["pools"].values():
-        pool["profile_ids"] = [pid for pid in pool["profile_ids"] if pid != profile_id]
+        profile_ids = cast("list[str]", pool["profile_ids"])
+        pool["profile_ids"] = [pid for pid in profile_ids if pid != profile_id]
     _fallback_write_manifest(root, manifest)
     return True
 

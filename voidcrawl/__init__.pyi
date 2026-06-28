@@ -45,6 +45,9 @@ from voidcrawl.actions._protocol import (
     Tab as Tab,
 )
 from voidcrawl.profiles import (
+    ProfileRegistry as ProfileRegistry,
+)
+from voidcrawl.profiles import (
     acquire_profile as acquire_profile,
 )
 from voidcrawl.profiles import (
@@ -94,6 +97,7 @@ __all__ = [
     "ProfileHandle",
     "ProfileLeaseExpired",
     "ProfileNotFound",
+    "ProfileRegistry",
     "ScaleProfile",
     "ScaleReport",
     "Schema",
