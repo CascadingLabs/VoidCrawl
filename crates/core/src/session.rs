@@ -458,12 +458,11 @@ impl BrowserSession {
                 // deterministically via `BrowserConfig(extra_args=...)`. See
                 // `assemble_chrome_args` and its unit tests.
                 let mut final_args = assemble_chrome_args(&extra_args);
-                if matches!(mode, BrowserMode::Headless)
-                    && !final_args.iter().any(|a| switch_key(a) == "disable-blink-features")
-                {
-                    // Headless Chrome reports `navigator.webdriver === true` unless
-                    // AutomationControlled is disabled. Keep this out of the
-                    // human/headful defaults, but apply it for launched headless.
+                if !final_args.iter().any(|a| switch_key(a) == "disable-blink-features") {
+                    // Launched Chrome reports `navigator.webdriver === true`
+                    // when controlled over CDP unless AutomationControlled is
+                    // disabled. Keep this out of Docker/attached Chrome, but
+                    // apply it to launched sessions before first navigation.
                     final_args.push("disable-blink-features=AutomationControlled".into());
                 }
                 for a in final_args {

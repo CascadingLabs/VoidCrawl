@@ -9,7 +9,7 @@ Examples:
     uv run python scripts/bench_antibot_cdp.py \
       --url https://example-cloudflare-managed-challenge.test \
       --url https://example-datadome-style.test \
-      --runs 3 --headful --engine voidcrawl --engine nodriver
+      --runs 3 --headful --engine voidcrawl --engine nodriver --engine zendriver
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import contextlib
 import importlib
+import inspect
 import json
 import time
 from dataclasses import asdict, dataclass
@@ -25,7 +26,7 @@ from typing import Any, Literal, cast
 
 from voidcrawl import BrowserConfig, BrowserSession
 
-Engine = Literal["voidcrawl", "nodriver"]
+Engine = Literal["voidcrawl", "nodriver", "zendriver"]
 Verdict = Literal["passed", "challenged", "blocked", "error"]
 
 CHALLENGE_MARKERS = (
@@ -156,7 +157,15 @@ async def run_voidcrawl(
         return Result(engine, url, run, "error", elapsed_ms(start), error=repr(exc))
 
 
-async def run_nodriver(
+async def stop_browser(browser: Any) -> None:
+    with contextlib.suppress(Exception):
+        result = browser.stop()
+        if inspect.isawaitable(result):
+            await result
+
+
+async def run_driver_like(
+    engine: Literal["nodriver", "zendriver"],
     url: str,
     run: int,
     headful: bool,
@@ -166,9 +175,9 @@ async def run_nodriver(
     start = time.perf_counter()
     browser: Any | None = None
     try:
-        uc = importlib.import_module("nodriver")
+        driver = importlib.import_module(engine)
         browser = await asyncio.wait_for(
-            uc.start(headless=not headful), timeout=timeout
+            driver.start(headless=not headful), timeout=timeout
         )
         page = await asyncio.wait_for(browser.get(url), timeout=timeout)
         await asyncio.sleep(settle_secs)
@@ -183,7 +192,7 @@ async def run_nodriver(
             "str | None", await asyncio.wait_for(page.get_content(), timeout=timeout)
         )
         return Result(
-            "nodriver",
+            engine,
             url,
             run,
             classify(title or "", html or ""),
@@ -192,11 +201,10 @@ async def run_nodriver(
             fingerprint=fingerprint,
         )
     except Exception as exc:
-        return Result("nodriver", url, run, "error", elapsed_ms(start), error=repr(exc))
+        return Result(engine, url, run, "error", elapsed_ms(start), error=repr(exc))
     finally:
         if browser is not None:
-            with contextlib.suppress(Exception):
-                browser.stop()
+            await stop_browser(browser)
 
 
 async def main() -> None:
@@ -210,7 +218,7 @@ async def main() -> None:
     parser.add_argument(
         "--engine",
         action="append",
-        choices=["voidcrawl", "nodriver"],
+        choices=["voidcrawl", "nodriver", "zendriver"],
         default=[],
     )
     parser.add_argument("--runs", type=int, default=1)
@@ -230,14 +238,14 @@ async def main() -> None:
     )
     args = parser.parse_args()
 
-    engines: list[Engine] = args.engine or ["voidcrawl", "nodriver"]
+    engines: list[Engine] = args.engine or ["voidcrawl", "nodriver", "zendriver"]
     results: list[Result] = []
     for url in args.url:
         for run in range(1, args.runs + 1):
             for engine in engines:
-                if engine == "nodriver":
-                    result = await run_nodriver(
-                        url, run, args.headful, args.timeout, args.settle_secs
+                if engine in {"nodriver", "zendriver"}:
+                    result = await run_driver_like(
+                        engine, url, run, args.headful, args.timeout, args.settle_secs
                     )
                 else:
                     result = await run_voidcrawl(

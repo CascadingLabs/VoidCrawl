@@ -86,8 +86,8 @@ a bug we fixed, which had silently disabled the whole list).
 
 We intentionally avoid broad background-networking, renderer-throttling, and
 IPC flags in the human-parity path. `AutomationControlled` is only added for
-launched headless sessions, where Chrome otherwise reports
-`navigator.webdriver === true`; attached/headful Docker sessions omit it.
+launched sessions, where Chrome otherwise reports `navigator.webdriver === true`
+under CDP control; attached/headful Docker sessions omit it.
 
 ## UA / platform / Client-Hints consistency
 
