@@ -9,6 +9,15 @@ permissions:
   contents: write # for GitHub Release creation
   id-token: write # for PyPI trusted publishing
 
+# Cargo registry fetches happen inside maturin's manylinux containers. The
+# default sparse-index HTTP/2 path occasionally returns partial crate files on
+# GitHub runners; make those downloads retry harder and avoid multiplexing.
+env:
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_TIMEOUT: "600"
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_TERM_COLOR: always
+
 jobs:
   # ── Rust checks ─────────────────────────────────────────────────────────
   rust-checks:
