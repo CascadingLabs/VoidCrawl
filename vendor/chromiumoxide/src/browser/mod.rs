@@ -171,7 +171,12 @@ impl Browser {
 
             // extract the ws:
             let debug_ws_url = ws_url_from_output(child, timeout_fut).await?;
-            let conn = Connection::<CdpEventMessage>::connect(&debug_ws_url).await?;
+            let conn = tokio::time::timeout(
+                dur,
+                Connection::<CdpEventMessage>::connect(&debug_ws_url),
+            )
+            .await
+            .map_err(|_| CdpError::Timeout)??;
             Ok((debug_ws_url, conn))
         }
 

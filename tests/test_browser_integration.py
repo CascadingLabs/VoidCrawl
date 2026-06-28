@@ -9,6 +9,7 @@ Run with:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import http.server
 import shutil
@@ -100,9 +101,9 @@ def network_fixture_url(unused_tcp_port: int) -> Iterator[str]:
 
 class TestCookiesSession:
     @pytest.mark.asyncio
-    async def test_set_and_get_cookies(self) -> None:
+    async def test_set_and_get_cookies(self, network_fixture_url: str) -> None:
         async with BrowserSession(BrowserConfig()) as browser:
-            page = await browser.new_page("https://example.com")
+            page = await browser.new_page(network_fixture_url)
 
             await page.set_cookie("test_name", "test_value")
             cookies = await page.get_cookies()
@@ -115,9 +116,9 @@ class TestCookiesSession:
             await page.close()
 
     @pytest.mark.asyncio
-    async def test_set_cookie_with_options(self) -> None:
+    async def test_set_cookie_with_options(self, network_fixture_url: str) -> None:
         async with BrowserSession(BrowserConfig()) as browser:
-            page = await browser.new_page("https://example.com")
+            page = await browser.new_page(network_fixture_url)
 
             await page.set_cookie(
                 "secure_cookie",
@@ -133,9 +134,9 @@ class TestCookiesSession:
             await page.close()
 
     @pytest.mark.asyncio
-    async def test_delete_cookie(self) -> None:
+    async def test_delete_cookie(self, network_fixture_url: str) -> None:
         async with BrowserSession(BrowserConfig()) as browser:
-            page = await browser.new_page("https://example.com")
+            page = await browser.new_page(network_fixture_url)
 
             await page.set_cookie("to_delete", "val")
             cookies_before = await page.get_cookies()
@@ -147,9 +148,9 @@ class TestCookiesSession:
             await page.close()
 
     @pytest.mark.asyncio
-    async def test_multiple_cookies(self) -> None:
+    async def test_multiple_cookies(self, network_fixture_url: str) -> None:
         async with BrowserSession(BrowserConfig()) as browser:
-            page = await browser.new_page("https://example.com")
+            page = await browser.new_page(network_fixture_url)
 
             await page.set_cookie("c1", "v1")
             await page.set_cookie("c2", "v2")
@@ -174,9 +175,9 @@ class TestCookiesSession:
 
 class TestCookiesPool:
     @pytest.mark.asyncio
-    async def test_set_and_get_cookies_pooled(self) -> None:
+    async def test_set_and_get_cookies_pooled(self, network_fixture_url: str) -> None:
         async with BrowserPool(PoolConfig()) as pool, pool.acquire() as tab:
-            await tab.navigate("https://example.com")
+            await tab.navigate(network_fixture_url)
             await tab.wait_for_navigation()
 
             await tab.set_cookie("pool_cookie", "pool_value")
@@ -186,9 +187,9 @@ class TestCookiesPool:
             assert match["value"] == "pool_value"
 
     @pytest.mark.asyncio
-    async def test_delete_cookie_pooled(self) -> None:
+    async def test_delete_cookie_pooled(self, network_fixture_url: str) -> None:
         async with BrowserPool(PoolConfig()) as pool, pool.acquire() as tab:
-            await tab.navigate("https://example.com")
+            await tab.navigate(network_fixture_url)
             await tab.wait_for_navigation()
 
             await tab.set_cookie("temp", "val")
@@ -206,50 +207,56 @@ class TestLazyCdpIntegration:
     async def test_public_js_apis_have_expected_minimal_cdp_transitions(
         self,
     ) -> None:
-        frame_html = (
-            "<html><body><script>"
-            "setTimeout(() => {"
-            "const el = document.createElement('div');"
-            "el.id = 'late';"
-            "document.body.appendChild(el);"
-            "}, 25);"
-            "</script>"
-            '<iframe srcdoc="'
-            "<script>window.voidcrawlFrameValue=7</script><p>frame</p>"
-            '"></iframe></body></html>'
-        )
-        url = "data:text/html," + urllib.parse.quote(frame_html)
-
-        async with BrowserSession(BrowserConfig(no_sandbox=True)) as browser:
-            page = await browser.new_page(url)
-            before = await page.instrumentation_state()
-            ready_state = await page.eval_js("document.readyState")
-            after_eval = await page.instrumentation_state()
-
-            await page.wait_for_selector("#late", timeout=2.0)
-            after_wait = await page.instrumentation_state()
-
-            result = await page.evaluate_js_in_frame(
-                "about:srcdoc",
-                "window.voidcrawlFrameValue",
+        async def run_smoke() -> None:
+            frame_html = (
+                "<html><body><script>"
+                "setTimeout(() => {"
+                "const el = document.createElement('div');"
+                "el.id = 'late';"
+                "document.body.appendChild(el);"
+                "}, 25);"
+                "</script>"
+                '<iframe srcdoc="'
+                "<script>window.voidcrawlFrameValue=7</script><p>frame</p>"
+                '"></iframe></body></html>'
             )
-            after = await page.instrumentation_state()
+            url = "data:text/html," + urllib.parse.quote(frame_html)
 
-            assert ready_state in {"interactive", "complete"}
-            assert result == 7
-            assert before.low_cdp is True
-            assert before.runtime_enabled is False
-            assert before.network_enabled is False
-            assert after_eval.low_cdp is True
-            assert after_eval.runtime_enabled is False
-            assert after_eval.network_enabled is False
-            assert after_wait.low_cdp is True
-            assert after_wait.runtime_enabled is False
-            assert after_wait.network_enabled is False
-            assert after.low_cdp is False
-            assert after.runtime_enabled is True
-            assert after.network_enabled is False
-            await page.close()
+            async with BrowserSession(BrowserConfig(no_sandbox=True)) as browser:
+                page = await browser.new_page(url)
+                before = await page.instrumentation_state()
+                ready_state = await page.eval_js("document.readyState")
+                after_eval = await page.instrumentation_state()
+
+                await page.wait_for_selector("#late", timeout=2.0)
+                after_wait = await page.instrumentation_state()
+
+                result = await page.evaluate_js_in_frame(
+                    "about:srcdoc",
+                    "window.voidcrawlFrameValue",
+                )
+                after = await page.instrumentation_state()
+
+                assert ready_state in {"interactive", "complete"}
+                assert result == 7
+                assert before.low_cdp is True
+                assert before.runtime_enabled is False
+                assert before.network_enabled is False
+                assert after_eval.low_cdp is True
+                assert after_eval.runtime_enabled is False
+                assert after_eval.network_enabled is False
+                assert after_wait.low_cdp is True
+                assert after_wait.runtime_enabled is False
+                assert after_wait.network_enabled is False
+                assert after.low_cdp is False
+                assert after.runtime_enabled is True
+                assert after.network_enabled is False
+                await page.close()
+
+        try:
+            await asyncio.wait_for(run_smoke(), timeout=45.0)
+        except TimeoutError as exc:
+            raise AssertionError("lazy-CDP browser smoke timed out after 45s") from exc
 
 
 # ── Network observer tests (BrowserSession) ─────────────────────────────

@@ -131,7 +131,8 @@ async def run_voidcrawl(
     ws_url: str | None,
 ) -> Result:
     start = time.perf_counter()
-    try:
+
+    async def run_once() -> Result:
         async with BrowserSession(
             BrowserConfig(headless=not headful, ws_url=ws_url)
         ) as browser:
@@ -153,6 +154,9 @@ async def run_voidcrawl(
             title,
             fingerprint=fingerprint,
         )
+
+    try:
+        return await asyncio.wait_for(run_once(), timeout=timeout + settle_secs + 5.0)
     except Exception as exc:
         return Result(engine, url, run, "error", elapsed_ms(start), error=repr(exc))
 

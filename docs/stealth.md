@@ -203,8 +203,10 @@ VoidCrawl now keeps the startup CDP surface low by default. It skips eager
 `Runtime.enable`, `Network.enable`, `Performance.enable`, `Log.enable`, target
 auto-attach, and isolated utility-world setup; `Runtime.evaluate`, navigation,
 accessibility, DOM inspection, and input still work on demand. For launched
-headless sessions it still applies human-like UA/Client-Hints and viewport
-coherence from `StealthConfig`; for attached/remote-debug sessions (the Docker
+sessions it only keeps the low-CDP-safe parts of `StealthConfig` before
+navigation: UA/Client-Hints, locale, and viewport coherence. It intentionally
+ignores page-world instrumentation fields such as `use_builtin_stealth`,
+`bypass_csp`, and `inject_js`. For attached/remote-debug sessions (the Docker
 headful parity path) it deliberately sends no pre-navigation stealth mutation at
 all, preserving the already-running Chrome's native fingerprint.
 
@@ -235,7 +237,11 @@ mutate headers. That gives operators a simple routing rule:
 - if a tab has escalated, prefer a fresh tab/browser for the next sensitive
   gate instead of trying to "un-taint" it.
 
-Every `Page` and `PooledTab` exposes `await tab.instrumentation_state()`:
+Every `Page` and `PooledTab` exposes `await tab.instrumentation_state()`.
+This is a wrapper-local routing signal: it tells you what the current VoidCrawl
+handle has enabled since it wrapped the target. Adopted tabs from another CDP
+client can have unknown prior instrumentation, so use fresh tabs for the
+highest-sensitivity gates.
 
 ```python
 state = await tab.instrumentation_state()
@@ -257,6 +263,14 @@ Current state fields:
 | `pre_navigation_stealth` | `True` if VoidCrawl applied UA/viewport pre-navigation stealth to the tab |
 
 ## Overriding the defaults
+
+`BrowserConfig.stealth=True` now means "human-first, low-CDP-safe stealth".
+Launched sessions keep UA/Client-Hints, locale, and viewport coherence, but
+page-world injection knobs (`StealthConfig.use_builtin_stealth`, `bypass_csp`,
+and `inject_js`) are ignored on the default path because they add observable
+pre-navigation CDP mutations. Attached sessions default to preserving the
+existing browser fingerprint; use launched sessions or explicit page APIs for
+deliberate instrumentation.
 
 Every default flag is overridable by the caller — useful to force a GPU
 backend, disable acceleration, add a proxy bypass, etc. Caller args are merged

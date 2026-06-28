@@ -555,7 +555,13 @@ impl BrowserSession {
     /// List all open pages.
     pub async fn pages(&self) -> Result<Vec<Page>> {
         self.check_alive()?;
-        let browser = self.browser.lock().await;
+        let mut browser = self.browser.lock().await;
+        if self.attached {
+            // Minimal attached sessions do not subscribe to global target discovery.
+            // Refresh once so pages() honors its "all open pages" contract for
+            // tabs that existed before this CDP connection was established.
+            browser.fetch_targets().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        }
         let cdp_pages =
             browser.pages().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
         Ok(cdp_pages.into_iter().map(Page::new).collect())
