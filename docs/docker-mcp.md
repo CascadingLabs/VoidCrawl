@@ -36,6 +36,19 @@ If the render node's group differs from `render`, set it: the compose uses
 `group_add: ["render"]`; replace with the numeric GID from
 `stat -c '%g' /dev/dri/renderD128` if needed.
 
+### DNS override (optional)
+
+If the container inherits an unreachable host stub resolver and Chrome cannot
+resolve public sites, set deterministic nameservers at startup:
+
+```bash
+VOIDCRAWL_DNS_SERVERS=1.1.1.1,8.8.8.8 \
+  docker compose -f docker/docker-compose.yml up -d --build
+```
+
+The entrypoint rewrites `/etc/resolv.conf` before Chrome starts. Leave the
+variable unset for Docker's normal resolver behavior.
+
 ### Persistent profiles (optional)
 
 By default the farm's Chromes use ephemeral `/tmp` profiles. To persist cookies,

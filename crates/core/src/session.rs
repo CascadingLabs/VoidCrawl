@@ -11,9 +11,9 @@ use std::{
 };
 
 use chromiumoxide::{
-    browser::{Browser, BrowserConfig},
+    browser::{Browser, BrowserConfig, CdpMode as ChromiumCdpMode},
     cdp::browser_protocol::target::TargetId,
-    handler::Handler,
+    handler::{Handler, HandlerConfig},
 };
 use rustls::crypto::ring::default_provider as ring_crypto_provider;
 use serde_json::Value;
@@ -29,11 +29,11 @@ use crate::{
 /// (non-remote) session.
 ///
 /// Two groups:
-/// 1. **Anti-automation hygiene** — re-adds the safe flags we want after
-///    `disable_default_args()` (which strips chromiumoxide's
+/// 1. **Nodriver-like launch hygiene** — re-adds only the low-noise flags we
+///    want after `disable_default_args()` (which strips chromiumoxide's
 ///    `--enable-automation` / `--disable-extensions`, both instant WAF
-///    giveaways), plus the zendriver/nodriver flags known to pass real bot
-///    walls.
+///    giveaways). Avoid broad background/network/render throttling suppression:
+///    it improves crawler throughput but is less human-shaped.
 /// 2. **Hardware GPU / WebGL** — new headless disables the GPU and falls back
 ///    to SwiftShader software WebGL, which `WEBGL_debug_renderer_info` reports
 ///    as "SwiftShader" — a strong bot signal Cloudflare Turnstile weighs. These
@@ -51,10 +51,10 @@ use crate::{
 /// These are merged *before* caller `extra_args`; a caller value for the same
 /// switch replaces the default (see [`assemble_chrome_args`]).
 pub(crate) const DEFAULT_CHROME_ARGS: &[&str] = &[
-    // ── Anti-automation core ────────────────────────────────────────
-    "disable-blink-features=AutomationControlled",
+    // ── Nodriver-like anti-automation core ──────────────────────────
+    "remote-allow-origins=*",
     "disable-infobars",
-    "disable-features=IsolateOrigins,site-per-process,TranslateUI",
+    "disable-features=IsolateOrigins,site-per-process",
     // NOTE: `Page::evaluate_js_in_frame` needs cross-origin frames to stay
     // in-process. The flag above covers ordinary cross-origin frames, but
     // Chrome *field-trial*-isolates a few origins (notably google.com, hence
@@ -63,31 +63,14 @@ pub(crate) const DEFAULT_CHROME_ARGS: &[&str] = &[
     // `extra_args=["disable-site-isolation-trials"]` — rather than a global
     // default, so the browser's isolation posture is unchanged for callers who
     // don't need it.
-    // ── Safe defaults from chromiumoxide we keep ────────────────────
-    "disable-background-networking",
-    "disable-background-timer-throttling",
-    "disable-backgrounding-occluded-windows",
+    // ── Low-noise nodriver profile hygiene ──────────────────────────
     "disable-breakpad",
-    "disable-client-side-phishing-detection",
-    "disable-component-extensions-with-background-pages",
-    "disable-default-apps",
     "disable-dev-shm-usage",
-    "disable-hang-monitor",
-    "disable-ipc-flooding-protection",
-    "disable-popup-blocking",
-    "disable-prompt-on-repost",
-    "disable-renderer-backgrounding",
-    "disable-sync",
-    "force-color-profile=srgb",
-    "metrics-recording-only",
     "no-first-run",
-    "password-store=basic",
-    "use-mock-keychain",
-    // ── Extra zendriver flags ───────────────────────────────────────
     "no-service-autorun",
     "no-default-browser-check",
     "no-pings",
-    "disable-component-update",
+    "password-store=basic",
     "disable-session-crashed-bubble",
     "disable-search-engine-choice-screen",
     "homepage=about:blank",
@@ -176,6 +159,33 @@ pub enum BrowserMode {
     RemoteDebug { ws_url: String },
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CdpMode {
+    /// Current full chromiumoxide initialization behavior.
+    #[default]
+    Normal,
+    /// Minimal anti-bot-safe CDP footprint: skip eager Runtime, Network, Log,
+    /// Performance, Target auto-attach, and isolated utility-world setup.
+    Minimal,
+}
+
+impl CdpMode {
+    fn from_env_default() -> Self {
+        if env::var_os("VOIDCRAWL_STEALTH_NO_RUNTIME").is_some() {
+            Self::Minimal
+        } else {
+            Self::Normal
+        }
+    }
+
+    const fn as_chromiumoxide(self) -> ChromiumCdpMode {
+        match self {
+            Self::Normal => ChromiumCdpMode::Normal,
+            Self::Minimal => ChromiumCdpMode::Minimal,
+        }
+    }
+}
+
 /// Builder for `BrowserSession`.
 #[derive(Debug, Clone)]
 #[must_use]
@@ -198,6 +208,7 @@ pub struct BrowserSessionBuilder {
     /// existing profile (e.g. one you've logged into `LinkedIn` in) and
     /// leave the directory on disk after the session ends.
     user_data_dir:     Option<PathBuf>,
+    cdp_mode:          CdpMode,
 }
 
 impl Default for BrowserSessionBuilder {
@@ -212,6 +223,7 @@ impl Default for BrowserSessionBuilder {
             window_size:       None,
             port:              None,
             user_data_dir:     None,
+            cdp_mode:          CdpMode::from_env_default(),
         }
     }
 }
@@ -297,6 +309,11 @@ impl BrowserSessionBuilder {
         self
     }
 
+    pub fn cdp_mode(mut self, mode: CdpMode) -> Self {
+        self.cdp_mode = mode;
+        self
+    }
+
     /// Override the stealth viewport dimensions.
     ///
     /// This sets the CDP device metrics override that the page reports to
@@ -320,6 +337,7 @@ impl BrowserSessionBuilder {
             self.window_size,
             self.port,
             self.user_data_dir,
+            self.cdp_mode,
         )
         .await
     }
@@ -333,6 +351,7 @@ pub struct BrowserSession {
     _handler_task:  JoinHandle<()>,
     handler_alive:  Arc<AtomicBool>,
     stealth:        StealthConfig,
+    cdp_mode:       CdpMode,
     /// True when this session attached to an already-running Chrome via
     /// `BrowserMode::RemoteDebug`. In that case `close()` must NOT send
     /// `Browser.close` over CDP — doing so terminates the user's Chromium
@@ -398,13 +417,18 @@ impl BrowserSession {
         window_size: Option<(u32, u32)>,
         port: Option<u16>,
         persistent_user_data_dir: Option<PathBuf>,
+        cdp_mode: CdpMode,
     ) -> Result<Self> {
         let mut owned_user_data_dir: Option<tempfile::TempDir> = None;
 
         let (browser, handler) = match &mode {
             BrowserMode::RemoteDebug { ws_url } => {
                 let ws = resolve_ws_url(ws_url).await?;
-                Browser::connect(&ws)
+                let handler_config = HandlerConfig {
+                    cdp_mode: cdp_mode.as_chromiumoxide(),
+                    ..HandlerConfig::default()
+                };
+                Browser::connect_with_config(&ws, handler_config)
                     .await
                     .map_err(|e| VoidCrawlError::ConnectionFailed(e.to_string()))?
             }
@@ -412,7 +436,9 @@ impl BrowserSession {
                 // Disable chromiumoxide's DEFAULT_ARGS which include
                 // `--enable-automation` and `--disable-extensions` —
                 // both are instant giveaways to WAFs like Akamai.
-                let mut builder = BrowserConfig::builder().disable_default_args();
+                let mut builder = BrowserConfig::builder()
+                    .disable_default_args()
+                    .cdp_mode(cdp_mode.as_chromiumoxide());
 
                 // Caller-supplied persistent profile vs. ephemeral
                 // `TempDir`. The ephemeral path handles SingletonLock
@@ -469,7 +495,16 @@ impl BrowserSession {
                 // default). Lets the PyO3/Python client override any default
                 // deterministically via `BrowserConfig(extra_args=...)`. See
                 // `assemble_chrome_args` and its unit tests.
-                for a in assemble_chrome_args(&extra_args) {
+                let mut final_args = assemble_chrome_args(&extra_args);
+                if matches!(mode, BrowserMode::Headless)
+                    && !final_args.iter().any(|a| switch_key(a) == "disable-blink-features")
+                {
+                    // Headless Chrome reports `navigator.webdriver === true` unless
+                    // AutomationControlled is disabled. Keep this out of the
+                    // human/headful defaults, but apply it for launched headless.
+                    final_args.push("disable-blink-features=AutomationControlled".into());
+                }
+                for a in final_args {
                     builder = builder.arg(a);
                 }
 
@@ -494,6 +529,7 @@ impl BrowserSession {
             _handler_task: handler_task,
             handler_alive: alive,
             stealth,
+            cdp_mode,
             attached: matches!(mode, BrowserMode::RemoteDebug { .. }),
             _user_data_dir: owned_user_data_dir,
         })
@@ -515,7 +551,9 @@ impl BrowserSession {
             Page::new(cdp_page)
         }; // browser lock released before navigation
 
-        page.apply_stealth(&self.stealth).await?;
+        if let Some(stealth) = self.stealth_for_cdp_mode() {
+            page.apply_stealth(&stealth).await?;
+        }
         page.navigate(url).await?;
         Ok(page)
     }
@@ -531,8 +569,32 @@ impl BrowserSession {
                 .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
             Page::new(cdp_page)
         };
-        page.apply_stealth(&self.stealth).await?;
+        if let Some(stealth) = self.stealth_for_cdp_mode() {
+            page.apply_stealth(&stealth).await?;
+        }
         Ok(page)
+    }
+
+    fn stealth_for_cdp_mode(&self) -> Option<StealthConfig> {
+        if self.cdp_mode == CdpMode::Minimal {
+            if self.attached {
+                // In remote-debug minimal mode (the Docker/headful parity path),
+                // do not mutate the tab before first real navigation. A normal
+                // attached Chrome already has human UA/window/language, and
+                // avoiding pre-nav Runtime/Network/Emulation commands is closer
+                // to nodriver's low-CDP shape.
+                return None;
+            }
+            let mut cfg = self.stealth.clone();
+            // Launched headless minimal still needs UA/viewport coherence, but
+            // forbids high-signal page-world instrumentation.
+            cfg.use_builtin_stealth = false;
+            cfg.bypass_csp = false;
+            cfg.inject_js = None;
+            Some(cfg)
+        } else {
+            Some(self.stealth.clone())
+        }
     }
 
     /// List all open pages.
@@ -679,18 +741,30 @@ mod tests {
     }
 
     /// Hardware-GPU defaults are present (so headless doesn't fall back to
-    /// SwiftShader), alongside the anti-automation core. Forms are un-prefixed.
+    /// SwiftShader), alongside the low-noise nodriver launch core. Forms are
+    /// un-prefixed.
     #[test]
-    fn defaults_enable_hardware_gpu_and_antiautomation() {
+    fn defaults_enable_hardware_gpu_and_nodriver_core() {
         let args = assemble_chrome_args(&[]);
         for expected in [
+            "remote-allow-origins=*",
+            "no-service-autorun",
+            "no-pings",
+            "password-store=basic",
             "use-angle=vulkan",
             "enable-gpu",
             "ignore-gpu-blocklist",
             "disable-gpu-sandbox",
-            "disable-blink-features=AutomationControlled",
         ] {
             assert!(args.iter().any(|a| a == expected), "missing default flag: {expected}");
+        }
+        for removed in [
+            "disable-blink-features=AutomationControlled",
+            "disable-background-networking",
+            "disable-renderer-backgrounding",
+            "disable-ipc-flooding-protection",
+        ] {
+            assert!(!args.iter().any(|a| a == removed), "human defaults should omit {removed}");
         }
     }
 
@@ -728,7 +802,7 @@ mod tests {
     fn override_is_in_place_and_leaves_other_defaults() {
         let args = assemble_chrome_args(&["--use-angle=gl".to_string()]);
         assert!(args.iter().any(|a| a == "enable-gpu"));
-        assert!(args.iter().any(|a| a == "disable-blink-features=AutomationControlled"));
+        assert!(args.iter().any(|a| a == "remote-allow-origins=*"));
     }
 
     /// No `extra_args` => exactly the defaults, unchanged order.

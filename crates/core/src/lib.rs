@@ -43,5 +43,5 @@ pub use profile::{
     list_profiles, release_profile, resolve_profile,
 };
 pub use scanner::{DEFAULT_MAX_BYTES, ScanConfig, ScanReport, Verdict, scan_bytes, scan_path};
-pub use session::{BrowserMode, BrowserSession, BrowserSessionBuilder};
+pub use session::{BrowserMode, BrowserSession, BrowserSessionBuilder, CdpMode};
 pub use stealth::StealthConfig;

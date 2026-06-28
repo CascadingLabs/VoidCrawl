@@ -19,6 +19,7 @@ use chromiumoxide_cdp::cdp::events::CdpEvent;
 use chromiumoxide_types::{Command, Method, Request, Response};
 
 use crate::auth::Credentials;
+use crate::browser::CdpMode;
 use crate::cdp::browser_protocol::target::CloseTargetParams;
 use crate::cmd::CommandChain;
 use crate::cmd::CommandMessage;
@@ -328,6 +329,7 @@ impl Target {
             TargetInit::AttachToTarget => {
                 self.init_state = TargetInit::InitializingFrame(FrameManager::init_commands(
                     self.config.request_timeout,
+                    self.config.cdp_mode,
                 ));
                 let params = AttachToTargetParams::builder()
                     .target_id(self.target_id().clone())
@@ -349,9 +351,7 @@ impl Target {
                             // isolated-world `addScriptToEvaluateOnNewDocument` — a CDP
                             // tell. Trade-off: no `evaluate_function` (main-world
                             // `evaluate_expression` still works) in this mode.
-                            let stealth =
-                                std::env::var_os("VOIDCRAWL_STEALTH_NO_RUNTIME").is_some();
-                            if let Some(isolated_world_cmds) = (!stealth)
+                            if let Some(isolated_world_cmds) = (!self.config.cdp_mode.is_minimal())
                                 .then(|| {
                                     self.frame_manager.ensure_isolated_world(UTILITY_WORLD_NAME)
                                 })
@@ -360,7 +360,7 @@ impl Target {
                                 *cmds = isolated_world_cmds;
                             } else {
                                 self.init_state = TargetInit::InitializingNetwork(
-                                    self.network_manager.init_commands(),
+                                    self.network_manager.init_commands(self.config.cdp_mode),
                                 );
                             }
                             self.poll(cx, now)
@@ -383,7 +383,8 @@ impl Target {
                     now,
                     cmds,
                     TargetInit::InitializingPage(Self::page_init_commands(
-                        self.config.request_timeout
+                        self.config.request_timeout,
+                        self.config.cdp_mode,
                     ))
                 );
             }
@@ -577,15 +578,15 @@ impl Target {
         self.initiator = Some(tx);
     }
 
-    pub(crate) fn page_init_commands(timeout: Duration) -> CommandChain {
+    pub(crate) fn page_init_commands(timeout: Duration, cdp_mode: CdpMode) -> CommandChain {
         // VoidCrawl minimal-stealth mode (CAS-217): a clean CDP browser (nodriver)
         // auto-passes Cloudflare's Managed Challenge because it enables almost no CDP
         // domains. `Target.setAutoAttach(waitForDebuggerOnStart)`, `Performance.enable`,
         // and `Log.enable` are all eager-instrumentation tells. Skip the whole page-init
-        // chain in VOIDCRAWL_STEALTH_NO_RUNTIME mode (we lose child-target/OOPIF
-        // auto-attach, which is fine — cross-origin frame eval is already off in this
-        // mode since it needs Runtime).
-        if std::env::var_os("VOIDCRAWL_STEALTH_NO_RUNTIME").is_some() {
+        // chain in minimal mode (we lose child-target/OOPIF auto-attach, which is
+        // fine — cross-origin frame eval is already off in this mode since it needs
+        // Runtime execution-context tracking).
+        if cdp_mode.is_minimal() {
             return CommandChain::new(vec![], timeout);
         }
         let attach = SetAutoAttachParams::builder()
@@ -618,6 +619,7 @@ pub struct TargetConfig {
     pub viewport: Option<Viewport>,
     pub request_intercept: bool,
     pub cache_enabled: bool,
+    pub cdp_mode: CdpMode,
 }
 
 impl Default for TargetConfig {
@@ -628,6 +630,7 @@ impl Default for TargetConfig {
             viewport: Default::default(),
             request_intercept: false,
             cache_enabled: true,
+            cdp_mode: CdpMode::from_env_default(),
         }
     }
 }

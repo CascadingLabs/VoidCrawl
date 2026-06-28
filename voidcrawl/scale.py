@@ -484,22 +484,31 @@ def generate_supervisord_conf(report: ScaleReport, base_port: int | None = None)
     # Hardware GPU via ANGLE/Vulkan (NOT --disable-gpu, which forces SwiftShader
     # software WebGL — a strong bot signal). Requires Mesa drivers in the image
     # + /dev/dri passthrough (see docker/Dockerfile and docker-compose.yml).
-    # Mirrors the GPU group of `DEFAULT_CHROME_ARGS` in crates/core/src/session.rs;
-    # keep the two in sync.
+    # Mirrors the low-noise core + GPU group of DEFAULT_CHROME_ARGS in
+    # crates/core/src/session.rs; keep the two in sync.
     base_flags = (
         "--no-sandbox"
-        " --no-zygote"
+        " --remote-allow-origins=*"
         " --enable-gpu"
         " --ignore-gpu-blocklist"
         " --use-angle=vulkan"
         " --disable-gpu-sandbox"
         " --disable-dev-shm-usage"
-        " --disable-background-networking"
-        " --disable-component-update"
-        " --disable-blink-features=AutomationControlled"
         " --disable-infobars"
+        " --disable-breakpad"
+        " --disable-session-crashed-bubble"
+        " --disable-search-engine-choice-screen"
+        " --no-first-run"
+        " --no-service-autorun"
+        " --no-default-browser-check"
+        " --no-pings"
+        " --password-store=basic"
+        " --homepage=about:blank"
     )
     headless_flag = "--headless=new " if report.headless else ""
+    headless_automation_flag = (
+        " --disable-blink-features=AutomationControlled" if report.headless else ""
+    )
 
     sections = [
         "[supervisord]",
@@ -513,7 +522,7 @@ def generate_supervisord_conf(report: ScaleReport, base_port: int | None = None)
         port = base_port + i
         name = f"chrome-debug-{i + 1}"
         cmd = (
-            f"{chrome} {headless_flag}{base_flags}"
+            f"{chrome} {headless_flag}{base_flags}{headless_automation_flag}"
             f" --remote-debugging-port={port}"
             f" --user-data-dir={profiles_dir}/chrome-profile-{i + 1}"
         )

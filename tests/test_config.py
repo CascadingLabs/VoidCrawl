@@ -19,6 +19,7 @@ class TestBrowserConfig:
         cfg = BrowserConfig()
         assert cfg.headless is True
         assert cfg.stealth is True
+        assert cfg.cdp_mode == "normal"
         assert cfg.no_sandbox is False
         assert cfg.proxy is None
         assert cfg.chrome_executable is None
@@ -34,6 +35,7 @@ class TestBrowserConfig:
         cfg = BrowserConfig(
             headless=False,
             stealth=False,
+            cdp_mode="minimal",
             no_sandbox=True,
             proxy="http://proxy:8080",
             chrome_executable="/usr/bin/chromium",
@@ -46,6 +48,7 @@ class TestBrowserConfig:
             step_delay=1.0,
         )
         assert cfg.headless is False
+        assert cfg.cdp_mode == "minimal"
         assert cfg.no_sandbox is True
         assert cfg.proxy == "http://proxy:8080"
         assert cfg.user_data_dir == "/tmp/voidcrawl-profile"
@@ -60,6 +63,7 @@ class TestBrowserConfig:
         assert isinstance(d, dict)
         assert "headless" in d
         assert "stealth" in d
+        assert d["cdp_mode"] == "normal"
         assert "user_data_dir" in d
 
     def test_extra_args_immutable_default(self) -> None:

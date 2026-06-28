@@ -5,7 +5,9 @@ Internal — import from ``voidcrawl`` instead.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
+
+CdpMode = Literal["normal", "minimal"]
 
 class AntibotVerdict:
     """Signature-based anti-bot / CDN vendor fingerprint of a response.
@@ -520,6 +522,7 @@ class BrowserPool:
         chrome_executable: str | None,
         extra_args: list[str],
         user_data_dir: str | None,
+        cdp_mode: CdpMode,
     ) -> _PoolParamsContext: ...
     async def warmup(self) -> None: ...
     def acquire(self) -> _AcquireContext: ...
@@ -875,6 +878,7 @@ class BrowserSession:
         headless: bool = True,
         ws_url: str | None = None,
         stealth: bool = True,
+        cdp_mode: CdpMode = "normal",
         no_sandbox: bool = False,
         proxy: str | None = None,
         chrome_executable: str | None = None,

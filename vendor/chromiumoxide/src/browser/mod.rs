@@ -20,7 +20,7 @@ use chromiumoxide_cdp::cdp::browser_protocol::target::{
 use chromiumoxide_cdp::cdp::{CdpEventMessage, IntoEventKind};
 use chromiumoxide_types::*;
 
-pub use self::config::{BrowserConfig, BrowserConfigBuilder, LAUNCH_TIMEOUT};
+pub use self::config::{BrowserConfig, BrowserConfigBuilder, CdpMode, LAUNCH_TIMEOUT};
 use crate::async_process::{Child, ExitStatus};
 use crate::cmd::{CommandMessage, to_command_response};
 use crate::conn::Connection;
@@ -203,6 +203,7 @@ impl Browser {
             request_timeout: config.request_timeout,
             request_intercept: config.request_intercept,
             cache_enabled: config.cache_enabled,
+            cdp_mode: config.cdp_mode,
         };
 
         let fut = Handler::new(conn, rx, handler_config);

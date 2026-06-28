@@ -371,11 +371,19 @@ class TestGenerateSupervisordConf:
         conf = generate_supervisord_conf(report)
         for flag in [
             "--no-sandbox",
-            "--no-zygote",
+            "--remote-allow-origins=*",
             "--disable-dev-shm-usage",
-            "--disable-blink-features=AutomationControlled",
+            "--no-service-autorun",
+            "--password-store=basic",
         ]:
             assert flag in conf
+        if report.headless:
+            assert "--disable-blink-features=AutomationControlled" in conf
+        for removed in [
+            "--no-zygote",
+            "--disable-background-networking",
+        ]:
+            assert removed not in conf
 
     def test_chrome_uses_hardware_gpu_not_swiftshader(
         self, snapshot_server: ResourceSnapshot

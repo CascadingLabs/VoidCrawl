@@ -14,6 +14,7 @@ use chromiumoxide_cdp::cdp::browser_protocol::{
 use chromiumoxide_types::{Command, Method, MethodId};
 
 use crate::auth::Credentials;
+use crate::browser::CdpMode;
 use crate::cmd::CommandChain;
 use crate::handler::http::HttpRequest;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -56,11 +57,11 @@ impl NetworkManager {
         }
     }
 
-    pub fn init_commands(&self) -> CommandChain {
+    pub fn init_commands(&self, cdp_mode: CdpMode) -> CommandChain {
         // VoidCrawl minimal-stealth mode (CAS-217): skip Network.enable — a CDP tell a
         // clean browser doesn't send. Trade-off: no network capture / response metadata
         // / network-idle goto in this mode (nodriver enables no Network domain).
-        if std::env::var_os("VOIDCRAWL_STEALTH_NO_RUNTIME").is_some() {
+        if cdp_mode.is_minimal() {
             return CommandChain::new(vec![], self.request_timeout);
         }
         let enable = EnableParams::default();

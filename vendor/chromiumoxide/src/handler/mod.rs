@@ -17,6 +17,7 @@ use chromiumoxide_types::{CallId, Message, Method, Response};
 use chromiumoxide_types::{MethodId, Request as CdpRequest};
 pub(crate) use page::PageInner;
 
+use crate::browser::CdpMode;
 use crate::cmd::{CommandMessage, to_command_response};
 use crate::conn::Connection;
 use crate::error::{CdpError, Result};
@@ -93,12 +94,14 @@ impl Handler {
         rx: Receiver<HandlerMessage>,
         config: HandlerConfig,
     ) -> Self {
-        let discover = SetDiscoverTargetsParams::new(true);
-        let _ = conn.submit_command(
-            discover.identifier(),
-            None,
-            serde_json::to_value(discover).unwrap(),
-        );
+        if !config.cdp_mode.is_minimal() {
+            let discover = SetDiscoverTargetsParams::new(true);
+            let _ = conn.submit_command(
+                discover.identifier(),
+                None,
+                serde_json::to_value(discover).unwrap(),
+            );
+        }
 
         let browser_contexts = config
             .context_ids
@@ -196,9 +199,29 @@ impl Handler {
     fn on_response(&mut self, resp: Response) {
         if let Some((req, method, _)) = self.pending_commands.remove(&resp.id) {
             match req {
-                PendingRequest::CreateTarget(tx) => {
+                PendingRequest::CreateTarget { tx, browser_context_id } => {
                     match to_command_response::<CreateTargetParams>(resp, method) {
                         Ok(resp) => {
+                            if !self.targets.contains_key(&resp.target_id) {
+                                // Minimal CDP mode does not subscribe to global target
+                                // discovery, so synthesize the page target from the
+                                // CreateTarget response and attach directly.
+                                self.on_target_created(EventTargetCreated {
+                                    target_info: TargetInfo {
+                                        target_id: resp.target_id.clone(),
+                                        r#type: "page".to_string(),
+                                        title: String::new(),
+                                        url: "about:blank".to_string(),
+                                        attached: false,
+                                        opener_id: None,
+                                        can_access_opener: false,
+                                        opener_frame_id: None,
+                                        parent_frame_id: None,
+                                        browser_context_id,
+                                        subtype: None,
+                                    },
+                                });
+                            }
                             if let Some(target) = self.targets.get_mut(&resp.target_id) {
                                 // move the sender to the target that sends its page once
                                 // initialized
@@ -372,12 +395,17 @@ impl Handler {
         match url::Url::parse(&params.url) {
             Ok(_) => {
                 let method = params.identifier();
+                let browser_context_id = params.browser_context_id.clone();
                 match serde_json::to_value(params) {
                     Ok(params) => match self.conn.submit_command(method.clone(), None, params) {
                         Ok(call_id) => {
                             self.pending_commands.insert(
                                 call_id,
-                                (PendingRequest::CreateTarget(tx), method, Instant::now()),
+                                (
+                                    PendingRequest::CreateTarget { tx, browser_context_id },
+                                    method,
+                                    Instant::now(),
+                                ),
                             );
                         }
                         Err(err) => {
@@ -437,6 +465,7 @@ impl Handler {
                 viewport: self.config.viewport.clone(),
                 request_intercept: self.config.request_intercept,
                 cache_enabled: self.config.cache_enabled,
+                cdp_mode: self.config.cdp_mode,
             },
             browser_ctx,
         );
@@ -489,7 +518,7 @@ impl Handler {
         for call in timed_out {
             if let Some((req, _, _)) = self.pending_commands.remove(&call) {
                 match req {
-                    PendingRequest::CreateTarget(tx) => {
+                    PendingRequest::CreateTarget { tx, .. } => {
                         let _ = tx.send(Err(CdpError::Timeout));
                     }
                     PendingRequest::GetTargets(tx) => {
@@ -669,6 +698,8 @@ pub struct HandlerConfig {
     pub request_intercept: bool,
     /// Whether to enable cache
     pub cache_enabled: bool,
+    /// VoidCrawl fork: select normal vs anti-bot-safe minimal CDP initialization.
+    pub cdp_mode: CdpMode,
 }
 
 impl Default for HandlerConfig {
@@ -681,6 +712,7 @@ impl Default for HandlerConfig {
             request_timeout: Duration::from_millis(REQUEST_TIMEOUT),
             request_intercept: false,
             cache_enabled: true,
+            cdp_mode: CdpMode::from_env_default(),
         }
     }
 }
@@ -730,7 +762,10 @@ enum NavigationRequest {
 enum PendingRequest {
     /// A Request to create a new `Target` that results in the creation of a
     /// `Page` that represents a browser page.
-    CreateTarget(OneshotSender<Result<Page>>),
+    CreateTarget {
+        tx: OneshotSender<Result<Page>>,
+        browser_context_id: Option<BrowserContextId>,
+    },
     /// A Request to fetch old `Target`s created before connection
     GetTargets(OneshotSender<Result<Vec<TargetInfo>>>),
     /// A Request to navigate a specific `Target`.

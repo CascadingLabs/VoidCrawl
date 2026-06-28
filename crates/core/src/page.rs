@@ -490,12 +490,14 @@ impl Page {
         }
 
         // 3. Viewport / device metrics
-        let metrics = SetDeviceMetricsOverrideParams::new(
+        let mut metrics = SetDeviceMetricsOverrideParams::new(
             i64::from(cfg.viewport_width),
             i64::from(cfg.viewport_height),
             1.0,
             false,
         );
+        metrics.screen_width = Some(i64::from(cfg.viewport_width));
+        metrics.screen_height = Some(i64::from(cfg.viewport_height));
         self.inner.execute(metrics).await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
 
         // 4. Bypass CSP so our injected JS can run

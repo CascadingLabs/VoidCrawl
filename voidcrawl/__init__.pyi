@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from voidcrawl._ext import (
     AntibotChallenge as AntibotChallenge,
 )
@@ -78,6 +80,7 @@ from voidcrawl.schema import (
     strip_tags as strip_tags,
 )
 
+CdpMode = Literal["normal", "minimal"]
 Selector = Text
 
 __all__ = [
@@ -88,6 +91,7 @@ __all__ = [
     "BrowserPool",
     "BrowserSession",
     "CaptchaDetected",
+    "CdpMode",
     "JsTab",
     "Page",
     "PageResponse",
@@ -117,6 +121,7 @@ class BrowserConfig:
 
     headless: bool
     stealth: bool
+    cdp_mode: CdpMode
     no_sandbox: bool
     proxy: str | None
     chrome_executable: str | None
@@ -134,6 +139,7 @@ class BrowserConfig:
         *,
         headless: bool = True,
         stealth: bool = True,
+        cdp_mode: CdpMode = "normal",
         no_sandbox: bool = False,
         proxy: str | None = None,
         chrome_executable: str | None = None,

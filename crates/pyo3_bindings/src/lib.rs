@@ -22,11 +22,11 @@ use pyo3_async_runtimes::tokio::future_into_py;
 use serde_json::Value;
 use tokio::sync::Mutex;
 use void_crawl_core::{
-    AntibotEvidence, AntibotVerdict, BrowserMode, BrowserPool, BrowserSession, CookieParam,
-    DEFAULT_MAX_BYTES, DeleteCookiesParams, DispatchKeyEventType, DispatchMouseEventType,
-    DownloadCapture, DownloadOutcome, MouseButton, Page, PageResponse, PoolConfig, PooledTab,
-    ProfileHandle, ProfileInfo, ProfileRegistry, ScanConfig, ScanReport, StealthConfig, Verdict,
-    acquire_profile, list_profiles, scan_bytes, scan_path,
+    AntibotEvidence, AntibotVerdict, BrowserMode, BrowserPool, BrowserSession, CdpMode,
+    CookieParam, DEFAULT_MAX_BYTES, DeleteCookiesParams, DispatchKeyEventType,
+    DispatchMouseEventType, DownloadCapture, DownloadOutcome, MouseButton, Page, PageResponse,
+    PoolConfig, PooledTab, ProfileHandle, ProfileInfo, ProfileRegistry, ScanConfig, ScanReport,
+    StealthConfig, Verdict, acquire_profile, list_profiles, scan_bytes, scan_path,
 };
 
 // ── Error conversion ────────────────────────────────────────────────────
@@ -37,6 +37,16 @@ pyo3::create_exception!(voidcrawl._ext, ProfileLeaseExpired, VoidCrawlError);
 pyo3::create_exception!(voidcrawl._ext, ProfileNotFound, VoidCrawlError);
 pyo3::create_exception!(voidcrawl._ext, CaptchaDetected, VoidCrawlError);
 pyo3::create_exception!(voidcrawl._ext, AntibotChallenge, VoidCrawlError);
+
+fn parse_cdp_mode(mode: &str) -> PyResult<CdpMode> {
+    match mode {
+        "normal" => Ok(CdpMode::Normal),
+        "minimal" => Ok(CdpMode::Minimal),
+        other => Err(PyValueError::new_err(format!(
+            "cdp_mode must be 'normal' or 'minimal', got {other:?}"
+        ))),
+    }
+}
 
 #[allow(clippy::needless_pass_by_value)] // used as fn pointer in map_err(to_py_err)
 fn to_py_err(e: void_crawl_core::VoidCrawlError) -> PyErr {
@@ -441,11 +451,12 @@ async fn do_launch(
     extra_args: Vec<String>,
     user_data_dir: Option<String>,
     port: Option<u16>,
+    cdp_mode: CdpMode,
 ) -> PyResult<()> {
     let stealth =
         if stealth_enabled { StealthConfig::chrome_like() } else { StealthConfig::none() };
 
-    let mut builder = BrowserSession::builder().mode(mode).stealth(stealth);
+    let mut builder = BrowserSession::builder().mode(mode).stealth(stealth).cdp_mode(cdp_mode);
 
     if let Some(p) = port {
         builder = builder.port(p);
@@ -1240,6 +1251,7 @@ pub struct PyBrowserSession {
     extra_args:        Vec<String>,
     user_data_dir:     Option<String>,
     port:              Option<u16>,
+    cdp_mode:          CdpMode,
 }
 
 impl fmt::Debug for PyBrowserSession {
@@ -1265,7 +1277,7 @@ impl PyBrowserSession {
     ///         attach to this browser via its `ws_url`. `None` lets the OS pick
     ///         a free ephemeral port.
     #[new]
-    #[pyo3(signature = (*, headless=true, ws_url=None, stealth=true, no_sandbox=false, proxy=None, chrome_executable=None, extra_args=None, user_data_dir=None, port=None))]
+    #[pyo3(signature = (*, headless=true, ws_url=None, stealth=true, no_sandbox=false, proxy=None, chrome_executable=None, extra_args=None, user_data_dir=None, port=None, cdp_mode="normal"))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         headless: bool,
@@ -1277,7 +1289,8 @@ impl PyBrowserSession {
         extra_args: Option<Vec<String>>,
         user_data_dir: Option<String>,
         port: Option<u16>,
-    ) -> Self {
+        cdp_mode: &str,
+    ) -> PyResult<Self> {
         let mode = if let Some(url) = ws_url {
             BrowserMode::RemoteDebug { ws_url: url }
         } else if headless {
@@ -1286,7 +1299,9 @@ impl PyBrowserSession {
             BrowserMode::Headful
         };
 
-        Self {
+        let cdp_mode = parse_cdp_mode(cdp_mode)?;
+
+        Ok(Self {
             inner: Arc::new(Mutex::new(None)),
             mode,
             stealth_enabled: stealth,
@@ -1296,7 +1311,8 @@ impl PyBrowserSession {
             extra_args: extra_args.unwrap_or_default(),
             user_data_dir,
             port,
-        }
+            cdp_mode,
+        })
     }
 
     /// Launch (or connect to) the browser. Called automatically by
@@ -1311,6 +1327,7 @@ impl PyBrowserSession {
         let extra_args = self.extra_args.clone();
         let user_data_dir = self.user_data_dir.clone();
         let port = self.port;
+        let cdp_mode = self.cdp_mode;
 
         future_into_py(py, async move {
             do_launch(
@@ -1323,6 +1340,7 @@ impl PyBrowserSession {
                 extra_args,
                 user_data_dir,
                 port,
+                cdp_mode,
             )
             .await
         })
@@ -1428,6 +1446,7 @@ impl PyBrowserSession {
             extra_args,
             user_data_dir,
             port,
+            cdp_mode,
         ) = {
             let this = slf.borrow();
             (
@@ -1440,6 +1459,7 @@ impl PyBrowserSession {
                 this.extra_args.clone(),
                 this.user_data_dir.clone(),
                 this.port,
+                this.cdp_mode,
             )
         };
         let slf_ref = slf.into_any().unbind();
@@ -1455,6 +1475,7 @@ impl PyBrowserSession {
                 extra_args,
                 user_data_dir,
                 port,
+                cdp_mode,
             )
             .await?;
             Ok(slf_ref)
@@ -2253,7 +2274,7 @@ impl PyBrowserPool {
     #[pyo3(signature = (
         browsers, tabs_per_browser, tab_max_uses, tab_max_idle_secs, acquire_timeout_secs,
         auto_evict, headless, no_sandbox, stealth, ws_urls, proxy, chrome_executable, extra_args,
-        user_data_dir
+        user_data_dir, cdp_mode
     ))]
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::fn_params_excessive_bools)]
@@ -2273,8 +2294,11 @@ impl PyBrowserPool {
         chrome_executable: Option<String>,
         extra_args: Vec<String>,
         user_data_dir: Option<String>,
-    ) -> PyPoolParamsContext {
-        PyPoolParamsContext {
+        cdp_mode: &str,
+    ) -> PyResult<PyPoolParamsContext> {
+        let cdp_mode = parse_cdp_mode(cdp_mode)?;
+
+        Ok(PyPoolParamsContext {
             browsers,
             tabs_per_browser,
             tab_max_uses,
@@ -2289,8 +2313,9 @@ impl PyBrowserPool {
             chrome_executable,
             extra_args,
             user_data_dir,
+            cdp_mode,
             pool_slot: Arc::new(Mutex::new(None)),
-        }
+        })
     }
 
     /// Return a tab to the pool.
@@ -2363,6 +2388,7 @@ pub struct PyPoolParamsContext {
     chrome_executable:    Option<String>,
     extra_args:           Vec<String>,
     user_data_dir:        Option<String>,
+    cdp_mode:             CdpMode,
     pool_slot:            Arc<Mutex<Option<Arc<BrowserPool>>>>,
 }
 
@@ -2390,6 +2416,7 @@ impl PyPoolParamsContext {
         let chrome_executable = this.chrome_executable.clone();
         let extra_args = this.extra_args.clone();
         let user_data_dir = this.user_data_dir.clone();
+        let cdp_mode = this.cdp_mode;
         let pool_slot = Arc::clone(&this.pool_slot);
         drop(this);
 
@@ -2405,7 +2432,7 @@ impl PyPoolParamsContext {
                         } else {
                             BrowserSession::builder().headful()
                         };
-                        builder = builder.stealth(stealth.clone());
+                        builder = builder.stealth(stealth.clone()).cdp_mode(cdp_mode);
                         if no_sandbox {
                             builder = builder.no_sandbox();
                         }
@@ -2436,6 +2463,7 @@ impl PyPoolParamsContext {
                         BrowserSession::builder()
                             .remote_debug(url)
                             .stealth(stealth.clone())
+                            .cdp_mode(cdp_mode)
                             .launch()
                     })
                     .collect();
