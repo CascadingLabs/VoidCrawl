@@ -25,6 +25,33 @@ pub enum HeadlessMode {
     New,
 }
 
+/// How aggressively chromiumoxide initializes CDP domains for each target.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CdpMode {
+    /// Full chromiumoxide behavior: eager Runtime, Network, Performance, Log,
+    /// Target auto-attach, and isolated utility world initialization.
+    #[default]
+    Normal,
+    /// Anti-bot-safe mode: skip high-signal eager CDP domain initialization.
+    /// Main-world Runtime.evaluate, navigation, screenshots, accessibility,
+    /// and input still work; network capture and OOPIF/frame features are reduced.
+    Minimal,
+}
+
+impl CdpMode {
+    pub(crate) fn from_env_default() -> Self {
+        if std::env::var_os("VOIDCRAWL_STEALTH_NO_RUNTIME").is_some() {
+            Self::Minimal
+        } else {
+            Self::Normal
+        }
+    }
+
+    pub(crate) const fn is_minimal(self) -> bool {
+        matches!(self, Self::Minimal)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BrowserConfig {
     /// Determines whether to run headless version of the browser. Defaults to
@@ -97,6 +124,9 @@ pub struct BrowserConfig {
 
     /// Avoid easy bot detection by setting `navigator.webdriver` to false
     pub(crate) hidden: bool,
+
+    /// VoidCrawl fork: select normal vs anti-bot-safe minimal CDP initialization.
+    pub(crate) cdp_mode: CdpMode,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +152,7 @@ pub struct BrowserConfigBuilder {
     request_intercept: bool,
     cache_enabled: bool,
     hidden: bool,
+    cdp_mode: CdpMode,
 }
 
 impl BrowserConfig {
@@ -158,6 +189,7 @@ impl Default for BrowserConfigBuilder {
             request_intercept: false,
             cache_enabled: true,
             hidden: false,
+            cdp_mode: CdpMode::from_env_default(),
         }
     }
 }
@@ -334,6 +366,11 @@ impl BrowserConfigBuilder {
         self
     }
 
+    pub fn cdp_mode(mut self, mode: CdpMode) -> Self {
+        self.cdp_mode = mode;
+        self
+    }
+
     pub fn build(self) -> std::result::Result<BrowserConfig, String> {
         let executable = if let Some(e) = self.executable {
             e
@@ -362,6 +399,7 @@ impl BrowserConfigBuilder {
             request_intercept: self.request_intercept,
             cache_enabled: self.cache_enabled,
             hidden: self.hidden,
+            cdp_mode: self.cdp_mode,
         })
     }
 }

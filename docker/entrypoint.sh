@@ -22,6 +22,9 @@ export CDP_PORT_1="${CDP_PORT_1:-${CDP_PORT_BASE}}"
 export CDP_PORT_2="${CDP_PORT_2:-$((CDP_PORT_BASE + 1))}"
 CONF_PATH=/tmp/supervisord-dynamic.conf
 
+# ── DNS override (optional) ──────────────────────────────────────────────
+/usr/local/bin/ensure-dns.sh
+
 # ── Chrome profiles ──────────────────────────────────────────────────────
 # Each Chrome gets its own user-data-dir under CHROME_PROFILES_DIR. Default
 # /tmp (ephemeral — wiped with the container). Set CHROME_PROFILES_DIR=/profiles

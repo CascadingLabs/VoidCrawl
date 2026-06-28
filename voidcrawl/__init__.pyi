@@ -33,6 +33,9 @@ from voidcrawl._ext import (
     ProfileNotFound as ProfileNotFound,
 )
 from voidcrawl._ext import (
+    TabInstrumentationState as TabInstrumentationState,
+)
+from voidcrawl._ext import (
     VoidCrawlError as VoidCrawlError,
 )
 from voidcrawl._ext import (
@@ -103,6 +106,7 @@ __all__ = [
     "Schema",
     "Selector",
     "Tab",
+    "TabInstrumentationState",
     "Text",
     "VoidCrawlError",
     "acquire_profile",

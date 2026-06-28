@@ -1,3 +1,10 @@
+## 0.4.0 (2026-06-28)
+
+### Release
+
+- promotes the prior bench builds to a unified 0.4.0 version across the Python packages, Rust crates, MCP server binary, lockfiles, and generated API reference metadata.
+- keeps the `voidcrawl[mcp]` extra pinned to the matching `voidcrawl-mcp==0.4.0` bundle so client and MCP server installs stay paired.
+
 ## 0.3.7 (2026-06-21)
 
 ### Fix

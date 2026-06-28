@@ -20,7 +20,7 @@ use chromiumoxide_cdp::cdp::browser_protocol::target::{
 use chromiumoxide_cdp::cdp::{CdpEventMessage, IntoEventKind};
 use chromiumoxide_types::*;
 
-pub use self::config::{BrowserConfig, BrowserConfigBuilder, LAUNCH_TIMEOUT};
+pub use self::config::{BrowserConfig, BrowserConfigBuilder, CdpMode, LAUNCH_TIMEOUT};
 use crate::async_process::{Child, ExitStatus};
 use crate::cmd::{CommandMessage, to_command_response};
 use crate::conn::Connection;
@@ -171,7 +171,12 @@ impl Browser {
 
             // extract the ws:
             let debug_ws_url = ws_url_from_output(child, timeout_fut).await?;
-            let conn = Connection::<CdpEventMessage>::connect(&debug_ws_url).await?;
+            let conn = tokio::time::timeout(
+                dur,
+                Connection::<CdpEventMessage>::connect(&debug_ws_url),
+            )
+            .await
+            .map_err(|_| CdpError::Timeout)??;
             Ok((debug_ws_url, conn))
         }
 
@@ -203,6 +208,7 @@ impl Browser {
             request_timeout: config.request_timeout,
             request_intercept: config.request_intercept,
             cache_enabled: config.cache_enabled,
+            cdp_mode: config.cdp_mode,
         };
 
         let fut = Handler::new(conn, rx, handler_config);
