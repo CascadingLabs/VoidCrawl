@@ -231,8 +231,8 @@ impl FrameManager {
         // headless/automation (this is exactly why a Managed Challenge clears for a
         // human but not for a CDP-driven browser). In minimal CDP mode we skip it;
         // `Runtime.evaluate` still works in the page's main world without it (the
-        // nodriver approach). Trade-off: no per-frame execution-context tracking, so
-        // cross-origin `evaluate_js_in_frame` is unavailable in this mode.
+        // nodriver approach). Frame-scoped evaluation can opt into Runtime later via
+        // `Page::enable_runtime`, keeping the initial tab attach quiet.
         if !cdp_mode.is_minimal() {
             let enable_runtime = runtime::EnableParams::default();
             cmds.push((

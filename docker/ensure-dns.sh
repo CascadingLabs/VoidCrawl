@@ -16,6 +16,16 @@ resolv_conf="${VOIDCRAWL_RESOLV_CONF_PATH:-/etc/resolv.conf}"
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
+validate_line_value() {
+    local name="$1"
+    local value="$2"
+    local pattern="$3"
+    if [[ ! "$value" =~ $pattern ]]; then
+        echo "[dns] invalid $name value" >&2
+        exit 2
+    fi
+}
+
 valid_count=0
 # Split on commas and whitespace.
 for server in ${servers_raw//,/ }; do
@@ -34,9 +44,12 @@ if [[ "$valid_count" -eq 0 ]]; then
 fi
 
 if [[ -n "${VOIDCRAWL_DNS_SEARCH:-}" ]]; then
+    validate_line_value "VOIDCRAWL_DNS_SEARCH" "$VOIDCRAWL_DNS_SEARCH" '^[A-Za-z0-9._ -]+$'
     printf 'search %s\n' "$VOIDCRAWL_DNS_SEARCH" >> "$tmp"
 fi
-printf 'options %s\n' "${VOIDCRAWL_DNS_OPTIONS:-timeout:2 attempts:3 rotate}" >> "$tmp"
+options="${VOIDCRAWL_DNS_OPTIONS:-timeout:2 attempts:3 rotate}"
+validate_line_value "VOIDCRAWL_DNS_OPTIONS" "$options" '^[A-Za-z0-9:._ -]+$'
+printf 'options %s\n' "$options" >> "$tmp"
 
 if cp "$tmp" "$resolv_conf"; then
     echo "[dns] wrote $valid_count nameserver(s) to $resolv_conf"

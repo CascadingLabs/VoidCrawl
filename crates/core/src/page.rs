@@ -40,7 +40,7 @@ use chromiumoxide::{
                 EventLifecycleEvent, FrameId, PrintToPdfParams, SetBypassCspParams, Viewport,
             },
         },
-        js_protocol::runtime::{CallFunctionOnParams, EvaluateParams},
+        js_protocol::runtime::{CallFunctionOnParams, EvaluateParams, ExecutionContextId},
     },
     page::ScreenshotParams,
 };
@@ -127,8 +127,9 @@ pub struct TabInstrumentationState {
     pub low_cdp:                bool,
     /// `true` after `Network.enable` has been sent for this target.
     pub network_enabled:        bool,
-    /// Reserved for future Runtime-domain escalation tracking. `eval_js` uses
-    /// one-shot `Runtime.evaluate` without enabling the Runtime domain.
+    /// `true` after `Runtime.enable` has been sent for frame-scoped JS.
+    /// `eval_js` uses one-shot `Runtime.evaluate` without enabling the Runtime
+    /// domain.
     pub runtime_enabled:        bool,
     /// Reserved for future isolated utility-world escalation tracking.
     pub utility_world_enabled:  bool,
@@ -435,6 +436,7 @@ pub struct Page {
     /// where the pointer actually is. Defaults to the top-left.
     cursor:                 Mutex<(f64, f64)>,
     network_enabled:        AtomicBool,
+    runtime_enabled:        AtomicBool,
     pre_navigation_stealth: AtomicBool,
 }
 
@@ -446,6 +448,7 @@ impl Page {
             download_armed: AtomicBool::new(false),
             cursor: Mutex::new((0.0, 0.0)),
             network_enabled: AtomicBool::new(false),
+            runtime_enabled: AtomicBool::new(false),
             pre_navigation_stealth: AtomicBool::new(false),
         }
     }
@@ -470,11 +473,12 @@ impl Page {
     /// Snapshot this tab's instrumentation state for routing/debugging.
     pub fn instrumentation_state(&self) -> TabInstrumentationState {
         let network_enabled = self.network_enabled.load(Ordering::Relaxed);
+        let runtime_enabled = self.runtime_enabled.load(Ordering::Relaxed);
         let pre_navigation_stealth = self.pre_navigation_stealth.load(Ordering::Relaxed);
         TabInstrumentationState {
-            low_cdp: !network_enabled,
+            low_cdp: !(network_enabled || runtime_enabled),
             network_enabled,
-            runtime_enabled: false,
+            runtime_enabled,
             utility_world_enabled: false,
             pre_navigation_stealth,
         }
@@ -489,6 +493,42 @@ impl Page {
             self.network_enabled.store(true, Ordering::Relaxed);
         }
         Ok(())
+    }
+
+    async fn ensure_runtime_enabled(&self) -> Result<()> {
+        if !self.runtime_enabled.load(Ordering::Relaxed) {
+            self.inner
+                .enable_runtime()
+                .await
+                .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+            self.runtime_enabled.store(true, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    async fn frame_execution_context_with_runtime(
+        &self,
+        frame_id: FrameId,
+        frame_url_pattern: &str,
+    ) -> Result<ExecutionContextId> {
+        self.ensure_runtime_enabled().await?;
+        for attempt in 0..20 {
+            if let Some(context_id) = self
+                .inner
+                .frame_execution_context(frame_id.clone())
+                .await
+                .map_err(|e| VoidCrawlError::JsEvalError(e.to_string()))?
+            {
+                return Ok(context_id);
+            }
+            if attempt < 19 {
+                time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+        Err(VoidCrawlError::FrameNotFound(format!(
+            "{frame_url_pattern:?}: matched frame has no scriptable execution context \
+             (sandboxed without allow-scripts, cross-process, or not yet loaded)"
+        )))
     }
 
     /// Apply stealth settings to this page.
@@ -847,7 +887,7 @@ impl Page {
             .map_err(|e| VoidCrawlError::Other(format!("selector encode: {e}")))?;
         let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
         let js = format!(
-            "() => new Promise((resolve, reject) => {{\
+            "new Promise((resolve, reject) => {{\
               const sel = {sel_lit};\
               if (document.querySelector(sel)) return resolve(true);\
               const root = document.documentElement || document.body;\
@@ -865,7 +905,13 @@ impl Page {
               }}, {timeout_ms});\
             }})"
         );
-        match self.inner.evaluate_function(js).await {
+        let params = EvaluateParams::builder()
+            .expression(js)
+            .return_by_value(true)
+            .await_promise(true)
+            .build()
+            .map_err(VoidCrawlError::JsEvalError)?;
+        match self.inner.evaluate_expression(params).await {
             Ok(_) => Ok(()),
             Err(e) => {
                 let msg = e.to_string();
@@ -946,17 +992,8 @@ impl Page {
         expression: &str,
     ) -> Result<Value> {
         let frame_id = self.resolve_frame(frame_url_pattern).await?;
-        let context_id = self
-            .inner
-            .frame_execution_context(frame_id)
-            .await
-            .map_err(|e| VoidCrawlError::JsEvalError(e.to_string()))?
-            .ok_or_else(|| {
-                VoidCrawlError::FrameNotFound(format!(
-                    "{frame_url_pattern:?}: matched frame has no scriptable execution \
-                     context (sandboxed without allow-scripts, or not yet loaded)"
-                ))
-            })?;
+        let context_id =
+            self.frame_execution_context_with_runtime(frame_id, frame_url_pattern).await?;
         let params = EvaluateParams::builder()
             .expression(expression)
             .context_id(context_id)

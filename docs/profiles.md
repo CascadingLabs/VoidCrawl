@@ -12,7 +12,7 @@ async with with_profile("Default") as handle:
     html = await page.content()
 ```
 
-`with_profile` is exclusive: only one voidcrawl process can hold a given profile at a time (see [isolation rationale](experiments/profile-isolation.md)).
+`with_profile` is exclusive: only one voidcrawl process can hold a given profile at a time. The lock prevents two browser processes from writing the same profile concurrently and corrupting cookies/preferences.
 
 ## API
 

@@ -14,6 +14,7 @@ import http.server
 import shutil
 import socketserver
 import threading
+import urllib.parse
 from typing import TYPE_CHECKING
 
 import pytest
@@ -195,6 +196,60 @@ class TestCookiesPool:
 
             cookies = await tab.get_cookies()
             assert not any(c["name"] == "temp" for c in cookies)
+
+
+# ── Lazy CDP escalation tests (BrowserSession) ──────────────────────────
+
+
+class TestLazyCdpIntegration:
+    @pytest.mark.asyncio
+    async def test_public_js_apis_have_expected_minimal_cdp_transitions(
+        self,
+    ) -> None:
+        frame_html = (
+            "<html><body><script>"
+            "setTimeout(() => {"
+            "const el = document.createElement('div');"
+            "el.id = 'late';"
+            "document.body.appendChild(el);"
+            "}, 25);"
+            "</script>"
+            '<iframe srcdoc="'
+            "<script>window.voidcrawlFrameValue=7</script><p>frame</p>"
+            '"></iframe></body></html>'
+        )
+        url = "data:text/html," + urllib.parse.quote(frame_html)
+
+        async with BrowserSession(BrowserConfig(no_sandbox=True)) as browser:
+            page = await browser.new_page(url)
+            before = await page.instrumentation_state()
+            ready_state = await page.eval_js("document.readyState")
+            after_eval = await page.instrumentation_state()
+
+            await page.wait_for_selector("#late", timeout=2.0)
+            after_wait = await page.instrumentation_state()
+
+            result = await page.evaluate_js_in_frame(
+                "about:srcdoc",
+                "window.voidcrawlFrameValue",
+            )
+            after = await page.instrumentation_state()
+
+            assert ready_state in {"interactive", "complete"}
+            assert result == 7
+            assert before.low_cdp is True
+            assert before.runtime_enabled is False
+            assert before.network_enabled is False
+            assert after_eval.low_cdp is True
+            assert after_eval.runtime_enabled is False
+            assert after_eval.network_enabled is False
+            assert after_wait.low_cdp is True
+            assert after_wait.runtime_enabled is False
+            assert after_wait.network_enabled is False
+            assert after.low_cdp is False
+            assert after.runtime_enabled is True
+            assert after.network_enabled is False
+            await page.close()
 
 
 # ── Network observer tests (BrowserSession) ─────────────────────────────

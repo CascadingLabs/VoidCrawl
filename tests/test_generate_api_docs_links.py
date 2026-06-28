@@ -21,6 +21,26 @@ def _current_ref() -> str:
     return generate_api_docs._current_git_ref()
 
 
+def test_existing_output_ref_reads_committed_source_link_ref(tmp_path: Path) -> None:
+    out = tmp_path / "api-reference.md"
+    out.write_text(
+        f'## `BrowserConfig` <a href="{REPO_URL}/blob/abc123/'
+        'voidcrawl/__init__.py#L1">src</a>'
+    )
+
+    assert generate_api_docs._existing_output_ref(out, REPO_URL) == "abc123"
+
+
+def test_existing_output_ref_handles_branch_names_with_slashes(tmp_path: Path) -> None:
+    out = tmp_path / "api-reference.md"
+    out.write_text(
+        f'## `BrowserConfig` <a href="{REPO_URL}/blob/owner/branch-name/'
+        'voidcrawl/__init__.py#L1">src</a>'
+    )
+
+    assert generate_api_docs._existing_output_ref(out, REPO_URL) == "owner/branch-name"
+
+
 def test_validate_source_links_rejects_existing_file_with_bad_line() -> None:
     ref = _current_ref()
     content = (

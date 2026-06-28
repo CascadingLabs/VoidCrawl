@@ -585,9 +585,9 @@ impl Target {
         // auto-passes Cloudflare's Managed Challenge because it enables almost no CDP
         // domains. `Target.setAutoAttach(waitForDebuggerOnStart)`, `Performance.enable`,
         // and `Log.enable` are all eager-instrumentation tells. Skip the whole page-init
-        // chain in minimal mode (we lose child-target/OOPIF auto-attach, which is
-        // fine — cross-origin frame eval is already off in this mode since it needs
-        // Runtime execution-context tracking).
+        // chain in minimal mode. Frame-scoped APIs can lazily enable Runtime later
+        // for in-process frames, but minimal mode still avoids eager child-target /
+        // OOPIF auto-attach before navigation.
         if cdp_mode.is_minimal() {
             return CommandChain::new(vec![], timeout);
         }

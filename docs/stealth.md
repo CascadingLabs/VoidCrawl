@@ -218,9 +218,9 @@ uv run python scripts/bench_antibot_cdp.py \
 ```
 
 Trade-offs (acceptable for *challenge traversal*, not bulk crawling): no eager
-network capture / network-idle `goto`, no cross-origin `evaluate_js_in_frame`
-(needs Runtime execution-context tracking), no `evaluate_function`, no OOPIF
-auto-attach.
+network capture / network-idle `goto`; frame-scoped JavaScript lazily enables
+`Runtime.enable` for in-process frames; and OOPIF auto-attach remains off until
+a future targeted escalation needs it.
 
 ## Lazy escalation and tab routing
 
@@ -252,7 +252,7 @@ Current state fields:
 |---|---|
 | `low_cdp` | `True` while no higher-signal CDP domain has been enabled on the tab |
 | `network_enabled` | `True` after `Network.enable` was sent lazily |
-| `runtime_enabled` | reserved for future Runtime-domain escalation tracking; `eval_js` uses one-shot `Runtime.evaluate` |
+| `runtime_enabled` | `True` after a frame-scoped API lazily sends `Runtime.enable`; `eval_js` uses one-shot `Runtime.evaluate` without enabling Runtime |
 | `utility_world_enabled` | reserved for future isolated-world tracking |
 | `pre_navigation_stealth` | `True` if VoidCrawl applied UA/viewport pre-navigation stealth to the tab |
 

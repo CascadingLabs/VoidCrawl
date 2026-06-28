@@ -59,10 +59,17 @@ impl NetworkManager {
 
     pub fn init_commands(&self, cdp_mode: CdpMode) -> CommandChain {
         // VoidCrawl minimal-stealth mode (CAS-217): skip Network.enable — a CDP tell a
-        // clean browser doesn't send. Trade-off: no network capture / response metadata
-        // / network-idle goto in this mode (nodriver enables no Network domain).
+        // clean browser doesn't send. Keep Security.setIgnoreCertificateErrors when
+        // configured: it preserves chromiumoxide's default bad-TLS behavior without
+        // subscribing to network events.
         if cdp_mode.is_minimal() {
-            return CommandChain::new(vec![], self.request_timeout);
+            let cmds = if self.ignore_httpserrors {
+                let ignore = SetIgnoreCertificateErrorsParams::new(true);
+                vec![(ignore.identifier(), serde_json::to_value(ignore).unwrap())]
+            } else {
+                vec![]
+            };
+            return CommandChain::new(cmds, self.request_timeout);
         }
         let enable = EnableParams::default();
         let cmds = if self.ignore_httpserrors {

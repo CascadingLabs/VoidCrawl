@@ -69,7 +69,8 @@ class TabInstrumentationState:
     Attributes:
         low_cdp: ``True`` while the tab has not enabled higher-signal CDP domains.
         network_enabled: ``True`` after ``Network.enable`` has been sent.
-        runtime_enabled: Reserved for future Runtime-domain escalation tracking.
+        runtime_enabled: ``True`` after ``Runtime.enable`` has been sent for
+            frame-scoped JavaScript.
         utility_world_enabled: Reserved for future isolated-world tracking.
         pre_navigation_stealth: ``True`` if VoidCrawl applied UA/viewport
             pre-navigation stealth to this tab.
