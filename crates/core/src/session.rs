@@ -53,7 +53,6 @@ use crate::{
 pub(crate) const DEFAULT_CHROME_ARGS: &[&str] = &[
     // ── Nodriver-like anti-automation core ──────────────────────────
     "remote-allow-origins=*",
-    "disable-infobars",
     "disable-features=IsolateOrigins,site-per-process",
     // NOTE: `Page::evaluate_js_in_frame` needs cross-origin frames to stay
     // in-process. The flag above covers ordinary cross-origin frames, but
@@ -760,6 +759,7 @@ mod tests {
         }
         for removed in [
             "disable-blink-features=AutomationControlled",
+            "disable-infobars",
             "disable-background-networking",
             "disable-renderer-backgrounding",
             "disable-ipc-flooding-protection",

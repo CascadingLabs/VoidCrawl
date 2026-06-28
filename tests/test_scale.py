@@ -381,6 +381,7 @@ class TestGenerateSupervisordConf:
             assert "--disable-blink-features=AutomationControlled" in conf
         for removed in [
             "--no-zygote",
+            "--disable-infobars",
             "--disable-background-networking",
         ]:
             assert removed not in conf

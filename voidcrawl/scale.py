@@ -494,7 +494,6 @@ def generate_supervisord_conf(report: ScaleReport, base_port: int | None = None)
         " --use-angle=vulkan"
         " --disable-gpu-sandbox"
         " --disable-dev-shm-usage"
-        " --disable-infobars"
         " --disable-breakpad"
         " --disable-session-crashed-bubble"
         " --disable-search-engine-choice-screen"

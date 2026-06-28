@@ -73,6 +73,7 @@ a bug we fixed, which had silently disabled the whole list).
 |---|---|
 | `--enable-automation` | Literally opts in to automation detection |
 | `--disable-extensions` | Real Chrome always has extension support |
+| `--disable-infobars` | Legacy automation-suppression flag; unnecessary for CDP control and less human-shaped |
 
 ### Low-noise flags we add
 

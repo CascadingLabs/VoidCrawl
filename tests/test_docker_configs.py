@@ -26,6 +26,7 @@ def test_headful_config_keeps_human_parity_launch_surface() -> None:
 
     for noisy in [
         "--disable-blink-features=AutomationControlled",
+        "--disable-infobars",
         "--disable-background-networking",
         "--disable-component-update",
         "--disable-background-timer-throttling",
@@ -42,5 +43,6 @@ def test_headless_config_keeps_headless_specific_webdriver_suppression() -> None
     assert "--headless=new" in conf
     assert "--disable-blink-features=AutomationControlled" in conf
     assert "--remote-allow-origins=*" in conf
+    assert "--disable-infobars" not in conf
     assert "--disable-background-networking" not in conf
     assert "--disable-renderer-backgrounding" not in conf

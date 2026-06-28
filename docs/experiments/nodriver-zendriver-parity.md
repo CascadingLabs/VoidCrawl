@@ -16,15 +16,15 @@ Common low-noise flags:
 - `--homepage=about:blank`
 - `--no-pings`
 - `--password-store=basic`
-- `--disable-infobars`
 - `--disable-breakpad`
 - `--disable-dev-shm-usage`
 - `--disable-session-crashed-bubble`
 - `--disable-search-engine-choice-screen`
 - `--disable-features=IsolateOrigins,site-per-process`
 
-VoidCrawl now mirrors that low-noise core for launched sessions and Docker
-headless. The headful Docker farm intentionally omits broad background/render
+VoidCrawl mirrors that low-noise core for launched sessions and Docker headless,
+except it deliberately omits the legacy automation-shaped `--disable-infobars`
+flag. The headful Docker farm also intentionally omits broad background/render
 suppression flags and `AutomationControlled`; launched headless adds
 `AutomationControlled` only because Chrome otherwise reports
 `navigator.webdriver === true`.
