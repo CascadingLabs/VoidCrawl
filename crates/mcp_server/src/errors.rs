@@ -30,8 +30,11 @@ pub fn map_err(err: VoidCrawlError) -> ErrorData {
             let data = tagged("AntibotChallenge", json!({ "vendor": vendor }));
             ErrorData::internal_error(err.to_string(), Some(obj(data)))
         }
-        VoidCrawlError::ProfileBusy { ref name } => {
-            let data = tagged("ProfileBusy", json!({ "name": name }));
+        VoidCrawlError::ProfileBusy { ref name, pid, acquired_at } => {
+            let data = tagged(
+                "ProfileBusy",
+                json!({ "name": name, "pid": pid, "acquired_at": acquired_at }),
+            );
             ErrorData::internal_error(err.to_string(), Some(obj(data)))
         }
         VoidCrawlError::ProfileLeaseExpired { ref name, timeout_secs } => {

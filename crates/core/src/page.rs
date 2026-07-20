@@ -8,7 +8,7 @@ use std::{
         Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use chromiumoxide::{
@@ -52,6 +52,7 @@ use crate::{
     ax::compact_outline,
     error::{Result, VoidCrawlError},
     input::{HumanizeOptions, Rng, humanized_path},
+    response::{ResponseCapture, ResponseCaptureLimits},
     stealth::StealthConfig,
 };
 
@@ -516,6 +517,28 @@ impl Page {
         Ok(())
     }
 
+    /// Install JavaScript that runs before every subsequent document in this
+    /// tab. The script is registered through CDP; it does not modify fetch,
+    /// XHR, or request interception.
+    pub async fn add_init_script(&self, script: &str) -> Result<()> {
+        self.inner
+            .execute(AddScriptToEvaluateOnNewDocumentParams::new(script.to_string()))
+            .await
+            .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Arm a passive response-body capture before performing a triggering
+    /// action. Every `(name, pattern)` must be fulfilled once.
+    pub async fn expect_responses(
+        &self,
+        patterns: Vec<(String, String)>,
+        timeout: Duration,
+        limits: ResponseCaptureLimits,
+    ) -> Result<ResponseCapture> {
+        ResponseCapture::arm(self.inner.clone(), patterns, timeout, limits).await
+    }
+
     // ── Navigation ──────────────────────────────────────────────────────
 
     /// Navigate to `url` and wait for the CDP response.
@@ -529,8 +552,8 @@ impl Page {
     ///
     /// Subscribes to both `Page.lifecycleEvent` and `Network.responseReceived`
     /// **before** navigation starts so that no events are missed.  The
-    /// `networkIdle` (or `networkAlmostIdle` fallback) event terminates the
-    /// wait; a timeout is also applied.
+    /// `networkIdle` terminates the wait; reaching the deadline raises a
+    /// structured navigation timeout.
     ///
     /// Equivalent to Playwright's `page.goto(url, wait_until='networkidle')`.
     pub async fn goto_and_wait_for_idle(
@@ -561,6 +584,7 @@ impl Page {
         timeout: Duration,
         capture_endpoints: bool,
     ) -> Result<PageResponse> {
+        let started = Instant::now();
         // Subscribe to ALL event streams BEFORE navigation so no events slip
         // through the gap between goto() and the listener setup.
         let mut lifecycle = self
@@ -596,7 +620,6 @@ impl Page {
 
         let mut status_code: Option<u16> = None;
         let mut redirect_count: u32 = 0;
-        let mut got_almost_idle = false;
         // Headers of the final (non-redirect) Document response. Overwritten if
         // a later navigation supersedes it, mirroring `status_code`.
         let mut headers: Vec<(String, String)> = Vec::new();
@@ -609,11 +632,8 @@ impl Page {
                 biased;
                 maybe_lifecycle = lifecycle.next() => {
                     match maybe_lifecycle {
-                        Some(event) => match event.name.as_str() {
-                            "networkIdle" => break,
-                            "networkAlmostIdle" => { got_almost_idle = true; }
-                            _ => {}
-                        },
+                        Some(event) if event.name == "networkIdle" => break,
+                        Some(_) => {}
                         None => break,
                     }
                 }
@@ -637,10 +657,6 @@ impl Page {
                                 status_code = Some(code);
                                 headers = flatten_headers(event.response.headers.inner());
                             }
-                            // A new Document response after networkAlmostIdle
-                            // means a new navigation started; reset the flag so
-                            // we don't exit on a stale almost-idle signal.
-                            got_almost_idle = false;
                         }
                     }
                 }
@@ -677,23 +693,11 @@ impl Page {
                     }
                 }
                 () = &mut deadline => {
-                    if got_almost_idle {
-                        break;
-                    }
-                    // Hard timeout with no idle signal
-                    let html = self.content().await.unwrap_or_default();
-                    let final_url = self.url().await.unwrap_or_default().unwrap_or_default();
-                    let antibot = status_code.map(|c| antibot::classify(c, &headers, &html));
-                    return Ok(PageResponse {
-                        html,
-                        url: final_url,
-                        status_code,
-                        redirected: redirect_count > 0,
-                        headers,
-                        antibot,
-                        endpoints: finalize_endpoints(&endpoints, capture_endpoints),
-                        endpoints_truncated,
-                        endpoint_sanitizer_version: capture_endpoints.then_some(ENDPOINT_SANITIZER_VERSION),
+                    return Err(VoidCrawlError::NavigationTimeout {
+                        url: url.to_string(),
+                        wait_phase: "networkidle".to_string(),
+                        timeout_secs: timeout.as_secs_f64(),
+                        elapsed_secs: started.elapsed().as_secs_f64(),
                     });
                 }
             }
@@ -1856,8 +1860,8 @@ impl Page {
     }
 
     /// Close this page / tab.
-    pub async fn close(self) -> Result<()> {
-        self.inner.close().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+    pub async fn close(&self) -> Result<()> {
+        self.inner.clone().close().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
         Ok(())
     }
 

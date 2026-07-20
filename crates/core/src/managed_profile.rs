@@ -19,10 +19,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     error::{Result, VoidCrawlError},
-    profile::expand_tilde,
+    lease::{read_metadata, write_metadata},
+    profile::{expand_tilde, resolve_profile},
 };
 
 const MANIFEST_FILE: &str = "registry.json";
+/// Guardrail against accidentally multiplying a large profile without bound.
+pub const MAX_PROFILE_SPLIT_COPIES: usize = 16;
 
 #[derive(Debug, Clone)]
 pub struct ProfileRegistry {
@@ -75,6 +78,33 @@ pub struct ManagedProfileLease {
     id:    String,
     path:  PathBuf,
     _lock: RwLockWriteGuard<'static, File>,
+}
+
+/// Temporary, isolated clone of a quiesced managed profile.
+/// The directory is removed when this lease is dropped.
+pub struct ManagedProfileSnapshot {
+    source_id: String,
+    path:      PathBuf,
+    _tempdir:  tempfile::TempDir,
+}
+
+impl fmt::Debug for ManagedProfileSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ManagedProfileSnapshot")
+            .field("source_id", &self.source_id)
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ManagedProfileSnapshot {
+    pub fn source_id(&self) -> &str {
+        &self.source_id
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 impl fmt::Debug for ManagedProfileLease {
@@ -189,6 +219,116 @@ impl ProfileRegistry {
         })
     }
 
+    /// Create a uniquely named temporary snapshot while holding the source's
+    /// authoritative VoidCrawl lease. Lock and Chrome Singleton files are not
+    /// copied. The returned directory is deleted on drop.
+    pub fn snapshot_profile(&self, id: &str) -> Result<ManagedProfileSnapshot> {
+        self.snapshot_copies(id, 1)?
+            .pop()
+            .ok_or_else(|| VoidCrawlError::Other("profile snapshot was not created".into()))
+    }
+
+    /// Fork an installed native Chrome profile into isolated, concurrently
+    /// runnable `user_data_dir` roots.
+    ///
+    /// `source_name_or_path` may be a discovered Chrome profile name such as
+    /// `Default` or an explicit profile-directory path. The containing Chrome
+    /// user-data root must not be running: copying live SQLite and LevelDB
+    /// state cannot produce a consistent fork. The native profile is
+    /// normalized to `Default` inside each result, and its root `Local
+    /// State` file is copied so encrypted cookies and profile metadata
+    /// retain their Chrome context.
+    pub fn fork_profile(
+        &self,
+        source_name_or_path: &str,
+        copies: usize,
+    ) -> Result<Vec<ManagedProfileSnapshot>> {
+        validate_split_copies(copies)?;
+        let explicit = PathBuf::from(expand_tilde(source_name_or_path));
+        let source =
+            if explicit.is_dir() { explicit } else { resolve_profile(source_name_or_path)? };
+        if !source.join("Preferences").is_file() {
+            return Err(VoidCrawlError::ProfileNotFound {
+                name:     source_name_or_path.to_string(),
+                searched: vec![source.display().to_string()],
+            });
+        }
+        let user_data_root = source.parent().ok_or_else(|| {
+            VoidCrawlError::Other(format!(
+                "native profile {} has no Chrome user-data parent",
+                source.display()
+            ))
+        })?;
+        let singleton_lock = user_data_root.join("SingletonLock");
+        if singleton_lock.symlink_metadata().is_ok() {
+            return Err(VoidCrawlError::ChromeProfileBusy {
+                name:      source_name_or_path.to_string(),
+                lock_path: singleton_lock.display().to_string(),
+            });
+        }
+
+        let _source_lease = acquire_profile_lock(source_name_or_path, &source)?;
+        self.copy_profile_baseline(source_name_or_path, copies, |destination| {
+            let default_profile = destination.join("Default");
+            copy_snapshot_recursively(&source, &default_profile)?;
+            copy_regular_file_if_present(
+                &user_data_root.join("Local State"),
+                &destination.join("Local State"),
+            )
+        })
+    }
+
+    /// Split one quiesced managed profile into isolated, concurrently runnable
+    /// copies from the same baseline.
+    ///
+    /// The source lease is held across every copy, so no cooperating VoidCrawl
+    /// process can modify the source between copy one and copy N. Each returned
+    /// snapshot has a unique `user_data_dir`; Chrome therefore gives every
+    /// worker its own `SingletonLock`. The copies begin with the same cookies,
+    /// storage, extensions, and profile identity, but writes made after launch
+    /// are intentionally not synchronized between them or back to the source.
+    /// Dropping the returned snapshots deletes all temporary directories.
+    pub fn split_profile(&self, id: &str, copies: usize) -> Result<Vec<ManagedProfileSnapshot>> {
+        validate_split_copies(copies)?;
+        self.snapshot_copies(id, copies)
+    }
+
+    fn snapshot_copies(&self, id: &str, copies: usize) -> Result<Vec<ManagedProfileSnapshot>> {
+        let profile = self.describe_profile(id)?.profile;
+        let _source_lease = acquire_profile_lock(id, &profile.path)?;
+        self.copy_profile_baseline(id, copies, |destination| {
+            copy_snapshot_recursively(&profile.path, destination)
+        })
+    }
+
+    fn copy_profile_baseline(
+        &self,
+        source_id: &str,
+        copies: usize,
+        mut copy_into: impl FnMut(&Path) -> Result<()>,
+    ) -> Result<Vec<ManagedProfileSnapshot>> {
+        let snapshots_root = self.root.join(".snapshots");
+        fs::create_dir_all(&snapshots_root).map_err(|e| {
+            VoidCrawlError::Other(format!("create snapshot root {}: {e}", snapshots_root.display()))
+        })?;
+
+        let mut snapshots = Vec::with_capacity(copies);
+        for _ in 0..copies {
+            let tempdir = tempfile::Builder::new()
+                .prefix(&format!("{source_id}-"))
+                .tempdir_in(&snapshots_root)
+                .map_err(|e| VoidCrawlError::Other(format!("create profile snapshot: {e}")))?;
+            let path = tempdir.path().join("profile");
+            copy_into(&path)?;
+            snapshots.push(ManagedProfileSnapshot {
+                source_id: source_id.to_string(),
+                path,
+                _tempdir: tempdir,
+            });
+        }
+        Ok(snapshots)
+    }
+
     pub fn list_profiles(&self) -> Result<Vec<ManagedProfileDescription>> {
         let manifest = self.load_manifest()?;
         manifest.profiles.into_values().map(Self::describe_existing).collect()
@@ -210,7 +350,7 @@ impl ProfileRegistry {
                 return Ok(false);
             };
             if matches!(lock_status(&profile.path)?, ProfileStatus::Locked) {
-                return Err(VoidCrawlError::ProfileBusy { name: id.to_string() });
+                return Err(profile_busy(id, &profile.path.join(".voidcrawl.lock")));
             }
             if profile.path.exists() {
                 fs::remove_dir_all(&profile.path).map_err(|e| {
@@ -329,13 +469,17 @@ impl ProfileRegistry {
                         profile.last_used_at = Some(now_epoch_secs());
                         return Ok(lease);
                     }
-                    Err(VoidCrawlError::ProfileBusy { name }) => {
+                    Err(VoidCrawlError::ProfileBusy { name, .. }) => {
                         last_busy = Some(name);
                     }
                     Err(err) => return Err(err),
                 }
             }
-            Err(VoidCrawlError::ProfileBusy { name: last_busy.unwrap_or_else(|| name.to_string()) })
+            Err(VoidCrawlError::ProfileBusy {
+                name:        last_busy.unwrap_or_else(|| name.to_string()),
+                pid:         None,
+                acquired_at: None,
+            })
         })
     }
 
@@ -493,11 +637,24 @@ fn acquire_profile_lock(id: &str, path: &Path) -> Result<ManagedProfileLease> {
     let guard = match lock_ref.try_write() {
         Ok(guard) => guard,
         Err(e) if e.kind() == ErrorKind::WouldBlock => {
-            return Err(VoidCrawlError::ProfileBusy { name: id.to_string() });
+            return Err(profile_busy(id, &lock_path));
         }
         Err(e) => return Err(VoidCrawlError::Other(format!("lock {}: {e}", lock_path.display()))),
     };
+    let mut guard = guard;
+    write_metadata(&mut guard).map_err(|e| {
+        VoidCrawlError::Other(format!("write lease metadata {}: {e}", lock_path.display()))
+    })?;
     Ok(ManagedProfileLease { id: id.to_string(), path: path.to_path_buf(), _lock: guard })
+}
+
+fn profile_busy(name: &str, lock_path: &Path) -> VoidCrawlError {
+    let owner = read_metadata(lock_path);
+    VoidCrawlError::ProfileBusy {
+        name:        name.to_string(),
+        pid:         owner.as_ref().map(|m| m.pid),
+        acquired_at: owner.map(|m| m.acquired_at),
+    }
 }
 
 fn lock_status(path: &Path) -> Result<ProfileStatus> {
@@ -537,6 +694,71 @@ fn dir_size(path: &Path) -> Result<u64> {
         }
     }
     Ok(total)
+}
+
+fn validate_split_copies(copies: usize) -> Result<()> {
+    if !(2..=MAX_PROFILE_SPLIT_COPIES).contains(&copies) {
+        return Err(VoidCrawlError::Other(format!(
+            "profile split copies must be between 2 and {MAX_PROFILE_SPLIT_COPIES}"
+        )));
+    }
+    Ok(())
+}
+
+fn copy_regular_file_if_present(source: &Path, destination: &Path) -> Result<()> {
+    let Ok(metadata) = source.symlink_metadata() else {
+        return Ok(());
+    };
+    if !metadata.file_type().is_file() {
+        return Ok(());
+    }
+    fs::copy(source, destination).map_err(|e| {
+        VoidCrawlError::Other(format!(
+            "copy profile metadata {} to {}: {e}",
+            source.display(),
+            destination.display()
+        ))
+    })?;
+    Ok(())
+}
+
+fn copy_snapshot_recursively(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir_all(destination).map_err(|e| {
+        VoidCrawlError::Other(format!("create snapshot dir {}: {e}", destination.display()))
+    })?;
+    for entry in fs::read_dir(source).map_err(|e| {
+        VoidCrawlError::Other(format!("read snapshot source {}: {e}", source.display()))
+    })? {
+        let entry =
+            entry.map_err(|e| VoidCrawlError::Other(format!("read snapshot entry: {e}")))?;
+        let name = entry.file_name();
+        let name_text = name.to_string_lossy();
+        if name_text == ".voidcrawl.lock" || name_text.starts_with("Singleton") {
+            continue;
+        }
+        let from = entry.path();
+        let to = destination.join(name);
+        let file_type = entry.file_type().map_err(|e| {
+            VoidCrawlError::Other(format!("read snapshot file type {}: {e}", from.display()))
+        })?;
+        // Chrome profiles should be self-contained. Never follow arbitrary
+        // links out of the leased source tree into a worker snapshot.
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            copy_snapshot_recursively(&from, &to)?;
+        } else if file_type.is_file() {
+            fs::copy(&from, &to).map_err(|e| {
+                VoidCrawlError::Other(format!(
+                    "copy snapshot {} to {}: {e}",
+                    from.display(),
+                    to.display()
+                ))
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn copy_dir_recursively(source: &Path, destination: &Path) -> Result<()> {

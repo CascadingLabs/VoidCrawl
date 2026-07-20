@@ -21,7 +21,9 @@ Example:
 
 from __future__ import annotations
 
+import asyncio
 import os
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -29,9 +31,14 @@ from voidcrawl._downloads import capture_download
 from voidcrawl._ext import (
     AntibotChallenge,
     AntibotVerdict,
+    BrowserClosedError,
     CaptchaDetected,
+    CapturedResponse,
+    ChromeProfileBusy,
     DownloadCapture,
     DownloadOutcome,
+    NavigationError,
+    NavigationTimeoutError,
     Page,
     PageResponse,
     PooledTab,
@@ -39,6 +46,8 @@ from voidcrawl._ext import (
     ProfileHandle,
     ProfileLeaseExpired,
     ProfileNotFound,
+    ResponseExpectation,
+    ResponseTimeoutError,
     ScanReport,
     VoidCrawlError,
     _AcquireContext,
@@ -54,6 +63,8 @@ from voidcrawl._ext import (
 )
 from voidcrawl.actions._protocol import JsTab, Tab
 from voidcrawl.profiles import (
+    ManagedProfileSnapshot,
+    ManagedProfileSplit,
     ProfileRegistry,
     acquire_profile,
     list_profiles,
@@ -68,13 +79,20 @@ __all__ = [
     "AntibotChallenge",
     "AntibotVerdict",
     "Attr",
+    "BrowserClosedError",
     "BrowserConfig",
     "BrowserPool",
     "BrowserSession",
     "CaptchaDetected",
+    "CapturedResponse",
+    "ChromeProfileBusy",
     "DownloadCapture",
     "DownloadOutcome",
     "JsTab",
+    "ManagedProfileSnapshot",
+    "ManagedProfileSplit",
+    "NavigationError",
+    "NavigationTimeoutError",
     "Page",
     "PageResponse",
     "PoolConfig",
@@ -84,6 +102,8 @@ __all__ = [
     "ProfileLeaseExpired",
     "ProfileNotFound",
     "ProfileRegistry",
+    "ResponseExpectation",
+    "ResponseTimeoutError",
     "ScaleProfile",
     "ScaleReport",
     "ScanReport",
@@ -458,6 +478,40 @@ class PoolConfig(BaseModel):
 # ── BrowserSession ──────────────────────────────────────────────────────
 
 
+class _PageContext:
+    """Cancellation-safe implementation behind :meth:`BrowserSession.page`."""
+
+    def __init__(self, browser: BrowserSession, url: str | None) -> None:
+        self._browser = browser
+        self._url = url
+        self._page: Page | None = None
+
+    async def __aenter__(self) -> Page:
+        self._page = await self._browser.new_page(self._url)
+        return self._page
+
+    async def __aexit__(
+        self, exc_type: object, exc_val: object, exc_tb: object
+    ) -> Literal[False]:
+        if self._page is None:
+            return False
+        close_task = asyncio.ensure_future(self._page.close())
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            # Finish deterministic tab cleanup, then preserve cancellation.
+            await close_task
+            raise
+        except Exception as close_error:
+            if exc_type is None:
+                raise
+            if isinstance(exc_val, BaseException) and hasattr(exc_val, "add_note"):
+                exc_val.add_note(
+                    f"VoidCrawl also failed to close the page: {close_error}"
+                )
+        return False
+
+
 class BrowserSession:
     """Async context manager wrapping a single Chromium instance via CDP.
 
@@ -502,8 +556,8 @@ class BrowserSession:
             return await self._inner.__aexit__(exc_type, exc_val, exc_tb)
         return False
 
-    async def new_page(self, url: str) -> Page:
-        """Open a new tab and navigate to *url*.
+    async def new_page(self, url: str | None = None) -> Page:
+        """Open a blank tab, or navigate a new tab to *url* when provided.
 
         When :attr:`BrowserConfig.debug` is ``True``, returns a
         :class:`~voidcrawl.debug.DebugPage` wrapper that automatically
@@ -527,12 +581,21 @@ class BrowserSession:
             bc = self._config
             return DebugPage(  # type: ignore[return-value]
                 page,
-                start_url=url,
+                start_url=url or "about:blank",
                 stepping=bc.stepping,
                 highlight=bc.highlight,
                 step_delay=bc.step_delay,
             )
         return page
+
+    def page(self, url: str | None = None) -> _PageContext:
+        """Create a page context that always closes its tab.
+
+        The tab is closed on success, exception, timeout, and cancellation.
+        If close also fails while another exception is active, the original
+        exception is preserved.
+        """
+        return _PageContext(self, url)
 
     async def attach_page(self, target_id: str) -> Page:
         """Adopt an **existing** tab by its CDP ``target_id``.

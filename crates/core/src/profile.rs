@@ -20,6 +20,7 @@ use tokio::time::{Instant, sleep};
 
 use crate::{
     error::{Result, VoidCrawlError},
+    lease::{read_metadata, write_metadata},
     session::{BrowserSession, BrowserSessionBuilder},
 };
 
@@ -227,7 +228,14 @@ pub async fn acquire_profile_in(
         }
         if Instant::now() >= deadline {
             return Err(if lease_timeout.is_zero() {
-                VoidCrawlError::ProfileBusy { name: name.to_string() }
+                {
+                    let owner = read_metadata(&lock_path);
+                    VoidCrawlError::ProfileBusy {
+                        name:        name.to_string(),
+                        pid:         owner.as_ref().map(|m| m.pid),
+                        acquired_at: owner.map(|m| m.acquired_at),
+                    }
+                }
             } else {
                 VoidCrawlError::ProfileLeaseExpired {
                     name:         name.to_string(),
@@ -238,6 +246,13 @@ pub async fn acquire_profile_in(
         sleep(Duration::from_millis(100)).await;
     };
 
+    // Metadata is diagnostic only and is written after the authoritative OS
+    // lock is held. A successful acquisition replaces any stale contents.
+    let mut guard = guard;
+    write_metadata(&mut guard).map_err(|e| {
+        VoidCrawlError::Other(format!("write lease metadata {}: {e}", lock_path.display()))
+    })?;
+
     // `--user-data-dir=<parent>` + `--profile-directory=<name>` is the
     // contract Chrome actually honors. Without the second flag, Chrome
     // defaults to `"Default"` and the caller's cookies/extensions live
@@ -246,7 +261,17 @@ pub async fn acquire_profile_in(
         .user_data_dir(&user_data_dir)
         .arg(format!("--profile-directory={name}"));
     builder = if headless { builder.headless() } else { builder.headful() };
-    let session = builder.launch().await?;
+    let singleton_lock = user_data_dir.join("SingletonLock");
+    let session = match builder.launch().await {
+        Ok(session) => session,
+        Err(_) if singleton_lock.symlink_metadata().is_ok() => {
+            return Err(VoidCrawlError::ChromeProfileBusy {
+                name:      name.to_string(),
+                lock_path: singleton_lock.display().to_string(),
+            });
+        }
+        Err(error) => return Err(error),
+    };
 
     Ok(ProfileHandle { name: name.to_string(), path, session: Some(session), _lock: guard })
 }

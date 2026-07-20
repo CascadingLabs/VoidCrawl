@@ -602,7 +602,8 @@ impl BrowserPool {
         let mut first_err: Option<VoidCrawlError> = None;
 
         // Close all tabs in parallel
-        let tab_futs: Vec<_> = tabs.into_iter().map(|tab| tab.page.close()).collect();
+        let tab_futs: Vec<_> =
+            tabs.into_iter().map(|tab| async move { tab.page.close().await }).collect();
         for result in future::join_all(tab_futs).await {
             if let Err(e) = result {
                 if first_err.is_none() {

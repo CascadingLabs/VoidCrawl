@@ -63,6 +63,33 @@ class PageResponse:
     endpoints_truncated: bool
     endpoint_sanitizer_version: str | None
 
+class CapturedResponse:
+    """A passively observed response with an opt-in bounded body."""
+
+    url: str
+    status: int
+    headers: dict[str, str]
+    mime_type: str
+    resource_type: str
+    from_cache: bool
+    from_service_worker: bool
+    body_state: str
+    body_error: str | None
+    truncated: bool
+    async def bytes(self) -> bytes: ...
+    async def text(self) -> str: ...
+    async def json(self) -> Any: ...
+
+class ResponseExpectation:
+    """Async context returned by ``Page.expect_response(s)``."""
+
+    async def __aenter__(self) -> ResponseExpectation: ...
+    async def __aexit__(
+        self, exc_type: object, exc_val: object, exc_tb: object
+    ) -> bool: ...
+    @property
+    def value(self) -> Any: ...
+
 class DownloadOutcome:
     """Result of :meth:`Page.download` / :meth:`PooledTab.download`.
 
@@ -538,7 +565,12 @@ class Page:
         this exact tab from another connection."""
         ...
     async def goto(
-        self, url: str, timeout: float = 30.0, capture_endpoints: bool = False
+        self,
+        url: str,
+        timeout: float = 30.0,
+        capture_endpoints: bool = False,
+        *,
+        wait_until: str = "networkidle",
     ) -> PageResponse:
         """Navigate to *url* and wait for network idle in one shot.
 
@@ -553,6 +585,23 @@ class Page:
     async def navigate(self, url: str) -> None:
         """Navigate to *url* without waiting for any load event."""
         ...
+    async def add_init_script(self, script: str) -> None:
+        """Install JavaScript before each subsequent document executes."""
+        ...
+    def expect_response(
+        self,
+        pattern: str,
+        timeout: float = 30.0,
+        max_response_bytes: int = 2097152,
+        max_total_bytes: int = 8388608,
+    ) -> ResponseExpectation: ...
+    def expect_responses(
+        self,
+        patterns: dict[str, str],
+        timeout: float = 30.0,
+        max_response_bytes: int = 2097152,
+        max_total_bytes: int = 8388608,
+    ) -> ResponseExpectation: ...
     async def wait_for_navigation(self) -> None:
         """Block until the current navigation completes."""
         ...
@@ -883,7 +932,7 @@ class BrowserSession:
         port: int | None = None,
     ) -> None: ...
     async def launch(self) -> None: ...
-    async def new_page(self, url: str) -> Page: ...
+    async def new_page(self, url: str | None = None) -> Page: ...
     async def attach_page(self, target_id: str) -> Page: ...
     async def websocket_url(self) -> str: ...
     async def version(self) -> str: ...
@@ -932,6 +981,20 @@ def py_profile_registry_clone(
     labels: list[str] | None = None,
     root: str | None = None,
 ) -> str: ...
+def py_profile_registry_snapshot(
+    id: str,  # noqa: A002
+    root: str | None = None,
+) -> ManagedProfileSnapshot: ...
+def py_profile_registry_split(
+    id: str,  # noqa: A002
+    copies: int = 2,
+    root: str | None = None,
+) -> ManagedProfileSplit: ...
+def py_profile_registry_fork(
+    source: str = "Default",
+    copies: int = 2,
+    root: str | None = None,
+) -> ManagedProfileSplit: ...
 def py_profile_registry_delete(
     id: str,  # noqa: A002
     root: str | None = None,
@@ -976,8 +1039,44 @@ def scan_bytes(
 class VoidCrawlError(Exception):
     """Base class for all voidcrawl errors raised from the native extension."""
 
+class ManagedProfileSnapshot:
+    path: str
+    async def close(self) -> None: ...
+    async def __aenter__(self) -> ManagedProfileSnapshot: ...
+    async def __aexit__(
+        self, exc_type: object = None, exc_val: object = None, exc_tb: object = None
+    ) -> None: ...
+
+class ManagedProfileSplit:
+    source_id: str
+    paths: list[str]
+    def __len__(self) -> int: ...
+    async def close(self) -> None: ...
+    async def __aenter__(self) -> ManagedProfileSplit: ...
+    async def __aexit__(
+        self, exc_type: object = None, exc_val: object = None, exc_tb: object = None
+    ) -> None: ...
+
+class NavigationError(VoidCrawlError): ...
+
+class NavigationTimeoutError(NavigationError):
+    url: str
+    wait_phase: str
+    timeout: float
+    elapsed: float
+
+class BrowserClosedError(NavigationError): ...
+class ResponseTimeoutError(VoidCrawlError): ...
+
+class ChromeProfileBusy(VoidCrawlError):
+    """Chrome's own SingletonLock prevented profile launch."""
+
 class ProfileBusy(VoidCrawlError):
     """Another voidcrawl process holds the profile lock (non-blocking acquire)."""
+
+    profile: str
+    owner_pid: int | None
+    acquired_at: int | None
 
 class ProfileLeaseExpired(VoidCrawlError):
     """Timed out waiting for the profile lock."""
