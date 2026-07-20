@@ -381,6 +381,11 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@76f52bc884231f62b9a034ebfe128415bbaabdfc # v1
+        with:
+          # PyPI accepts files one at a time. If a transient failure interrupts
+          # a large matrix upload, a rerun must resume instead of failing on
+          # the files that were already accepted.
+          skip-existing: true
         # Uses OIDC trusted publishing — no token needed if configured on PyPI
 
   # ── Publish voidcrawl-mcp to PyPI ───────────────────────────────────────
@@ -406,6 +411,8 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@76f52bc884231f62b9a034ebfe128415bbaabdfc # v1
+        with:
+          skip-existing: true
 
   # ── Publish Rust crates to crates.io ────────────────────────────────────
   # Publishes `void_crawl_core` first, waits briefly for the crates.io
