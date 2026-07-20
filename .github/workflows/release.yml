@@ -4,8 +4,19 @@ on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      recovery_run_id:
+        description: "Failed release run containing completed artifacts"
+        required: true
+        type: string
+      recovery_tag:
+        description: "Existing release tag, for example v0.4.1"
+        required: true
+        type: string
 
 permissions:
+  actions: read # for recovery downloads from an earlier run
   contents: write # for GitHub Release creation
   id-token: write # for PyPI trusted publishing
 
@@ -22,6 +33,7 @@ jobs:
   # ── Rust checks ─────────────────────────────────────────────────────────
   rust-checks:
     name: Rust checks
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -54,6 +66,7 @@ jobs:
   # ── Python tests ────────────────────────────────────────────────────────
   python-tests:
     name: Python ${{ matrix.python-version }} tests
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -507,4 +520,75 @@ jobs:
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
         with:
           files: dist/*
+          generate_release_notes: true
+
+  # ── Resume a partially accepted PyPI upload ─────────────────────────────
+  # PyPI accepts matrix files individually, so a transient failure can leave
+  # an incomplete release. Dispatch this same trusted-publisher workflow with
+  # the failed run ID and existing tag to publish only missing files.
+  recover-pypi:
+    name: Resume voidcrawl PyPI publish
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/voidcrawl
+    steps:
+      - name: Download voidcrawl artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: "{wheels-*,sdist}"
+          merge-multiple: true
+          path: dist
+          run-id: ${{ inputs.recovery_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Strip MCP wheels from dist
+        run: |
+          find dist/ -name "voidcrawl_mcp-*" -delete || true
+          find dist/ -name "voidcrawl-mcp-*" -delete || true
+
+      - name: Validate recovery artifacts
+        env:
+          RELEASE_TAG: ${{ inputs.recovery_tag }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          version = os.environ["RELEASE_TAG"].removeprefix("v")
+          artifacts = [path.name for path in Path("dist").iterdir() if path.is_file()]
+          assert artifacts, "no artifacts downloaded"
+          assert all(name.startswith(f"voidcrawl-{version}") for name in artifacts), artifacts
+          assert any("cp314t" in name for name in artifacts), "no cp314t wheels found"
+          print(f"validated {len(artifacts)} voidcrawl {version} artifacts")
+          PY
+
+      - name: Publish missing files to PyPI
+        uses: pypa/gh-action-pypi-publish@76f52bc884231f62b9a034ebfe128415bbaabdfc # v1
+        with:
+          skip-existing: true
+          verbose: true
+
+  recover-github-release:
+    name: Complete GitHub Release
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    needs: recover-pypi
+    steps:
+      - name: Download all release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: "{wheels-*,sdist*}"
+          merge-multiple: true
+          path: dist
+          run-id: ${{ inputs.recovery_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
+        with:
+          tag_name: ${{ inputs.recovery_tag }}
+          files: dist/*
+          fail_on_unmatched_files: true
           generate_release_notes: true
