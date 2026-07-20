@@ -4,7 +4,7 @@ requires = [ "maturin>=1.7,<2" ]
 
 [project]
 name = "voidcrawl-mcp"
-version = "0.3.8.2"
+version = "0.4.0"
 description = "Stdio MCP server for stealthy headless Chrome via voidcrawl — expose the voidcrawl Chrome pool to Claude Code"
 readme = "README.md"
 license = { text = "Apache-2.0" }
