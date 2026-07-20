@@ -27,7 +27,11 @@ fn captcha_detected_carries_exception_tag_and_kind() {
 
 #[test]
 fn profile_busy_carries_exception_tag_and_name() {
-    let d = data(VoidCrawlError::ProfileBusy { name: "Default".into() });
+    let d = data(VoidCrawlError::ProfileBusy {
+        name:        "Default".into(),
+        pid:         Some(42),
+        acquired_at: Some(123),
+    });
     assert_eq!(d["exception"], "ProfileBusy");
     assert_eq!(d["name"], "Default");
 }

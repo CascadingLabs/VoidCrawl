@@ -78,6 +78,30 @@ asyncio.run(main())
 - Both `BrowserPool` and `BrowserSession` are async context managers that ensure clean shutdown.
 - Stealth mode is **on by default**. Pass `stealth=False` to disable it.
 
+## Blank pages and response payload capture
+
+Create a blank tab when instrumentation must be installed before navigation.
+Response capture is passive CDP observation: it does not patch page-world
+`fetch`/`XMLHttpRequest` and it does not intercept requests.
+
+```python
+async with BrowserSession() as browser:
+    async with browser.page() as page:
+        await page.add_init_script("window.__readyBeforeLoad = true")
+        await page.goto(url, wait_until="networkidle", timeout=60)
+
+        async with page.expect_response("**/api/result") as pending:
+            await page.click_by_role("button", "Submit")
+
+        response = await pending.value
+        payload = await response.json()
+```
+
+Use `expect_responses({"name": "**/pattern", ...})` when one action produces
+multiple required responses. Capture is opt-in and bounded by per-response and
+aggregate byte limits. `body_state` is `available`, `truncated`, or
+`unavailable`; captured bodies are never logged or persisted automatically.
+
 ## Docker
 
 For production, Chrome runs as a persistent daemon in Docker with pre-warmed profiles:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from voidcrawl._ext import (
     AntibotChallenge as AntibotChallenge,
 )
@@ -9,7 +11,22 @@ from voidcrawl._ext import (
     AntibotVerdict as AntibotVerdict,
 )
 from voidcrawl._ext import (
+    BrowserClosedError as BrowserClosedError,
+)
+from voidcrawl._ext import (
     CaptchaDetected as CaptchaDetected,
+)
+from voidcrawl._ext import (
+    CapturedResponse as CapturedResponse,
+)
+from voidcrawl._ext import (
+    ChromeProfileBusy as ChromeProfileBusy,
+)
+from voidcrawl._ext import (
+    NavigationError as NavigationError,
+)
+from voidcrawl._ext import (
+    NavigationTimeoutError as NavigationTimeoutError,
 )
 from voidcrawl._ext import (
     Page as Page,
@@ -33,6 +50,12 @@ from voidcrawl._ext import (
     ProfileNotFound as ProfileNotFound,
 )
 from voidcrawl._ext import (
+    ResponseExpectation as ResponseExpectation,
+)
+from voidcrawl._ext import (
+    ResponseTimeoutError as ResponseTimeoutError,
+)
+from voidcrawl._ext import (
     VoidCrawlError as VoidCrawlError,
 )
 from voidcrawl._ext import (
@@ -43,6 +66,12 @@ from voidcrawl.actions._protocol import (
 )
 from voidcrawl.actions._protocol import (
     Tab as Tab,
+)
+from voidcrawl.profiles import (
+    ManagedProfileSnapshot as ManagedProfileSnapshot,
+)
+from voidcrawl.profiles import (
+    ManagedProfileSplit as ManagedProfileSplit,
 )
 from voidcrawl.profiles import (
     ProfileRegistry as ProfileRegistry,
@@ -84,11 +113,18 @@ __all__ = [
     "AntibotChallenge",
     "AntibotVerdict",
     "Attr",
+    "BrowserClosedError",
     "BrowserConfig",
     "BrowserPool",
     "BrowserSession",
     "CaptchaDetected",
+    "CapturedResponse",
+    "ChromeProfileBusy",
     "JsTab",
+    "ManagedProfileSnapshot",
+    "ManagedProfileSplit",
+    "NavigationError",
+    "NavigationTimeoutError",
     "Page",
     "PageResponse",
     "PoolConfig",
@@ -98,6 +134,8 @@ __all__ = [
     "ProfileLeaseExpired",
     "ProfileNotFound",
     "ProfileRegistry",
+    "ResponseExpectation",
+    "ResponseTimeoutError",
     "ScaleProfile",
     "ScaleReport",
     "Schema",
@@ -202,11 +240,18 @@ class BrowserSession:
     async def __aexit__(
         self, exc_type: object, exc_val: object, exc_tb: object
     ) -> bool: ...
-    async def new_page(self, url: str) -> Page: ...
+    async def new_page(self, url: str | None = None) -> Page: ...
+    def page(self, url: str | None = None) -> _PageContext: ...
     async def attach_page(self, target_id: str) -> Page: ...
     async def websocket_url(self) -> str: ...
     async def version(self) -> str: ...
     async def close(self) -> None: ...
+
+class _PageContext:
+    async def __aenter__(self) -> Page: ...
+    async def __aexit__(
+        self, exc_type: object, exc_val: object, exc_tb: object
+    ) -> Literal[False]: ...
 
 class BrowserPool:
     """Pool of reusable browser tabs across one or more Chrome processes."""

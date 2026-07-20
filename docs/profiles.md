@@ -59,9 +59,56 @@ Async context manager wrapping acquire + release.
 
 ## Chrome's own lock
 
-Chrome itself locks a profile via `SingletonLock` when it runs. If your **real** Chrome is currently using the profile, `acquire_profile` will launch a second Chrome that fails at startup. Close the user's Chrome first, or use a profile dedicated to voidcrawl.
+Chrome itself locks a profile via `SingletonLock` when it runs. If your **real** Chrome is currently using the profile, `acquire_profile` raises `ChromeProfileBusy`, distinct from VoidCrawl's own `ProfileBusy`. Close the user's Chrome first, or use a profile dedicated to voidcrawl.
 
 `voidcrawl`'s own lock (`.voidcrawl.lock` in the profile dir) only arbitrates between voidcrawl processes.
+
+## Split one profile across concurrent Chrome instances
+
+Chrome cannot run two processes against one writable `user_data_dir`: its
+`SingletonLock` deliberately prevents that. `split_profile` performs the safe
+version in one operation:
+
+```python
+from voidcrawl import BrowserConfig, BrowserSession, ProfileRegistry
+
+registry = ProfileRegistry.default()
+async with registry.split_profile("ahrefs-warm", copies=2) as split:
+    first_path, second_path = split.paths
+    async with (
+        BrowserSession(BrowserConfig(user_data_dir=first_path)) as first,
+        BrowserSession(BrowserConfig(user_data_dir=second_path)) as second,
+    ):
+        ...  # two real Chrome instances, initialized from the same profile
+```
+
+The context acquires one authoritative source lease across every copy. This is
+the important part of the "split": each temporary profile comes from the same
+quiesced baseline, rather than snapshots taken while another worker can modify
+the source. Copying runs off the Python asyncio thread.
+
+Each result is a unique Chrome `user_data_dir`, so each Chrome owns a different
+`SingletonLock`. Cookies, local storage, extensions, bookmarks, and profile
+identity start the same. Once launched, writes intentionally diverge and are
+not synchronized or merged back into the source. All temporary directories are
+deleted when the split context exits, including exceptional exits.
+
+Fork your installed native `Default` profile into two separate headful Chrome
+instances with the visual proof below. Close regular Chrome first so the source
+profile is quiescent:
+
+```bash
+uv run python examples/profile_split_headful.py --hold-seconds 20
+```
+
+Pass `--source "Profile 1"` or an explicit profile-directory path to select a
+different native profile. The example uses `fork_profile`, which copies the
+selected native profile plus Chrome's root `Local State` into each standalone
+worker directory. Splits accept 2 through 16 copies as a disk-usage guardrail. For one disposable
+copy, `snapshot_profile` remains available. Both operations exclude
+`.voidcrawl.lock`, Chrome `Singleton*` files, and symlinks. A permanent
+`clone_profile` remains a best-effort copy and should not be used against a live
+source.
 
 ## MCP profiles
 

@@ -29,6 +29,9 @@ if TYPE_CHECKING:
 
 from voidcrawl._ext import (
     CaptchaDetected,
+    ChromeProfileBusy,
+    ManagedProfileSnapshot,
+    ManagedProfileSplit,
     ProfileBusy,
     ProfileHandle,
     ProfileLeaseExpired,
@@ -47,8 +50,11 @@ try:
         py_profile_registry_create,
         py_profile_registry_delete,
         py_profile_registry_describe,
+        py_profile_registry_fork,
         py_profile_registry_list,
         py_profile_registry_root,
+        py_profile_registry_snapshot,
+        py_profile_registry_split,
     )
 except (
     ImportError
@@ -60,14 +66,20 @@ except (
     py_profile_registry_create = None  # type: ignore[assignment]
     py_profile_registry_delete = None  # type: ignore[assignment]
     py_profile_registry_describe = None  # type: ignore[assignment]
+    py_profile_registry_fork = None  # type: ignore[assignment]
     py_profile_registry_list = None  # type: ignore[assignment]
     py_profile_registry_root = None  # type: ignore[assignment]
+    py_profile_registry_snapshot = None  # type: ignore[assignment]
+    py_profile_registry_split = None  # type: ignore[assignment]
 
 JsonDict = dict[str, Any]
 RegistryManifest = dict[str, dict[str, JsonDict]]
 
 __all__ = [
     "CaptchaDetected",
+    "ChromeProfileBusy",
+    "ManagedProfileSnapshot",
+    "ManagedProfileSplit",
     "ProfileBusy",
     "ProfileHandle",
     "ProfileLeaseExpired",
@@ -151,6 +163,71 @@ class ProfileRegistry:
         return _fallback_clone_profile(
             self.root, source_id_or_path, id, description, list(labels)
         )
+
+    def snapshot_profile(
+        self,
+        id: str,  # noqa: A002 - public API mirrors profile registry schema.
+    ) -> ManagedProfileSnapshot:
+        """Create a quiesced, temporary clone that cleans itself up.
+
+        Use the returned object as an async context manager. The source's OS
+        lease is held while copying; lock and Chrome Singleton files are
+        excluded from the snapshot.
+        """
+        if py_profile_registry_snapshot is None:
+            raise RuntimeError("managed profile snapshots require the native extension")
+        return py_profile_registry_snapshot(id, self.root)
+
+    def fork_profile(
+        self,
+        source: str = "Default",
+        *,
+        copies: int = 2,
+    ) -> ManagedProfileSplit:
+        """Fork a closed native Chrome profile into concurrent instances.
+
+        ``source`` may be a discovered profile name such as ``"Default"`` or
+        an explicit native profile-directory path. The source Chrome must be
+        closed so its cookie databases and storage are quiescent. Each result
+        is a temporary standalone ``user_data_dir`` containing the selected
+        profile as ``Default`` plus Chrome's root ``Local State`` metadata.
+
+        The copies start with the same login state and profile identity, then
+        intentionally diverge. They are deleted when the async context exits.
+        """
+        if py_profile_registry_fork is None:
+            raise RuntimeError("native profile forking requires the native extension")
+        return py_profile_registry_fork(source, copies, self.root)
+
+    def split_profile(
+        self,
+        id: str,  # noqa: A002 - public API mirrors profile registry schema.
+        *,
+        copies: int = 2,
+    ) -> ManagedProfileSplit:
+        """Prepare isolated copies of one profile for concurrent Chrome instances.
+
+        The returned async context manager performs the copy work off the
+        asyncio thread. It takes one source lease across the complete split, so
+        every copy starts from the same quiesced baseline. Each path is a
+        separate Chrome ``user_data_dir`` and can therefore run concurrently
+        without a ``SingletonLock`` conflict.
+
+        This is copy-on-start isolation, not live synchronization: cookies,
+        storage, and other writes diverge once the Chrome instances launch and
+        are not merged back into the source.
+
+        Example::
+
+            async with registry.split_profile("work", copies=2) as split:
+                first_path, second_path = split.paths
+                # Launch one BrowserSession per path.
+        """
+        if py_profile_registry_split is None:
+            raise RuntimeError(
+                "managed profile splitting requires the native extension"
+            )
+        return py_profile_registry_split(id, copies, self.root)
 
     def list_profiles(self) -> list[dict[str, object]]:
         if py_profile_registry_list is not None:

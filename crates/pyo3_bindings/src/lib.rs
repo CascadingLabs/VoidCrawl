@@ -6,7 +6,7 @@
 use std::{
     collections::HashMap,
     convert::Infallible,
-    fmt,
+    fmt, mem,
     path::Path,
     sync::{Arc, Mutex as StdMutex},
     time::Duration,
@@ -20,19 +20,26 @@ use pyo3::{
 };
 use pyo3_async_runtimes::tokio::future_into_py;
 use serde_json::Value;
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, task::spawn_blocking};
 use void_crawl_core::{
-    AntibotEvidence, AntibotVerdict, BrowserMode, BrowserPool, BrowserSession, CookieParam,
-    DEFAULT_MAX_BYTES, DeleteCookiesParams, DispatchKeyEventType, DispatchMouseEventType,
-    DownloadCapture, DownloadOutcome, MouseButton, Page, PageResponse, PoolConfig, PooledTab,
-    ProfileHandle, ProfileInfo, ProfileRegistry, ScanConfig, ScanReport, StealthConfig, Verdict,
+    AntibotEvidence, AntibotVerdict, BrowserMode, BrowserPool, BrowserSession, CapturedResponse,
+    CookieParam, DEFAULT_MAX_BYTES, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_MAX_TOTAL_RESPONSE_BYTES,
+    DeleteCookiesParams, DispatchKeyEventType, DispatchMouseEventType, DownloadCapture,
+    DownloadOutcome, MAX_PROFILE_SPLIT_COPIES, ManagedProfileSnapshot, MouseButton, Page,
+    PageResponse, PoolConfig, PooledTab, ProfileHandle, ProfileInfo, ProfileRegistry,
+    ResponseCapture, ResponseCaptureLimits, ScanConfig, ScanReport, StealthConfig, Verdict,
     acquire_profile, list_profiles, scan_bytes, scan_path,
 };
 
 // ── Error conversion ────────────────────────────────────────────────────
 
 pyo3::create_exception!(voidcrawl._ext, VoidCrawlError, PyRuntimeError);
+pyo3::create_exception!(voidcrawl._ext, NavigationError, VoidCrawlError);
+pyo3::create_exception!(voidcrawl._ext, NavigationTimeoutError, NavigationError);
+pyo3::create_exception!(voidcrawl._ext, BrowserClosedError, NavigationError);
+pyo3::create_exception!(voidcrawl._ext, ResponseTimeoutError, VoidCrawlError);
 pyo3::create_exception!(voidcrawl._ext, ProfileBusy, VoidCrawlError);
+pyo3::create_exception!(voidcrawl._ext, ChromeProfileBusy, VoidCrawlError);
 pyo3::create_exception!(voidcrawl._ext, ProfileLeaseExpired, VoidCrawlError);
 pyo3::create_exception!(voidcrawl._ext, ProfileNotFound, VoidCrawlError);
 pyo3::create_exception!(voidcrawl._ext, CaptchaDetected, VoidCrawlError);
@@ -41,9 +48,46 @@ pyo3::create_exception!(voidcrawl._ext, AntibotChallenge, VoidCrawlError);
 #[allow(clippy::needless_pass_by_value)] // used as fn pointer in map_err(to_py_err)
 fn to_py_err(e: void_crawl_core::VoidCrawlError) -> PyErr {
     match e {
-        void_crawl_core::VoidCrawlError::ProfileBusy { .. } => ProfileBusy::new_err(e.to_string()),
+        void_crawl_core::VoidCrawlError::NavigationTimeout {
+            ref url,
+            ref wait_phase,
+            timeout_secs,
+            elapsed_secs,
+        } => {
+            let err = NavigationTimeoutError::new_err(e.to_string());
+            Python::attach(|py| {
+                let value = err.value(py);
+                let _ = value.setattr("url", url);
+                let _ = value.setattr("wait_phase", wait_phase);
+                let _ = value.setattr("timeout", timeout_secs);
+                let _ = value.setattr("elapsed", elapsed_secs);
+            });
+            err
+        }
+        void_crawl_core::VoidCrawlError::NavigationFailed(_) => {
+            NavigationError::new_err(e.to_string())
+        }
+        void_crawl_core::VoidCrawlError::BrowserClosed => {
+            BrowserClosedError::new_err(e.to_string())
+        }
+        void_crawl_core::VoidCrawlError::ResponseTimeout { .. } => {
+            ResponseTimeoutError::new_err(e.to_string())
+        }
+        void_crawl_core::VoidCrawlError::ProfileBusy { ref name, pid, acquired_at } => {
+            let err = ProfileBusy::new_err(e.to_string());
+            Python::attach(|py| {
+                let value = err.value(py);
+                let _ = value.setattr("profile", name);
+                let _ = value.setattr("owner_pid", pid);
+                let _ = value.setattr("acquired_at", acquired_at);
+            });
+            err
+        }
         void_crawl_core::VoidCrawlError::ProfileLeaseExpired { .. } => {
             ProfileLeaseExpired::new_err(e.to_string())
+        }
+        void_crawl_core::VoidCrawlError::ChromeProfileBusy { .. } => {
+            ChromeProfileBusy::new_err(e.to_string())
         }
         void_crawl_core::VoidCrawlError::ProfileNotFound { .. } => {
             ProfileNotFound::new_err(e.to_string())
@@ -270,6 +314,251 @@ impl From<PageResponse> for PyPageResponse {
     }
 }
 
+// ── CapturedResponse ────────────────────────────────────────────────────
+
+/// A passively observed network response with an opt-in bounded body.
+#[pyclass(name = "CapturedResponse", skip_from_py_object)]
+#[derive(Debug, Clone)]
+pub struct PyCapturedResponse {
+    inner: CapturedResponse,
+}
+
+impl From<CapturedResponse> for PyCapturedResponse {
+    fn from(inner: CapturedResponse) -> Self {
+        Self { inner }
+    }
+}
+
+#[pymethods]
+impl PyCapturedResponse {
+    #[getter]
+    fn url(&self) -> &str {
+        &self.inner.url
+    }
+
+    #[getter]
+    fn status(&self) -> u16 {
+        self.inner.status
+    }
+
+    #[getter]
+    fn headers(&self) -> HashMap<String, String> {
+        self.inner.headers.iter().cloned().collect()
+    }
+
+    #[getter]
+    fn mime_type(&self) -> &str {
+        &self.inner.mime_type
+    }
+
+    #[getter]
+    fn resource_type(&self) -> &str {
+        &self.inner.resource_type
+    }
+
+    #[getter]
+    #[allow(clippy::wrong_self_convention)]
+    fn from_cache(&self) -> bool {
+        self.inner.from_cache
+    }
+
+    #[getter]
+    #[allow(clippy::wrong_self_convention)]
+    fn from_service_worker(&self) -> bool {
+        self.inner.from_service_worker
+    }
+
+    #[getter]
+    fn body_state(&self) -> &'static str {
+        self.inner.body_state.as_str()
+    }
+
+    #[getter]
+    fn body_error(&self) -> Option<&str> {
+        self.inner.body_error.as_deref()
+    }
+
+    #[getter]
+    fn truncated(&self) -> bool {
+        self.inner.body_state == void_crawl_core::ResponseBodyState::Truncated
+    }
+
+    fn bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let body = captured_body(&self.inner)?;
+        future_into_py(py, async move { Ok(PyBytesResult(body)) })
+    }
+
+    fn text<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        captured_body(&self.inner)?;
+        let text = self.inner.text().map_err(to_py_err)?;
+        future_into_py(py, async move { Ok(text) })
+    }
+
+    fn json<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        captured_body(&self.inner)?;
+        let value = self.inner.json().map_err(to_py_err)?;
+        future_into_py(py, async move { Ok(PyJsonValue(value)) })
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "CapturedResponse(url={:?}, status={}, body_state={:?}, body_len={})",
+            self.inner.url,
+            self.inner.status,
+            self.inner.body_state.as_str(),
+            self.inner.body().len(),
+        )
+    }
+}
+
+fn validate_response_options(
+    timeout: f64,
+    max_response_bytes: usize,
+    max_total_bytes: usize,
+) -> PyResult<()> {
+    if !timeout.is_finite() || timeout <= 0.0 {
+        return Err(PyValueError::new_err("timeout must be positive and finite"));
+    }
+    if max_response_bytes == 0 || max_total_bytes == 0 {
+        return Err(PyValueError::new_err("response byte limits must be positive"));
+    }
+    Ok(())
+}
+
+fn captured_body(response: &CapturedResponse) -> PyResult<Vec<u8>> {
+    if response.body_state == void_crawl_core::ResponseBodyState::Unavailable {
+        return Err(PyRuntimeError::new_err(
+            response.body_error.clone().unwrap_or_else(|| "response body unavailable".into()),
+        ));
+    }
+    Ok(response.body().to_vec())
+}
+
+/// Async expectation context returned by ``Page.expect_response(s)``.
+#[pyclass(name = "ResponseExpectation")]
+pub struct PyResponseExpectation {
+    page:     Arc<Mutex<Option<Arc<Page>>>>,
+    patterns: Vec<(String, String)>,
+    timeout:  Duration,
+    limits:   ResponseCaptureLimits,
+    single:   bool,
+    capture:  Arc<Mutex<Option<ResponseCapture>>>,
+    result:   Arc<Mutex<Option<HashMap<String, CapturedResponse>>>>,
+}
+
+impl fmt::Debug for PyResponseExpectation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResponseExpectation")
+            .field("patterns", &self.patterns)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PyResponseExpectation {
+    fn new(
+        page: Arc<Mutex<Option<Arc<Page>>>>,
+        patterns: Vec<(String, String)>,
+        timeout: f64,
+        max_response_bytes: usize,
+        max_total_bytes: usize,
+        single: bool,
+    ) -> Self {
+        Self {
+            page,
+            patterns,
+            timeout: Duration::from_secs_f64(timeout),
+            limits: ResponseCaptureLimits { max_response_bytes, max_total_bytes },
+            single,
+            capture: Arc::new(Mutex::new(None)),
+            result: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+#[pymethods]
+impl PyResponseExpectation {
+    fn __aenter__<'py>(slf: Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let (page_slot, patterns, timeout, limits, capture_slot) = {
+            let this = slf.borrow();
+            (
+                Arc::clone(&this.page),
+                this.patterns.clone(),
+                this.timeout,
+                this.limits,
+                Arc::clone(&this.capture),
+            )
+        };
+        let slf_ref = slf.into_any().unbind();
+        future_into_py(py, async move {
+            let page = page_slot
+                .lock()
+                .await
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
+            let capture =
+                page.expect_responses(patterns, timeout, limits).await.map_err(to_py_err)?;
+            *capture_slot.lock().await = Some(capture);
+            Ok(slf_ref)
+        })
+    }
+
+    #[pyo3(signature = (exc_type=None, _exc_val=None, _exc_tb=None))]
+    #[allow(clippy::needless_pass_by_value)]
+    fn __aexit__<'py>(
+        &self,
+        py: Python<'py>,
+        exc_type: Option<Bound<'py, PyAny>>,
+        _exc_val: Option<Bound<'py, PyAny>>,
+        _exc_tb: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let failed = exc_type.is_some();
+        let capture_slot = Arc::clone(&self.capture);
+        let result_slot = Arc::clone(&self.result);
+        future_into_py(py, async move {
+            let capture = capture_slot.lock().await.take();
+            if failed {
+                drop(capture);
+                return Ok(false);
+            }
+            let capture = capture
+                .ok_or_else(|| PyRuntimeError::new_err("response expectation was not entered"))?;
+            let responses = capture.wait().await.map_err(to_py_err)?;
+            *result_slot.lock().await = Some(responses);
+            Ok(false)
+        })
+    }
+
+    #[getter]
+    fn value<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let result = Arc::clone(&self.result);
+        let single = self.single;
+        future_into_py(py, async move {
+            let responses =
+                result.lock().await.as_ref().cloned().ok_or_else(|| {
+                    PyRuntimeError::new_err("response expectation has not completed")
+                })?;
+            if single {
+                let response = responses
+                    .get("response")
+                    .cloned()
+                    .ok_or_else(|| PyRuntimeError::new_err("expected response was not captured"))?;
+                Python::attach(|py| {
+                    Py::new(py, PyCapturedResponse::from(response)).map(Py::into_any)
+                })
+            } else {
+                Python::attach(|py| {
+                    let dict = PyDict::new(py);
+                    for (name, response) in responses {
+                        dict.set_item(name, Py::new(py, PyCapturedResponse::from(response))?)?;
+                    }
+                    Ok(dict.unbind().into_any())
+                })
+            }
+        })
+    }
+}
+
 // ── DownloadOutcome ─────────────────────────────────────────────────────
 
 /// Python-visible result of `Page.download()` / `PooledTab.download()`.
@@ -432,7 +721,7 @@ fn parse_key_event_type(s: &str) -> PyResult<DispatchKeyEventType> {
 
 #[allow(clippy::too_many_arguments)]
 async fn do_launch(
-    inner: Arc<Mutex<Option<BrowserSession>>>,
+    inner: Arc<Mutex<Option<Arc<BrowserSession>>>>,
     mode: BrowserMode,
     stealth_enabled: bool,
     no_sandbox: bool,
@@ -468,7 +757,7 @@ async fn do_launch(
 
     let session = builder.launch().await.map_err(to_py_err)?;
     let mut guard = inner.lock().await;
-    *guard = Some(session);
+    *guard = Some(Arc::new(session));
     Ok(())
 }
 
@@ -479,7 +768,7 @@ async fn do_launch(
 /// All navigation and DOM methods are async — await them from Python.
 #[pyclass(name = "Page")]
 pub struct PyPage {
-    inner: Arc<Mutex<Option<Page>>>,
+    inner: Arc<Mutex<Option<Arc<Page>>>>,
 }
 
 impl fmt::Debug for PyPage {
@@ -490,24 +779,12 @@ impl fmt::Debug for PyPage {
 
 impl PyPage {
     fn new(page: Page) -> Self {
-        Self { inner: Arc::new(Mutex::new(Some(page))) }
+        Self { inner: Arc::new(Mutex::new(Some(Arc::new(page)))) }
     }
 }
 
-/// Run an async op on the inner page using take-work-replace pattern.
-///
-/// The Mutex is held only for microseconds (take/replace), NOT during
-/// the async CDP operation itself. This eliminates lock contention.
-///
-/// The page is always restored after the operation completes — even on
-/// error — so a failed CDP call never permanently empties the slot.
-///
-/// **Cancellation safety**: If the Python future is cancelled (e.g. by
-/// `asyncio.wait_for` timeout) between the `take()` and `replace()`,
-/// the page is permanently lost.  This is inherent to the
-/// `future_into_py` model — there is no async `Drop` — and is
-/// acceptable because a cancelled CDP operation leaves the page in an
-/// indeterminate state anyway.
+/// Run an async operation using a cloned page handle. The state mutex is
+/// never held across a CDP await, and cancellation cannot remove the page.
 macro_rules! with_page {
     ($self:expr, $py:expr, |$page:ident| $body:expr) => {{
         let inner = Arc::clone(&$self.inner);
@@ -515,20 +792,16 @@ macro_rules! with_page {
             let page = inner
                 .lock()
                 .await
-                .take()
+                .as_ref()
+                .cloned()
                 .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
-            let result = {
-                let $page = &page;
-                $body.await.map_err(to_py_err)
-            };
-            inner.lock().await.replace(page);
-            result
+            let $page = page.as_ref();
+            $body.await.map_err(to_py_err)
         })
     }};
 }
 
-/// Variant of `with_page!` that allows a custom transformation on the
-/// result before returning.  The page is always restored.
+/// Variant of `with_page!` that transforms the successful result.
 macro_rules! with_page_map {
     ($self:expr, $py:expr, |$page:ident| $body:expr, |$res:ident| $map:expr) => {{
         let inner = Arc::clone(&$self.inner);
@@ -536,14 +809,11 @@ macro_rules! with_page_map {
             let page = inner
                 .lock()
                 .await
-                .take()
+                .as_ref()
+                .cloned()
                 .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
-            let result = {
-                let $page = &page;
-                $body.await.map_err(to_py_err)
-            };
-            inner.lock().await.replace(page);
-            let $res = result?;
+            let $page = page.as_ref();
+            let $res = $body.await.map_err(to_py_err)?;
             Ok($map)
         })
     }};
@@ -556,6 +826,54 @@ impl PyPage {
         with_page!(self, py, |page| page.navigate(&url))
     }
 
+    /// Install JavaScript before each subsequent document executes.
+    fn add_init_script<'py>(&self, py: Python<'py>, script: String) -> PyResult<Bound<'py, PyAny>> {
+        with_page!(self, py, |page| page.add_init_script(&script))
+    }
+
+    /// Arm one passive response expectation before a triggering action.
+    #[pyo3(signature = (pattern, timeout=30.0, max_response_bytes=DEFAULT_MAX_RESPONSE_BYTES, max_total_bytes=DEFAULT_MAX_TOTAL_RESPONSE_BYTES))]
+    fn expect_response(
+        &self,
+        pattern: String,
+        timeout: f64,
+        max_response_bytes: usize,
+        max_total_bytes: usize,
+    ) -> PyResult<PyResponseExpectation> {
+        validate_response_options(timeout, max_response_bytes, max_total_bytes)?;
+        Ok(PyResponseExpectation::new(
+            Arc::clone(&self.inner),
+            vec![("response".into(), pattern)],
+            timeout,
+            max_response_bytes,
+            max_total_bytes,
+            true,
+        ))
+    }
+
+    /// Arm named passive response expectations before a triggering action.
+    #[pyo3(signature = (patterns, timeout=30.0, max_response_bytes=DEFAULT_MAX_RESPONSE_BYTES, max_total_bytes=DEFAULT_MAX_TOTAL_RESPONSE_BYTES))]
+    fn expect_responses(
+        &self,
+        patterns: HashMap<String, String>,
+        timeout: f64,
+        max_response_bytes: usize,
+        max_total_bytes: usize,
+    ) -> PyResult<PyResponseExpectation> {
+        validate_response_options(timeout, max_response_bytes, max_total_bytes)?;
+        if patterns.is_empty() {
+            return Err(PyValueError::new_err("patterns must not be empty"));
+        }
+        Ok(PyResponseExpectation::new(
+            Arc::clone(&self.inner),
+            patterns.into_iter().collect(),
+            timeout,
+            max_response_bytes,
+            max_total_bytes,
+            false,
+        ))
+    }
+
     /// Navigate and wait for network idle, returning a :class:`PageResponse`.
     ///
     /// Faster than calling `navigate()` then `wait_for_network_idle()`
@@ -565,14 +883,18 @@ impl PyPage {
     /// Returns:
     ///     `PageResponse`: HTML, final URL, HTTP status code, and redirect
     /// flag.
-    #[pyo3(signature = (url, timeout=30.0, capture_endpoints=false))]
+    #[pyo3(signature = (url, timeout=30.0, capture_endpoints=false, *, wait_until="networkidle"))]
     fn goto<'py>(
         &self,
         py: Python<'py>,
         url: String,
         timeout: f64,
         capture_endpoints: bool,
+        wait_until: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if wait_until != "networkidle" {
+            return Err(PyValueError::new_err("wait_until currently supports only 'networkidle'"));
+        }
         with_page_map!(
             self,
             py,
@@ -615,11 +937,10 @@ impl PyPage {
             let page = inner
                 .lock()
                 .await
-                .take()
+                .as_ref()
+                .cloned()
                 .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
-            let id = page.target_id();
-            inner.lock().await.replace(page);
-            Ok(id)
+            Ok(page.target_id())
         })
     }
 
@@ -712,7 +1033,8 @@ impl PyPage {
             let page = inner
                 .lock()
                 .await
-                .take()
+                .as_ref()
+                .cloned()
                 .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
             let mut opts = void_crawl_core::ScreenshotOptions::default();
             if let Some(p) = path {
@@ -721,9 +1043,8 @@ impl PyPage {
             if let Some((x, y, w, h)) = bbox {
                 opts = opts.with_bbox(void_crawl_core::Bbox { x, y, width: w, height: h });
             }
-            let result = page.screenshot(opts).await.map_err(to_py_err);
-            inner.lock().await.replace(page);
-            Ok(PyScreenshotOutput(result?))
+            let result = page.screenshot(opts).await.map_err(to_py_err)?;
+            Ok(PyScreenshotOutput(result))
         })
     }
 
@@ -736,11 +1057,11 @@ impl PyPage {
             let page = inner
                 .lock()
                 .await
-                .take()
+                .as_ref()
+                .cloned()
                 .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
-            let result = void_crawl_core::detect_captcha(&page).await.map_err(to_py_err);
-            inner.lock().await.replace(page);
-            Ok(result?.map(|k| k.as_str().to_string()))
+            let result = void_crawl_core::detect_captcha(&page).await.map_err(to_py_err)?;
+            Ok(result.map(|k| k.as_str().to_string()))
         })
     }
 
@@ -777,15 +1098,15 @@ impl PyPage {
             let page = inner
                 .lock()
                 .await
-                .take()
+                .as_ref()
+                .cloned()
                 .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
             let max = max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
             let result = page
                 .download_to_dir(&url, Path::new(&dir), Duration::from_secs_f64(timeout), max)
                 .await
-                .map_err(to_py_err);
-            inner.lock().await.replace(page);
-            Ok(PyDownloadOutcome::from(result?))
+                .map_err(to_py_err)?;
+            Ok(PyDownloadOutcome::from(result))
         })
     }
 
@@ -808,12 +1129,12 @@ impl PyPage {
             let page = inner
                 .lock()
                 .await
-                .take()
+                .as_ref()
+                .cloned()
                 .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
             let max = max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
-            let result = page.arm_download(Path::new(&dir), max).await.map_err(to_py_err);
-            inner.lock().await.replace(page);
-            Ok(PyDownloadCapture::new(result?))
+            let result = page.arm_download(Path::new(&dir), max).await.map_err(to_py_err)?;
+            Ok(PyDownloadCapture::new(result))
         })
     }
 
@@ -833,11 +1154,12 @@ impl PyPage {
             let page = inner
                 .lock()
                 .await
-                .take()
+                .as_ref()
+                .cloned()
                 .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
-            let result = cap.wait(&page, Duration::from_secs_f64(timeout)).await.map_err(to_py_err);
-            inner.lock().await.replace(page);
-            Ok(PyDownloadOutcome::from(result?))
+            let result =
+                cap.wait(&page, Duration::from_secs_f64(timeout)).await.map_err(to_py_err)?;
+            Ok(PyDownloadOutcome::from(result))
         })
     }
 
@@ -849,10 +1171,10 @@ impl PyPage {
             let page = inner
                 .lock()
                 .await
-                .take()
+                .as_ref()
+                .cloned()
                 .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
             page.reset_download_behavior().await;
-            inner.lock().await.replace(page);
             Ok(())
         })
     }
@@ -1231,7 +1553,7 @@ impl PyPage {
 ///         html = await page.content()
 #[pyclass(name = "BrowserSession")]
 pub struct PyBrowserSession {
-    inner:             Arc<Mutex<Option<BrowserSession>>>,
+    inner:             Arc<Mutex<Option<Arc<BrowserSession>>>>,
     mode:              BrowserMode,
     stealth_enabled:   bool,
     no_sandbox:        bool,
@@ -1335,17 +1657,21 @@ impl PyBrowserSession {
     /// permanently lost — subsequent calls will raise "browser not launched".
     /// This matches the `with_page!` contract: a cancelled CDP operation
     /// leaves the browser in an indeterminate state.
-    fn new_page<'py>(&self, py: Python<'py>, url: String) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (url=None))]
+    fn new_page<'py>(&self, py: Python<'py>, url: Option<String>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
         future_into_py(py, async move {
-            let session = inner.lock().await.take().ok_or_else(|| {
+            let session = inner.lock().await.as_ref().cloned().ok_or_else(|| {
                 PyRuntimeError::new_err(
                     "browser not launched — use `async with` or call launch() first",
                 )
             })?;
-            let page_result = session.new_page(&url).await.map_err(to_py_err);
-            inner.lock().await.replace(session);
-            Ok(PyPage::new(page_result?))
+            let page = match url {
+                Some(url) => session.new_page(&url).await,
+                None => session.new_blank_page().await,
+            }
+            .map_err(to_py_err)?;
+            Ok(PyPage::new(page))
         })
     }
 
@@ -1359,14 +1685,13 @@ impl PyBrowserSession {
     fn attach_page<'py>(&self, py: Python<'py>, target_id: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
         future_into_py(py, async move {
-            let session = inner.lock().await.take().ok_or_else(|| {
+            let session = inner.lock().await.as_ref().cloned().ok_or_else(|| {
                 PyRuntimeError::new_err(
                     "browser not launched — use `async with` or call launch() first",
                 )
             })?;
-            let page_result = session.attach_page(&target_id).await.map_err(to_py_err);
-            inner.lock().await.replace(session);
-            Ok(PyPage::new(page_result?))
+            let page = session.attach_page(&target_id).await.map_err(to_py_err)?;
+            Ok(PyPage::new(page))
         })
     }
 
@@ -1380,11 +1705,10 @@ impl PyBrowserSession {
             let session = inner
                 .lock()
                 .await
-                .take()
+                .as_ref()
+                .cloned()
                 .ok_or_else(|| PyRuntimeError::new_err("browser not launched"))?;
-            let url = session.websocket_url().await;
-            inner.lock().await.replace(session);
-            Ok(url)
+            Ok(session.websocket_url().await)
         })
     }
 
@@ -1395,11 +1719,10 @@ impl PyBrowserSession {
             let session = inner
                 .lock()
                 .await
-                .take()
+                .as_ref()
+                .cloned()
                 .ok_or_else(|| PyRuntimeError::new_err("browser not launched"))?;
-            let result = session.version().await.map_err(to_py_err);
-            inner.lock().await.replace(session);
-            result
+            session.version().await.map_err(to_py_err)
         })
     }
 
@@ -2573,6 +2896,263 @@ fn py_profile_registry_clone(
     to_json_string(&result)
 }
 
+#[pyclass(name = "ManagedProfileSnapshot")]
+#[derive(Debug)]
+pub struct PyManagedProfileSnapshot {
+    inner: StdMutex<Option<ManagedProfileSnapshot>>,
+}
+
+#[pymethods]
+impl PyManagedProfileSnapshot {
+    #[getter]
+    fn path(&self) -> PyResult<String> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("profile snapshot lock poisoned"))?;
+        let snapshot =
+            guard.as_ref().ok_or_else(|| PyRuntimeError::new_err("profile snapshot is closed"))?;
+        Ok(snapshot.path().display().to_string())
+    }
+
+    fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let snapshot = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("profile snapshot lock poisoned"))?
+            .take();
+        future_into_py(py, async move {
+            drop(snapshot);
+            Ok(())
+        })
+    }
+
+    fn __aenter__<'py>(slf: Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let slf_ref = slf.into_any().unbind();
+        future_into_py(py, async move { Ok(slf_ref) })
+    }
+
+    #[pyo3(signature = (_exc_type=None, _exc_val=None, _exc_tb=None))]
+    fn __aexit__<'py>(
+        &self,
+        py: Python<'py>,
+        _exc_type: Option<Bound<'py, PyAny>>,
+        _exc_val: Option<Bound<'py, PyAny>>,
+        _exc_tb: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.close(py)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ProfileSplitSource {
+    Managed,
+    Native,
+}
+
+#[derive(Debug)]
+enum ProfileSplitState {
+    Ready,
+    Preparing,
+    Active(Vec<ManagedProfileSnapshot>),
+    Closed,
+}
+
+struct ProfileSplitPreparation {
+    state: Arc<StdMutex<ProfileSplitState>>,
+    armed: bool,
+}
+
+impl Drop for ProfileSplitPreparation {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Ok(mut state) = self.state.lock() {
+                if matches!(*state, ProfileSplitState::Preparing) {
+                    *state = ProfileSplitState::Ready;
+                }
+            }
+        }
+    }
+}
+
+/// A cleanup scope containing isolated copies of one managed profile.
+///
+/// Copying begins in ``__aenter__`` on a blocking worker, not on Python's
+/// asyncio thread. All copies are made while one authoritative source lease is
+/// held, so they share a consistent starting point. Their paths are distinct
+/// Chrome ``user_data_dir`` roots: writes diverge after the browsers launch.
+#[pyclass(name = "ManagedProfileSplit")]
+#[derive(Debug)]
+pub struct PyManagedProfileSplit {
+    source_id: String,
+    root:      Option<String>,
+    copies:    usize,
+    source:    ProfileSplitSource,
+    state:     Arc<StdMutex<ProfileSplitState>>,
+}
+
+#[pymethods]
+impl PyManagedProfileSplit {
+    #[getter]
+    fn source_id(&self) -> &str {
+        &self.source_id
+    }
+
+    #[getter]
+    fn paths(&self) -> PyResult<Vec<String>> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("profile split lock poisoned"))?;
+        let ProfileSplitState::Active(snapshots) = &*state else {
+            return Err(PyRuntimeError::new_err(
+                "profile split paths are available only inside its async context",
+            ));
+        };
+        Ok(snapshots.iter().map(|snapshot| snapshot.path().display().to_string()).collect())
+    }
+
+    fn __len__(&self) -> usize {
+        self.copies
+    }
+
+    fn __aenter__<'py>(slf: Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let (source_id, root, copies, source, state) = {
+            let this = slf.borrow();
+            let mut current = this
+                .state
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("profile split lock poisoned"))?;
+            if !matches!(*current, ProfileSplitState::Ready) {
+                return Err(PyRuntimeError::new_err(
+                    "profile split context cannot be entered more than once",
+                ));
+            }
+            *current = ProfileSplitState::Preparing;
+            (
+                this.source_id.clone(),
+                this.root.clone(),
+                this.copies,
+                this.source,
+                Arc::clone(&this.state),
+            )
+        };
+        let slf_ref = slf.into_any().unbind();
+        future_into_py(py, async move {
+            let mut preparation =
+                ProfileSplitPreparation { state: Arc::clone(&state), armed: true };
+            let snapshots = spawn_blocking(move || match source {
+                ProfileSplitSource::Managed => {
+                    registry_from_root(root).split_profile(&source_id, copies)
+                }
+                ProfileSplitSource::Native => {
+                    registry_from_root(root).fork_profile(&source_id, copies)
+                }
+            })
+            .await
+            .map_err(|error| {
+                PyRuntimeError::new_err(format!("profile split worker failed: {error}"))
+            })?
+            .map_err(to_py_err)?;
+
+            let mut current =
+                state.lock().map_err(|_| PyRuntimeError::new_err("profile split lock poisoned"))?;
+            if !matches!(*current, ProfileSplitState::Preparing) {
+                return Err(PyRuntimeError::new_err(
+                    "profile split was closed while copies were being prepared",
+                ));
+            }
+            *current = ProfileSplitState::Active(snapshots);
+            preparation.armed = false;
+            drop(current);
+            Ok(slf_ref)
+        })
+    }
+
+    fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let snapshots = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("profile split lock poisoned"))?;
+            match mem::replace(&mut *state, ProfileSplitState::Closed) {
+                ProfileSplitState::Active(snapshots) => snapshots,
+                ProfileSplitState::Ready | ProfileSplitState::Closed => Vec::new(),
+                ProfileSplitState::Preparing => {
+                    return Err(PyRuntimeError::new_err("profile split is still being prepared"));
+                }
+            }
+        };
+        future_into_py(py, async move {
+            spawn_blocking(move || drop(snapshots)).await.map_err(|error| {
+                PyRuntimeError::new_err(format!("profile split cleanup failed: {error}"))
+            })?;
+            Ok(())
+        })
+    }
+
+    #[pyo3(signature = (_exc_type=None, _exc_val=None, _exc_tb=None))]
+    fn __aexit__<'py>(
+        &self,
+        py: Python<'py>,
+        _exc_type: Option<Bound<'py, PyAny>>,
+        _exc_val: Option<Bound<'py, PyAny>>,
+        _exc_tb: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.close(py)
+    }
+}
+
+fn profile_split_context(
+    source_id: String,
+    copies: usize,
+    root: Option<String>,
+    source: ProfileSplitSource,
+) -> PyResult<PyManagedProfileSplit> {
+    if !(2..=MAX_PROFILE_SPLIT_COPIES).contains(&copies) {
+        return Err(PyValueError::new_err(format!(
+            "copies must be between 2 and {MAX_PROFILE_SPLIT_COPIES}"
+        )));
+    }
+    Ok(PyManagedProfileSplit {
+        source_id,
+        root,
+        copies,
+        source,
+        state: Arc::new(StdMutex::new(ProfileSplitState::Ready)),
+    })
+}
+
+#[pyfunction]
+#[pyo3(signature = (id, copies=2, root=None))]
+fn py_profile_registry_split(
+    id: String,
+    copies: usize,
+    root: Option<String>,
+) -> PyResult<PyManagedProfileSplit> {
+    profile_split_context(id, copies, root, ProfileSplitSource::Managed)
+}
+
+#[pyfunction]
+#[pyo3(signature = (source="Default".to_string(), copies=2, root=None))]
+fn py_profile_registry_fork(
+    source: String,
+    copies: usize,
+    root: Option<String>,
+) -> PyResult<PyManagedProfileSplit> {
+    profile_split_context(source, copies, root, ProfileSplitSource::Native)
+}
+
+#[pyfunction]
+#[pyo3(signature = (id, root=None))]
+fn py_profile_registry_snapshot(
+    id: &str,
+    root: Option<String>,
+) -> PyResult<PyManagedProfileSnapshot> {
+    let snapshot = registry_from_root(root).snapshot_profile(id).map_err(to_py_err)?;
+    Ok(PyManagedProfileSnapshot { inner: StdMutex::new(Some(snapshot)) })
+}
+
 #[pyfunction]
 #[pyo3(signature = (id, root=None))]
 fn py_profile_registry_delete(id: &str, root: Option<String>) -> PyResult<bool> {
@@ -2728,11 +3308,15 @@ fn _ext(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPoolContext>()?;
     m.add_class::<PyPoolParamsContext>()?;
     m.add_class::<PyPageResponse>()?;
+    m.add_class::<PyCapturedResponse>()?;
+    m.add_class::<PyResponseExpectation>()?;
     m.add_class::<PyAntibotVerdict>()?;
     m.add_class::<PyDownloadOutcome>()?;
     m.add_class::<PyDownloadCapture>()?;
     m.add_class::<PyScanReport>()?;
     m.add_class::<PyProfileHandle>()?;
+    m.add_class::<PyManagedProfileSnapshot>()?;
+    m.add_class::<PyManagedProfileSplit>()?;
     m.add_function(wrap_pyfunction!(py_list_profiles, m)?)?;
     m.add_function(wrap_pyfunction!(py_acquire_profile, m)?)?;
     m.add_function(wrap_pyfunction!(py_profile_registry_root, m)?)?;
@@ -2740,6 +3324,9 @@ fn _ext(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_profile_registry_create, m)?)?;
     m.add_function(wrap_pyfunction!(py_profile_registry_describe, m)?)?;
     m.add_function(wrap_pyfunction!(py_profile_registry_clone, m)?)?;
+    m.add_function(wrap_pyfunction!(py_profile_registry_snapshot, m)?)?;
+    m.add_function(wrap_pyfunction!(py_profile_registry_split, m)?)?;
+    m.add_function(wrap_pyfunction!(py_profile_registry_fork, m)?)?;
     m.add_function(wrap_pyfunction!(py_profile_registry_delete, m)?)?;
     m.add_function(wrap_pyfunction!(py_profile_pool_list, m)?)?;
     m.add_function(wrap_pyfunction!(py_profile_pool_create, m)?)?;
@@ -2748,7 +3335,12 @@ fn _ext(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_scan_bytes, m)?)?;
     let py = m.py();
     m.add("VoidCrawlError", py.get_type::<VoidCrawlError>())?;
+    m.add("NavigationError", py.get_type::<NavigationError>())?;
+    m.add("NavigationTimeoutError", py.get_type::<NavigationTimeoutError>())?;
+    m.add("BrowserClosedError", py.get_type::<BrowserClosedError>())?;
+    m.add("ResponseTimeoutError", py.get_type::<ResponseTimeoutError>())?;
     m.add("ProfileBusy", py.get_type::<ProfileBusy>())?;
+    m.add("ChromeProfileBusy", py.get_type::<ChromeProfileBusy>())?;
     m.add("ProfileLeaseExpired", py.get_type::<ProfileLeaseExpired>())?;
     m.add("ProfileNotFound", py.get_type::<ProfileNotFound>())?;
     m.add("CaptchaDetected", py.get_type::<CaptchaDetected>())?;

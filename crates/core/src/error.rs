@@ -15,6 +15,14 @@ pub enum VoidCrawlError {
     #[error("navigation failed: {0}")]
     NavigationFailed(String),
 
+    #[error("navigation to {url:?} timed out waiting for {wait_phase} after {timeout_secs:.3}s")]
+    NavigationTimeout {
+        url:          String,
+        wait_phase:   String,
+        timeout_secs: f64,
+        elapsed_secs: f64,
+    },
+
     #[error("page error: {0}")]
     PageError(String),
 
@@ -39,17 +47,29 @@ pub enum VoidCrawlError {
     #[error("timeout: {0}")]
     Timeout(String),
 
+    #[error("timed out after {timeout_secs:.3}s waiting for responses matching {patterns:?}")]
+    ResponseTimeout { patterns: Vec<String>, timeout_secs: f64 },
+
+    #[error("response body error: {0}")]
+    ResponseBody(String),
+
     #[error("browser closed")]
     BrowserClosed,
 
     #[error("chromium fetch failed: {0}")]
     FetchChromiumError(String),
 
-    #[error("profile {name:?} is already leased by another process")]
-    ProfileBusy { name: String },
+    #[error(
+        "profile {name:?} is already leased by another process{owner}",
+        owner = owner_suffix(*pid, *acquired_at)
+    )]
+    ProfileBusy { name: String, pid: Option<u32>, acquired_at: Option<u64> },
 
     #[error("profile lease for {name:?} expired after {timeout_secs}s")]
     ProfileLeaseExpired { name: String, timeout_secs: u64 },
+
+    #[error("Chrome refused profile {name:?} because its own lock exists at {lock_path}")]
+    ChromeProfileBusy { name: String, lock_path: String },
 
     #[error("profile {name:?} not found (looked in {searched:?})")]
     ProfileNotFound { name: String, searched: Vec<String> },
@@ -72,6 +92,14 @@ pub enum VoidCrawlError {
 }
 
 use core::result;
+
+fn owner_suffix(pid: Option<u32>, acquired_at: Option<u64>) -> String {
+    match (pid, acquired_at) {
+        (Some(pid), Some(at)) => format!(" (pid {pid}, acquired at unix {at})"),
+        (Some(pid), None) => format!(" (pid {pid})"),
+        _ => String::new(),
+    }
+}
 
 /// Convenience alias.
 pub type Result<T> = result::Result<T, VoidCrawlError>;
