@@ -1,3 +1,15 @@
+## 0.4.0 (2026-07-20)
+
+### Feat
+
+- add cancellation-safe first-class page lifecycle APIs with blank and concurrent page creation, init scripts, readiness phases, and typed navigation failures.
+- add opt-in passive CDP response capture with named URL patterns, bounded body retention, redirects, explicit body states, and deterministic listener cleanup.
+- add managed profile snapshots and splitting plus safe native Chrome profile forks into independent user-data directories.
+
+### Fix
+
+- preserve browser and page handles across concurrent or cancelled Python operations and report profile lease ownership diagnostics.
+
 ## 0.3.7 (2026-06-21)
 
 ### Fix
