@@ -4,7 +4,7 @@ requires = [ "maturin>=1.7,<2" ]
 
 [project]
 name = "voidcrawl"
-version = "0.4.0"
+version = "0.4.1"
 description = "Rust-native CDP browser automation for Python via PyO3"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -17,6 +17,7 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: Free Threading :: 2 - Beta",
 ]
 dependencies = [
   "click>=8.3.2",
@@ -36,7 +37,7 @@ debug = [
 # in the prebuilt Rust binary; there's no runtime dependency between
 # the two packages — the extra just co-installs them at matching versions.
 mcp = [
-  "voidcrawl-mcp==0.4.0",
+  "voidcrawl-mcp==0.4.1",
 ]
 
 # ── uv workspace ──────────────────────────────────────────────────────────

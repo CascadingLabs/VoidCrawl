@@ -1,3 +1,9 @@
+## 0.4.1 (2026-07-20)
+
+### Feat
+
+- add dedicated CPython 3.14t free-threaded test jobs and publish `cp314t` wheels for supported Linux, macOS, and Windows targets.
+
 ## 0.4.0 (2026-07-20)
 
 ### Feat
