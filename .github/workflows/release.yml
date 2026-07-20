@@ -58,7 +58,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.14t"]
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -74,8 +74,17 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
 
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
       - name: Install dependencies and build extension
         run: uv sync --python ${{ matrix.python-version }} --group dev
+
+      - name: Verify free-threaded runtime
+        if: matrix.python-version == '3.14t'
+        run: uv run python -c "import sysconfig; assert sysconfig.get_config_var('Py_GIL_DISABLED') == 1"
 
       - name: Ruff lint
         run: uv run ruff check --no-fix --exit-non-zero-on-fix
@@ -123,16 +132,19 @@ jobs:
           - runner: windows-latest
             target: x86_64-pc-windows-msvc
             manylinux: ""
+            python-arch: x64
 
           # Windows x86
           - runner: windows-latest
             target: i686-pc-windows-msvc
             manylinux: ""
+            python-arch: x86
 
           # Windows ARM64
           - runner: windows-11-arm
             target: aarch64-pc-windows-msvc
             manylinux: ""
+            python-arch: arm64
 
           # Linux i686 (cross-compile)
           - runner: ubuntu-latest
@@ -200,6 +212,37 @@ jobs:
             --interpreter python3.10 python3.11 python3.12 python3.13 python3.14
           sccache: "true"
           docker-options: ${{ matrix.docker-options }}
+
+      - name: Set up free-threaded Python on Windows
+        if: contains(matrix.target, 'windows')
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.14t"
+          architecture: ${{ matrix.python-arch }}
+
+      - name: Set up free-threaded Python on macOS
+        if: contains(matrix.target, 'apple-darwin')
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.14t"
+
+      - name: Build free-threaded wheels
+        if: ${{ !contains(matrix.target, 'riscv64') }}
+        uses: PyO3/maturin-action@04ac600d27cdf7a9a280dadf7147097c42b757ad # v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: >-
+            --release
+            --manifest-path crates/pyo3_bindings/Cargo.toml
+            --out dist
+            --interpreter python3.14t
+          sccache: "true"
+          docker-options: ${{ matrix.docker-options }}
+
+      - name: Verify free-threaded wheel tag
+        if: ${{ !contains(matrix.target, 'riscv64') }}
+        run: python -c "from pathlib import Path; assert list(Path('dist').glob('*cp314t*.whl'))"
 
       - name: Upload wheels
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
