@@ -320,6 +320,9 @@ jobs:
           command: sdist
           args: --manifest-path crates/pyo3_bindings/Cargo.toml --out dist
 
+      - name: Verify vendored Chromiumoxide is packaged
+        run: tar -tzf dist/*.tar.gz | grep -q '/vendor/chromiumoxide/Cargo.toml$'
+
       - name: Upload sdist
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
         with:

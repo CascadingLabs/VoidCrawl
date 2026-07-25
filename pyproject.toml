@@ -4,7 +4,7 @@ requires = [ "maturin>=1.7,<2" ]
 
 [project]
 name = "voidcrawl"
-version = "0.4.1"
+version = "0.4.2"
 description = "Rust-native CDP browser automation for Python via PyO3"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -36,7 +36,7 @@ debug = [
 # in the prebuilt Rust binary; there's no runtime dependency between
 # the two packages — the extra just co-installs them at matching versions.
 mcp = [
-  "voidcrawl-mcp==0.4.1",
+  "voidcrawl-mcp==0.4.2",
 ]
 
 # ── uv workspace ──────────────────────────────────────────────────────────
@@ -73,7 +73,10 @@ features = [ "pyo3/extension-module" ]
 manifest-path = "crates/pyo3_bindings/Cargo.toml"
 module-name = "voidcrawl._ext"
 python-packages = [ "voidcrawl" ]
-include = [{ path = "LICENSE.md", format = "sdist" }]
+include = [
+  { path = "LICENSE.md", format = "sdist" },
+  { path = "vendor/chromiumoxide/**/*", format = "sdist" },
+]
 
 # ── Commitizen ────────────────────────────────────────────────────────────
 
