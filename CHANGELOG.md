@@ -1,3 +1,14 @@
+## 0.4.2 (2026-07-25)
+
+### Fix
+
+- include the vendored Chromiumoxide fork in source distributions and verify that an sdist can build a wheel before release.
+- make interrupted PyPI uploads resumable through the trusted-publisher release workflow.
+
+### CI
+
+- keep supported release and test matrices on CPython 3.10–3.14; move free-threaded Python 3.14t to a manual, artifact-only canary.
+
 ## 0.4.1 (2026-07-20)
 
 ### Feat

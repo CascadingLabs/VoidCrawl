@@ -1,12 +1,12 @@
 ---
 title: API Reference
-description: Full API reference for voidcrawl v0.4.1
-version: v0.4.1
+description: Full API reference for voidcrawl v0.4.2
+version: v0.4.2
 ---
 
 # API Reference
 
-> Generated from voidcrawl `v0.4.1`. Only symbols in `__all__` are listed.
+> Generated from voidcrawl `v0.4.2`. Only symbols in `__all__` are listed.
 
 # Configuration
 

@@ -65,6 +65,15 @@ jobs:
       - name: Build wheel (smoke test)
         run: maturin build --release --manifest-path crates/pyo3_bindings/Cargo.toml
 
+      - name: Build source distribution
+        run: maturin sdist --manifest-path crates/pyo3_bindings/Cargo.toml --out dist
+
+      - name: Verify vendored Chromiumoxide is packaged
+        run: tar -tzf dist/*.tar.gz | grep -q '/vendor/chromiumoxide/Cargo.toml$'
+
+      - name: Build wheel from source distribution
+        run: python -m pip wheel --no-deps dist/*.tar.gz --wheel-dir /tmp/voidcrawl-sdist-wheel
+
   python-lint:
     name: Python Lint
     runs-on: ubuntu-latest
