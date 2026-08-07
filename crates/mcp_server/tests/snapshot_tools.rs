@@ -6,7 +6,7 @@
 //!
 //!     cargo test -p voidcrawl-mcp --test snapshot_tools -- --test-threads=1
 
-use std::{fmt::Write as _, sync::Arc};
+use std::{collections::HashMap, fmt::Write as _, sync::Arc};
 
 use tokio::sync::Mutex;
 use void_crawl_core::{BrowserPool, BrowserSession, PoolConfig};
@@ -75,12 +75,14 @@ async fn server_with_page(html: &str) -> VoidCrawlServer {
         BrowserSession::builder().headless().no_sandbox().launch().await.expect("launch chromium");
     let page = session.new_page(&data_url(html)).await.expect("navigate fixture");
     let handle = Arc::new(DedicatedSession {
-        session:          Arc::new(session),
-        page:             Mutex::new(page),
-        profile_lease:    None,
-        last_navigation:  Mutex::new(None),
-        challenge:        Mutex::new(None),
-        pending_download: Mutex::new(None),
+        session:                 Arc::new(session),
+        page:                    Mutex::new(page),
+        profile_lease:           None,
+        last_navigation:         Mutex::new(None),
+        challenge:               Mutex::new(None),
+        pending_download:        Mutex::new(None),
+        pending_network_capture: Mutex::new(None),
+        cookie_leases:           Mutex::new(HashMap::new()),
     });
     let sessions = Arc::new(SessionRegistry::default());
     sessions.insert(SID.to_string(), handle).await;

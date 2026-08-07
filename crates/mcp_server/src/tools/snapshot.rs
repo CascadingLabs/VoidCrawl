@@ -368,7 +368,6 @@ fn chars_forms(v: &[FormSnapshot]) -> usize {
     v.iter().map(form_chars).sum()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

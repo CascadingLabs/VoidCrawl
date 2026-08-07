@@ -6,6 +6,7 @@ pub mod antibot;
 pub mod ax;
 pub mod captcha;
 pub mod challenge;
+pub mod cookie_jar;
 pub mod error;
 pub mod input;
 pub mod interrupt;
@@ -34,6 +35,7 @@ pub use chromiumoxide::cdp::browser_protocol::{
     input::{DispatchKeyEventType, DispatchMouseEventType, MouseButton},
     network::{Cookie, CookieParam, DeleteCookiesParams},
 };
+pub use cookie_jar::{CookieLease, CookieProvenance, LeaseScope, fork_scoped};
 pub use error::{Result, VoidCrawlError};
 pub use interrupt::{InterruptInfo, InterruptRegistry, InterruptRequest, InterruptState};
 pub use managed_profile::{

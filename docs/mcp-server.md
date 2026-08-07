@@ -119,7 +119,12 @@ All take `session_id` plus tool-specific args.
 | `extract` | `querySelectorAll(selector).map(textContent)`. |
 | `session_ax_tree` | Compact or raw accessibility tree for role/name inspection. |
 | `wait_for_network_idle` | Event-driven wait. |
-| `network_capture` | Resource Timing entries (url, initiator type, transfer size, duration). |
+| `network_capture` | Resource Timing entries (url, initiator type, transfer size, duration). No headers or bodies. |
+| `network_capture_arm` | Arm real CDP `Network.*` capture for named URL globs before the triggering action. Returns request headers, response headers, status, opt-in body. Credential header values are `<redacted>` unless `include_sensitive_headers` **and** `VOIDCRAWL_ALLOW_CREDENTIAL_CAPTURE=1`. |
+| `network_capture_wait` | Wait for the armed patterns and return the captures. `timeout_secs` is measured from this call, not from `arm`. |
+| `cookie_lease_open` | Fork the cookies reachable by one replay origin into a revocable, in-memory lease; returns the lease id plus **value-free** provenance per cookie (incl. `top_level_site`, the CHIPS partition key). Values never cross the wire. Scope-bound; dies with its session. Reports facts, does not classify replay eligibility. |
+| `cookie_lease_revoke` | Revoke a lease, scrubbing held values; fails later use closed with a recorded reason. Idempotent. |
+| `session_cookies` | Every cookie CDP can see, including HttpOnly/Secure, with **raw values**. OPT-IN: needs `VOIDCRAWL_ALLOW_CREDENTIAL_CAPTURE=1`. Prefer `cookie_lease_open` unless a human needs the literal value. |
 | `detect_captcha` | DOM probe → `recaptcha` / `hcaptcha` / `turnstile` / `cloudflare_challenge` / `datadome` / `null`. |
 | `capture_challenge` | Capture an active challenge event with anti-bot evidence, DOM captcha info, same-tab CDP attach coordinates, and VNC/noVNC links. |
 | `mark_challenge_resolved` | Mark a challenge cleared by `manual_vnc` or a future resolver. |

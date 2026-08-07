@@ -10,6 +10,7 @@ pub mod download;
 pub mod fetch;
 pub mod interrupt;
 pub mod introspect;
+pub mod network;
 pub mod profile_registry;
 pub mod screenshot;
 pub mod selector;

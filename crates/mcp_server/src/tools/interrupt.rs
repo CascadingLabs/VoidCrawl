@@ -2,11 +2,10 @@
 
 use std::{sync::Arc, time::Duration};
 
-use tokio::time::sleep;
-
 use rmcp::ErrorData;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tokio::time::sleep;
 use void_crawl_core::{InterruptInfo, InterruptRequest, InterruptState};
 
 use crate::{
@@ -18,11 +17,11 @@ use crate::{
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SessionInterruptArgs {
-    pub session_id: String,
+    pub session_id:  String,
     /// Stable caller-owned policy code, e.g. `policy.operator_review`.
-    pub code: String,
+    pub code:        String,
     /// Redacted operator-facing reason. Never put credentials or cookies here.
-    pub summary: String,
+    pub summary:     String,
     #[serde(default = "default_ttl")]
     pub ttl_seconds: u64,
 }
@@ -33,17 +32,17 @@ fn default_ttl() -> u64 {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct InterruptIdArgs {
-    pub session_id: String,
+    pub session_id:   String,
     pub interrupt_id: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct InterruptResult {
-    pub interrupt_id: String,
-    pub target_id: String,
-    pub code: String,
-    pub summary: String,
-    pub state: String,
+    pub interrupt_id:  String,
+    pub target_id:     String,
+    pub code:          String,
+    pub summary:       String,
+    pub state:         String,
     pub expires_in_ms: u64,
 }
 

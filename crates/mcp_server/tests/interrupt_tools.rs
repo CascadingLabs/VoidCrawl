@@ -6,9 +6,12 @@
 //!
 //!     cargo test -p voidcrawl-mcp --test interrupt_tools -- --test-threads=1
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use tokio::{sync::Mutex, time::timeout};
+use tokio::{
+    sync::Mutex,
+    time::{sleep, timeout},
+};
 use void_crawl_core::BrowserSession;
 use voidcrawl_mcp::{
     AppState, VoidCrawlServer,
@@ -34,12 +37,14 @@ async fn server_with_page() -> VoidCrawlServer {
         .await
         .expect("navigate fixture");
     let handle = Arc::new(DedicatedSession {
-        session: Arc::new(session),
-        page: Mutex::new(page),
-        profile_lease: None,
-        last_navigation: Mutex::new(None),
-        challenge: Mutex::new(None),
-        pending_download: Mutex::new(None),
+        session:                 Arc::new(session),
+        page:                    Mutex::new(page),
+        profile_lease:           None,
+        last_navigation:         Mutex::new(None),
+        challenge:               Mutex::new(None),
+        pending_download:        Mutex::new(None),
+        pending_network_capture: Mutex::new(None),
+        cookie_leases:           Mutex::new(HashMap::new()),
     });
     let sessions = Arc::new(SessionRegistry::default());
     sessions.insert(SID.to_string(), handle).await;
@@ -56,9 +61,9 @@ async fn interrupted_mcp_session_blocks_mutation_but_allows_inspection_and_resum
     let interrupted = interrupt::begin(
         &server,
         SessionInterruptArgs {
-            session_id: SID.to_string(),
-            code: "policy.operator_review".into(),
-            summary: "fixture review".into(),
+            session_id:  SID.to_string(),
+            code:        "policy.operator_review".into(),
+            summary:     "fixture review".into(),
             ttl_seconds: 30,
         },
     )
@@ -125,9 +130,9 @@ async fn expired_mcp_interrupt_closes_and_removes_its_dedicated_session() {
     interrupt::begin(
         &server,
         SessionInterruptArgs {
-            session_id: SID.to_string(),
-            code: "policy.operator_review".into(),
-            summary: "fixture expiry".into(),
+            session_id:  SID.to_string(),
+            code:        "policy.operator_review".into(),
+            summary:     "fixture expiry".into(),
             ttl_seconds: 1,
         },
     )
@@ -139,7 +144,7 @@ async fn expired_mcp_interrupt_closes_and_removes_its_dedicated_session() {
             if server.state().sessions.get(SID).await.is_none() {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            sleep(Duration::from_millis(10)).await;
         }
     })
     .await

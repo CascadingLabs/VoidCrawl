@@ -8,18 +8,6 @@ from voidcrawl._ext import (
     AntibotChallenge as AntibotChallenge,
 )
 from voidcrawl._ext import (
-    InterruptExpired as InterruptExpired,
-)
-from voidcrawl._ext import (
-    InterruptNotFound as InterruptNotFound,
-)
-from voidcrawl._ext import (
-    InterruptTerminal as InterruptTerminal,
-)
-from voidcrawl._ext import (
-    SessionInterrupted as SessionInterrupted,
-)
-from voidcrawl._ext import (
     AntibotVerdict as AntibotVerdict,
 )
 from voidcrawl._ext import (
@@ -33,6 +21,15 @@ from voidcrawl._ext import (
 )
 from voidcrawl._ext import (
     ChromeProfileBusy as ChromeProfileBusy,
+)
+from voidcrawl._ext import (
+    InterruptExpired as InterruptExpired,
+)
+from voidcrawl._ext import (
+    InterruptNotFound as InterruptNotFound,
+)
+from voidcrawl._ext import (
+    InterruptTerminal as InterruptTerminal,
 )
 from voidcrawl._ext import (
     NavigationError as NavigationError,
@@ -66,6 +63,9 @@ from voidcrawl._ext import (
 )
 from voidcrawl._ext import (
     ResponseTimeoutError as ResponseTimeoutError,
+)
+from voidcrawl._ext import (
+    SessionInterrupted as SessionInterrupted,
 )
 from voidcrawl._ext import (
     VoidCrawlError as VoidCrawlError,
@@ -137,12 +137,12 @@ __all__ = [
     "BrowserSession",
     "CaptchaDetected",
     "CapturedResponse",
+    "ChromeProfileBusy",
     "InterruptExpired",
     "InterruptNotFound",
     "InterruptRef",
     "InterruptRequest",
     "InterruptTerminal",
-    "ChromeProfileBusy",
     "JsTab",
     "ManagedProfileSnapshot",
     "ManagedProfileSplit",
@@ -162,8 +162,8 @@ __all__ = [
     "ScaleProfile",
     "ScaleReport",
     "Schema",
-    "SessionInterrupted",
     "Selector",
+    "SessionInterrupted",
     "Tab",
     "Text",
     "VoidCrawlError",
@@ -267,7 +267,9 @@ class BrowserSession:
     async def new_page(self, url: str | None = None) -> Page: ...
     def page(self, url: str | None = None) -> _PageContext: ...
     async def attach_page(self, target_id: str) -> Page: ...
-    async def interrupt(self, page: Page, request: InterruptRequest) -> InterruptRef: ...
+    async def interrupt(
+        self, page: Page, request: InterruptRequest
+    ) -> InterruptRef: ...
     async def resume(self, interrupt_id: str) -> InterruptRef: ...
     async def release(self, interrupt_id: str) -> InterruptRef: ...
     async def websocket_url(self) -> str: ...

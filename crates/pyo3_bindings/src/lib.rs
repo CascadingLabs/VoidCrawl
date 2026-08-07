@@ -364,15 +364,15 @@ fn json_to_py(py: Python<'_>, val: Value) -> PyResult<Bound<'_, PyAny>> {
 #[derive(Debug, Clone)]
 pub struct PyAntibotVerdict {
     #[pyo3(get)]
-    pub vendors: Vec<String>,
+    pub vendors:          Vec<String>,
     #[pyo3(get)]
-    pub challenged: bool,
+    pub challenged:       bool,
     #[pyo3(get)]
     pub challenge_vendor: Option<String>,
     #[pyo3(get)]
-    pub corpus_version: String,
+    pub corpus_version:   String,
     #[pyo3(get)]
-    pub evidence: String,
+    pub evidence:         String,
 }
 
 #[pymethods]
@@ -393,11 +393,11 @@ impl From<AntibotVerdict> for PyAntibotVerdict {
             AntibotEvidence::Body => "body",
         };
         Self {
-            vendors: v.vendors,
-            challenged: v.challenged,
+            vendors:          v.vendors,
+            challenged:       v.challenged,
             challenge_vendor: v.challenge_vendor,
-            corpus_version: v.corpus_version.to_string(),
-            evidence: evidence.to_string(),
+            corpus_version:   v.corpus_version.to_string(),
+            evidence:         evidence.to_string(),
         }
     }
 }
@@ -511,6 +511,20 @@ impl PyCapturedResponse {
         self.inner.headers.iter().cloned().collect()
     }
 
+    /// Headers the browser SENT for this request, lowercased.
+    ///
+    /// This is where a request-side credential appears — an `Authorization`
+    /// bearer set by page code. Unlike the MCP tools, these values are NOT
+    /// redacted: an in-process caller is the intended holder of them. Do not
+    /// log or persist them.
+    ///
+    /// Empty when Chrome reported none. Browser-managed `Cookie` is not among
+    /// them (see `CapturedResponse::request_headers` in the core crate).
+    #[getter]
+    fn request_headers(&self) -> HashMap<String, String> {
+        self.inner.request_headers.iter().cloned().collect()
+    }
+
     #[getter]
     fn mime_type(&self) -> &str {
         &self.inner.mime_type
@@ -602,13 +616,13 @@ fn captured_body(response: &CapturedResponse) -> PyResult<Vec<u8>> {
 /// Async expectation context returned by ``Page.expect_response(s)``.
 #[pyclass(name = "ResponseExpectation")]
 pub struct PyResponseExpectation {
-    page: Arc<Mutex<Option<Arc<Page>>>>,
+    page:     Arc<Mutex<Option<Arc<Page>>>>,
     patterns: Vec<(String, String)>,
-    timeout: Duration,
-    limits: ResponseCaptureLimits,
-    single: bool,
-    capture: Arc<Mutex<Option<ResponseCapture>>>,
-    result: Arc<Mutex<Option<HashMap<String, CapturedResponse>>>>,
+    timeout:  Duration,
+    limits:   ResponseCaptureLimits,
+    single:   bool,
+    capture:  Arc<Mutex<Option<ResponseCapture>>>,
+    result:   Arc<Mutex<Option<HashMap<String, CapturedResponse>>>>,
 }
 
 impl fmt::Debug for PyResponseExpectation {
@@ -738,9 +752,9 @@ impl PyResponseExpectation {
 #[derive(Debug)]
 pub struct PyDownloadOutcome {
     #[pyo3(get)]
-    pub path: String,
+    pub path:         String,
     #[pyo3(get)]
-    pub bytes: u64,
+    pub bytes:        u64,
     #[pyo3(get)]
     pub content_type: Option<String>,
 }
@@ -757,7 +771,11 @@ impl PyDownloadOutcome {
 
 impl From<DownloadOutcome> for PyDownloadOutcome {
     fn from(o: DownloadOutcome) -> Self {
-        Self { path: o.path.display().to_string(), bytes: o.bytes, content_type: o.content_type }
+        Self {
+            path:         o.path.display().to_string(),
+            bytes:        o.bytes,
+            content_type: o.content_type,
+        }
     }
 }
 
@@ -801,13 +819,13 @@ impl PyDownloadCapture {
 #[derive(Debug)]
 pub struct PyScanReport {
     #[pyo3(get)]
-    pub verdict: String,
+    pub verdict:       String,
     #[pyo3(get)]
-    pub reason: Option<String>,
+    pub reason:        Option<String>,
     #[pyo3(get)]
     pub detected_mime: Option<String>,
     #[pyo3(get)]
-    pub size: u64,
+    pub size:          u64,
 }
 
 #[pymethods]
@@ -1824,15 +1842,15 @@ impl PyPage {
 #[derive(Debug)]
 pub struct PyInterruptInfo {
     #[pyo3(get)]
-    interrupt_id: String,
+    interrupt_id:  String,
     #[pyo3(get)]
-    target_id: String,
+    target_id:     String,
     #[pyo3(get)]
-    code: String,
+    code:          String,
     #[pyo3(get)]
-    summary: String,
+    summary:       String,
     #[pyo3(get)]
-    state: String,
+    state:         String,
     #[pyo3(get)]
     expires_in_ms: u64,
 }
@@ -1866,15 +1884,15 @@ impl From<InterruptInfo> for PyInterruptInfo {
 ///         html = await page.content()
 #[pyclass(name = "BrowserSession")]
 pub struct PyBrowserSession {
-    inner: Arc<Mutex<Option<Arc<BrowserSession>>>>,
-    mode: BrowserMode,
-    stealth_enabled: bool,
-    no_sandbox: bool,
-    proxy: Option<String>,
+    inner:             Arc<Mutex<Option<Arc<BrowserSession>>>>,
+    mode:              BrowserMode,
+    stealth_enabled:   bool,
+    no_sandbox:        bool,
+    proxy:             Option<String>,
     chrome_executable: Option<String>,
-    extra_args: Vec<String>,
-    user_data_dir: Option<String>,
-    port: Option<u16>,
+    extra_args:        Vec<String>,
+    user_data_dir:     Option<String>,
+    port:              Option<u16>,
 }
 
 impl fmt::Debug for PyBrowserSession {
@@ -2212,7 +2230,7 @@ impl PyBrowserSession {
 /// is handled automatically by the context manager.
 #[pyclass(name = "PooledTab")]
 pub struct PyPooledTab {
-    inner: Arc<Mutex<Option<PooledTab>>>,
+    inner:     Arc<Mutex<Option<PooledTab>>>,
     /// Snapshot of `use_count` at the moment the tab was acquired.
     #[pyo3(get)]
     use_count: u32,
@@ -2867,7 +2885,7 @@ impl PyPooledTab {
 ///         html = await tab.content()
 #[pyclass(name = "_AcquireContext")]
 pub struct PyAcquireContext {
-    pool: Arc<BrowserPool>,
+    pool:     Arc<BrowserPool>,
     tab_slot: Arc<Mutex<Option<PooledTab>>>,
 }
 
@@ -3120,21 +3138,21 @@ impl PyBrowserPool {
 #[allow(clippy::struct_excessive_bools)]
 #[pyclass(name = "_PoolParamsContext")]
 pub struct PyPoolParamsContext {
-    browsers: usize,
-    tabs_per_browser: usize,
-    tab_max_uses: u32,
-    tab_max_idle_secs: u64,
+    browsers:             usize,
+    tabs_per_browser:     usize,
+    tab_max_uses:         u32,
+    tab_max_idle_secs:    u64,
     acquire_timeout_secs: u64,
-    auto_evict: bool,
-    headless: bool,
-    no_sandbox: bool,
-    stealth: bool,
-    ws_urls: Vec<String>,
-    proxy: Option<String>,
-    chrome_executable: Option<String>,
-    extra_args: Vec<String>,
-    user_data_dir: Option<String>,
-    pool_slot: Arc<Mutex<Option<Arc<BrowserPool>>>>,
+    auto_evict:           bool,
+    headless:             bool,
+    no_sandbox:           bool,
+    stealth:              bool,
+    ws_urls:              Vec<String>,
+    proxy:                Option<String>,
+    chrome_executable:    Option<String>,
+    extra_args:           Vec<String>,
+    user_data_dir:        Option<String>,
+    pool_slot:            Arc<Mutex<Option<Arc<BrowserPool>>>>,
 }
 
 impl fmt::Debug for PyPoolParamsContext {
@@ -3433,10 +3451,10 @@ impl Drop for ProfileSplitPreparation {
 #[derive(Debug)]
 pub struct PyManagedProfileSplit {
     source_id: String,
-    root: Option<String>,
-    copies: usize,
-    source: ProfileSplitSource,
-    state: Arc<StdMutex<ProfileSplitState>>,
+    root:      Option<String>,
+    copies:    usize,
+    source:    ProfileSplitSource,
+    state:     Arc<StdMutex<ProfileSplitState>>,
 }
 
 #[pymethods]
@@ -3640,7 +3658,7 @@ fn py_profile_pool_describe(name: &str, root: Option<String>) -> PyResult<String
 pub struct PyProfileHandle {
     inner: Arc<Mutex<Option<ProfileHandle>>>,
     #[pyo3(get)]
-    name: String,
+    name:  String,
 }
 
 impl fmt::Debug for PyProfileHandle {

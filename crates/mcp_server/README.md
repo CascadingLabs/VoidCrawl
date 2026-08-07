@@ -26,6 +26,9 @@ concurrent by construction — ten tabs in parallel is the norm.
 | `pool_status`     | diag      | Pool config + live session count.                           |
 | `download`        | stateless | Download a file by URL through stealth Chrome and scan it with the built-in antivirus gate. **Opt-in** (`VOIDCRAWL_ALLOW_DOWNLOADS=1`). |
 | `download_arm` / `download_wait` | stateful | Capture a download started by a page action (button with no stable URL), then scan it. **Opt-in** (`VOIDCRAWL_ALLOW_DOWNLOADS=1`). |
+| `network_capture_arm` / `network_capture_wait` | stateful | Arm real CDP `Network.*` capture for named URL globs before the triggering action; returns request + response headers, status, opt-in body. Credential header values are `<redacted>` unless opted in **and** `VOIDCRAWL_ALLOW_CREDENTIAL_CAPTURE=1`. |
+| `cookie_lease_open` / `cookie_lease_revoke` | stateful | Fork the cookies reachable by one replay origin into a revocable, scope-bound lease; returns **value-free** provenance only (values never cross the wire). Dies with its session. |
+| `session_cookies` | stateful | Raw cookie values incl. HttpOnly/Secure. **Opt-in** (`VOIDCRAWL_ALLOW_CREDENTIAL_CAPTURE=1`). Prefer `cookie_lease_open`. |
 
 This is an abbreviated list; the perceive/act tools (`click`, `click_by_role`,
 `type_text`, `eval_js`, `extract`, `session_ax_tree`, `detect_captcha`, …) are

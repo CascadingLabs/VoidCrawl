@@ -28,8 +28,8 @@ fn captcha_detected_carries_exception_tag_and_kind() {
 #[test]
 fn profile_busy_carries_exception_tag_and_name() {
     let d = data(VoidCrawlError::ProfileBusy {
-        name: "Default".into(),
-        pid: Some(42),
+        name:        "Default".into(),
+        pid:         Some(42),
         acquired_at: Some(123),
     });
     assert_eq!(d["exception"], "ProfileBusy");
@@ -38,8 +38,10 @@ fn profile_busy_carries_exception_tag_and_name() {
 
 #[test]
 fn profile_lease_expired_carries_timeout() {
-    let d =
-        data(VoidCrawlError::ProfileLeaseExpired { name: "Profile 1".into(), timeout_secs: 42 });
+    let d = data(VoidCrawlError::ProfileLeaseExpired {
+        name:         "Profile 1".into(),
+        timeout_secs: 42,
+    });
     assert_eq!(d["exception"], "ProfileLeaseExpired");
     assert_eq!(d["name"], "Profile 1");
     assert_eq!(d["timeout_secs"], 42);
@@ -48,7 +50,7 @@ fn profile_lease_expired_carries_timeout() {
 #[test]
 fn profile_not_found_carries_searched_list() {
     let d = data(VoidCrawlError::ProfileNotFound {
-        name: "Missing".into(),
+        name:     "Missing".into(),
         searched: vec!["/one".into(), "/two".into()],
     });
     assert_eq!(d["exception"], "ProfileNotFound");

@@ -82,7 +82,10 @@ get stealth, `fetch_many` concurrency, and isolated profiles for free.
 | Pull element text | `extract` | `querySelectorAll` → text content per match. |
 | Title only | `title` | Lightweight, no navigation. |
 | Wait for idle | `wait_for_network_idle` | Event-driven; no sleeps. |
-| What loaded | `network_capture` | Resource Timing entries (url, initiator, size, duration). |
+| What loaded | `network_capture` | Resource Timing entries (url, initiator, size, duration). No headers/bodies. |
+| Capture an API call | `network_capture_arm` → action → `network_capture_wait` | Real CDP capture for named URL globs. Gives request + response headers, status, opt-in body. Arm BEFORE the click/navigation. `timeout_secs` on `wait` starts at `wait`. |
+| Hand cookies to an HTTP replay | `cookie_lease_open` → (your request) → `cookie_lease_revoke` | Scope-bound lease; returns value-free provenance only (values never cross the wire). Needs no env gate. Classify eligibility yourself. |
+| Read raw cookie values (debug) | `session_cookies` | Raw values; needs `VOIDCRAWL_ALLOW_CREDENTIAL_CAPTURE=1`. Prefer `cookie_lease_open`. |
 | Captcha probe | `detect_captcha` | `recaptcha`/`hcaptcha`/`turnstile`/`cloudflare_challenge`/`datadome`/`null`. |
 | Concurrency headroom | `pool_status` | Check before a big fan-out. |
 

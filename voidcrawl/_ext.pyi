@@ -69,6 +69,7 @@ class CapturedResponse:
     url: str
     status: int
     headers: dict[str, str]
+    request_headers: dict[str, str]
     mime_type: str
     resource_type: str
     from_cache: bool
@@ -1196,8 +1197,10 @@ class NavigationTimeoutError(NavigationError):
 
 class BrowserClosedError(NavigationError): ...
 class ResponseTimeoutError(VoidCrawlError): ...
+
 class SessionInterrupted(VoidCrawlError):
     interrupt_id: str
+
 class InterruptExpired(VoidCrawlError): ...
 class InterruptTerminal(VoidCrawlError): ...
 class InterruptNotFound(VoidCrawlError): ...

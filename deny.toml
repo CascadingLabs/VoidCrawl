@@ -40,6 +40,24 @@ ignore = [
   # rule serialization), not a vulnerability and not removable. Revisit if
   # yara-x drops it or a CVE lands.
   "RUSTSEC-2025-0141",
+
+  # wasmtime "stores can mix up type indices between engines". Reached only via
+  # yara-x, which embeds wasmtime to execute compiled YARA rules. We are already
+  # on the newest yara-x (1.19.0) and it pins wasmtime 43.x, while the fix needs
+  # 46/47 — so this is not resolvable here until yara-x bumps upstream.
+  #
+  # Not reachable in this codebase: the ruleset is the compile-time constant
+  # `RULES_SRC` in crates/core/src/scanner.rs, never caller-supplied, so the
+  # engine only ever runs WASM built from our own hardcoded rules. Exploiting
+  # this requires attacker-controlled modules across multiple engines.
+  # Remove this entry as soon as yara-x ships a wasmtime >=46.0.2.
+  "RUSTSEC-2026-0222",
+
+  # crossbeam invalid pointer dereference in the `fmt::Pointer` impl for
+  # `Atomic`/`Shared`. A *build* dependency of yara-x, and it fires only when
+  # formatting an already-invalid pointer — not reachable at runtime here.
+  # Same removal condition: drop when yara-x updates the dependency.
+  "RUSTSEC-2026-0204",
 ]
 
 [sources]

@@ -303,9 +303,9 @@ fn flatten_headers(value: &serde_json::Value) -> Vec<(String, String)> {
 /// Rectangular crop in CSS pixels for [`ScreenshotOptions::bbox`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct Bbox {
-    pub x: u32,
-    pub y: u32,
-    pub width: u32,
+    pub x:      u32,
+    pub y:      u32,
+    pub width:  u32,
     pub height: u32,
 }
 
@@ -405,9 +405,9 @@ pub enum ScreenshotOutput {
 #[derive(Debug, Clone)]
 pub struct DownloadOutcome {
     /// Absolute path to the downloaded file inside the target directory.
-    pub path: PathBuf,
+    pub path:         PathBuf,
     /// Size of the downloaded file in bytes.
-    pub bytes: u64,
+    pub bytes:        u64,
     /// The `Content-Type` the server sent for the download (parameters
     /// stripped), if any — fed to the scanner to catch disguised payloads.
     /// `None` for action-captured downloads (see [`Page::arm_download`]), where
@@ -436,8 +436,8 @@ pub struct DownloadOutcome {
 /// consumed exactly once.
 #[derive(Debug)]
 pub struct DownloadCapture {
-    dir: PathBuf,
-    before: HashSet<PathBuf>,
+    dir:       PathBuf,
+    before:    HashSet<PathBuf>,
     max_bytes: u64,
 }
 
@@ -577,21 +577,21 @@ const DOCUMENT_SNAPSHOT_JS: &str = r#"
 /// Thin wrapper over `chromiumoxide::Page` exposing a clean async API.
 #[derive(Debug)]
 pub struct Page {
-    inner: CdpPage,
-    interrupts: Arc<InterruptRegistry>,
+    inner:             CdpPage,
+    interrupts:        Arc<InterruptRegistry>,
     /// `true` between [`Page::arm_download`] / a `download_to_dir` in flight
     /// and the matching reset. The pool checks this on release to reset an
     /// abandoned download behavior cheaply (no CDP call on the common path).
     download_armed:    AtomicBool,
     /// Last virtual cursor position (CSS px), so a humanized move starts from
     /// where the pointer actually is. Defaults to the top-left.
-    cursor: Mutex<(f64, f64)>,
+    cursor:            Mutex<(f64, f64)>,
     /// Shared with every other `Page` from the same `BrowserSession`.
     /// Headless Chrome only reliably composites frames for the foregrounded
     /// tab, so `screenshot()` holds this while it brings itself to front and
     /// captures — serializing just that instant across tabs on one browser,
     /// not the tabs' navigation/JS work.
-    capture_lock: Arc<AsyncMutex<()>>,
+    capture_lock:      Arc<AsyncMutex<()>>,
     /// The viewport/device override currently in effect via
     /// [`Page::set_viewport`], or `None` when using the session's launch-time
     /// default. `screenshot()`'s one-shot `viewport` option snapshots and
@@ -1397,11 +1397,11 @@ impl Page {
             let (shift_x, shift_y) = if apply_shift { bbox_shift } else { (0.0, 0.0) };
             builder = builder
                 .clip(CdpClipViewport {
-                    x: f64::from(bbox.x) + shift_x,
-                    y: f64::from(bbox.y) + shift_y,
-                    width: f64::from(bbox.width),
+                    x:      f64::from(bbox.x) + shift_x,
+                    y:      f64::from(bbox.y) + shift_y,
+                    width:  f64::from(bbox.width),
                     height: f64::from(bbox.height),
-                    scale: 1.0,
+                    scale:  1.0,
                 })
                 // A region can legitimately sit outside the layout viewport
                 // (e.g. paging through a fixed viewport via `scroll`), so
@@ -1417,11 +1417,11 @@ impl Page {
             // capture on this same page can leave that ambient state stale,
             // so an explicit size makes this mode order-independent.
             builder = builder.clip(CdpClipViewport {
-                x: 0.0,
-                y: 0.0,
-                width: f64::from(vp.width),
+                x:      0.0,
+                y:      0.0,
+                width:  f64::from(vp.width),
                 height: f64::from(vp.height),
-                scale: 1.0,
+                scale:  1.0,
             });
         }
         // else: no tracked viewport (e.g. a page adopted via attach_page
@@ -2255,10 +2255,10 @@ impl Page {
         // auto-denies `navigator.geolocation` and the override is never read.
         // Origin omitted → applies to every origin (incl. opaque `data:`).
         let grant = SetPermissionParams {
-            permission: PermissionDescriptor::new("geolocation"),
-            setting: PermissionSetting::Granted,
-            origin: None,
-            embedded_origin: None,
+            permission:         PermissionDescriptor::new("geolocation"),
+            setting:            PermissionSetting::Granted,
+            origin:             None,
+            embedded_origin:    None,
             browser_context_id: None,
         };
         self.inner.execute(grant).await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
@@ -2613,7 +2613,7 @@ const SETTLE_SIGHTINGS: u32 = 3;
 
 /// Tracks the size-stability of the newest new download across polls.
 struct SettleTracker {
-    prev: Option<(PathBuf, u64)>,
+    prev:   Option<(PathBuf, u64)>,
     stable: u32,
 }
 

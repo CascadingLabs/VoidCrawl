@@ -72,7 +72,8 @@ async def main() -> None:
             f"{r['path'].name:<45} {r['title']!r}"
         )
     print(
-        f"\n{len(PAGES)} screenshots in {elapsed:.2f}s over {config.tabs_per_browser} tabs "
+        f"\n{len(PAGES)} screenshots in {elapsed:.2f}s "
+        f"over {config.tabs_per_browser} tabs "
         f"(1 headless Chrome process) -> {OUT_DIR}/"
     )
 

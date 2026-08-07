@@ -181,38 +181,38 @@ pub enum BrowserMode {
 #[derive(Debug, Clone)]
 #[must_use]
 pub struct BrowserSessionBuilder {
-    mode: BrowserMode,
-    stealth: StealthConfig,
-    extra_args: Vec<String>,
+    mode:              BrowserMode,
+    stealth:           StealthConfig,
+    extra_args:        Vec<String>,
     chrome_executable: Option<String>,
-    proxy: Option<String>,
-    no_sandbox: bool,
-    window_size: Option<(u32, u32)>,
+    proxy:             Option<String>,
+    no_sandbox:        bool,
+    window_size:       Option<(u32, u32)>,
     /// Pinned `--remote-debugging-port` for launched Chrome. `None` (default)
     /// lets the OS pick a free ephemeral port on loopback — never blocks on
     /// a busy or firewalled address. `Some(n)` forces Chrome to bind that
     /// port; useful when only specific ports are reachable through a
     /// firewall or when mapping through Docker.
-    port: Option<u16>,
+    port:              Option<u16>,
     /// Persistent Chrome profile directory. `None` (default) = ephemeral
     /// `TempDir` that is deleted on session drop. `Some(path)` = mount an
     /// existing profile (e.g. one you've logged into `LinkedIn` in) and
     /// leave the directory on disk after the session ends.
-    user_data_dir: Option<PathBuf>,
+    user_data_dir:     Option<PathBuf>,
 }
 
 impl Default for BrowserSessionBuilder {
     fn default() -> Self {
         Self {
-            mode: BrowserMode::Headless,
-            stealth: StealthConfig::chrome_like(),
-            extra_args: Vec::new(),
+            mode:              BrowserMode::Headless,
+            stealth:           StealthConfig::chrome_like(),
+            extra_args:        Vec::new(),
             chrome_executable: None,
-            proxy: None,
-            no_sandbox: false,
-            window_size: None,
-            port: None,
-            user_data_dir: None,
+            proxy:             None,
+            no_sandbox:        false,
+            window_size:       None,
+            port:              None,
+            user_data_dir:     None,
         }
     }
 }
@@ -330,16 +330,16 @@ impl BrowserSessionBuilder {
 ///
 /// Use [`BrowserSessionBuilder`] or the convenience constructors to create one.
 pub struct BrowserSession {
-    browser: Arc<Mutex<Browser>>,
-    interrupts: Arc<InterruptRegistry>,
-    _handler_task: JoinHandle<()>,
-    handler_alive: Arc<AtomicBool>,
-    stealth: StealthConfig,
+    browser:        Arc<Mutex<Browser>>,
+    interrupts:     Arc<InterruptRegistry>,
+    _handler_task:  JoinHandle<()>,
+    handler_alive:  Arc<AtomicBool>,
+    stealth:        StealthConfig,
     /// True when this session attached to an already-running Chrome via
     /// `BrowserMode::RemoteDebug`. In that case `close()` must NOT send
     /// `Browser.close` over CDP — doing so terminates the user's Chromium
     /// process, which we didn't spawn and have no business shutting down.
-    attached: bool,
+    attached:       bool,
     /// Owns the temporary user data directory for launched browsers.
     /// `None` for remote-debug sessions (no local user data dir).
     /// Dropped after `browser` and `_handler_task`, so Chrome has already
@@ -519,11 +519,7 @@ impl BrowserSession {
                 .new_page("about:blank")
                 .await
                 .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
-            Page::new(
-                cdp_page,
-                Arc::clone(&self.capture_lock),
-                Arc::clone(&self.interrupts),
-            )
+            Page::new(cdp_page, Arc::clone(&self.capture_lock), Arc::clone(&self.interrupts))
         }; // browser lock released before navigation
 
         page.apply_stealth(&self.stealth).await?;
@@ -540,11 +536,7 @@ impl BrowserSession {
                 .new_page("about:blank")
                 .await
                 .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
-            Page::new(
-                cdp_page,
-                Arc::clone(&self.capture_lock),
-                Arc::clone(&self.interrupts),
-            )
+            Page::new(cdp_page, Arc::clone(&self.capture_lock), Arc::clone(&self.interrupts))
         };
         page.apply_stealth(&self.stealth).await?;
         Ok(page)
@@ -559,8 +551,10 @@ impl BrowserSession {
             // `fetch_targets` queues target attachment on the handler, so wait
             // briefly for every reported page target to become usable before
             // returning the all-open-pages snapshot.
-            let targets =
-                browser.fetch_targets().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+            let targets = browser
+                .fetch_targets()
+                .await
+                .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
             let expected_pages = targets.iter().filter(|target| target.r#type == "page").count();
             for attempt in 0..20 {
                 let pages =
@@ -585,11 +579,7 @@ impl BrowserSession {
         Ok(cdp_pages
             .into_iter()
             .map(|page| {
-                Page::new(
-                    page,
-                    Arc::clone(&self.capture_lock),
-                    Arc::clone(&self.interrupts),
-                )
+                Page::new(page, Arc::clone(&self.capture_lock), Arc::clone(&self.interrupts))
             })
             .collect())
     }
@@ -624,11 +614,7 @@ impl BrowserSession {
             .get_page(TargetId::new(target_id))
             .await
             .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
-        Ok(Page::new(
-            cdp_page,
-            Arc::clone(&self.capture_lock),
-            Arc::clone(&self.interrupts),
-        ))
+        Ok(Page::new(cdp_page, Arc::clone(&self.capture_lock), Arc::clone(&self.interrupts)))
     }
 
     /// Mark one page as requiring explicit external review. No page action is
@@ -656,7 +642,8 @@ impl BrowserSession {
         self.interrupts.resume(interrupt_id).await
     }
 
-    /// Release a previously interrupted page without replaying any browser action.
+    /// Release a previously interrupted page without replaying any browser
+    /// action.
     pub async fn release_interrupt(&self, interrupt_id: &str) -> Result<InterruptInfo> {
         self.interrupts.release(interrupt_id).await
     }

@@ -44,9 +44,9 @@ impl InterruptState {
 /// Non-secret metadata supplied when a caller parks a page.
 #[derive(Debug, Clone)]
 pub struct InterruptRequest {
-    pub code: String,
+    pub code:    String,
     pub summary: String,
-    pub ttl: Duration,
+    pub ttl:     Duration,
 }
 
 impl InterruptRequest {
@@ -82,16 +82,16 @@ impl InterruptRequest {
 #[derive(Debug, Clone)]
 pub struct InterruptInfo {
     pub interrupt_id: String,
-    pub target_id: String,
-    pub code: String,
-    pub summary: String,
-    pub state: InterruptState,
-    pub expires_in: Duration,
+    pub target_id:    String,
+    pub code:         String,
+    pub summary:      String,
+    pub state:        InterruptState,
+    pub expires_in:   Duration,
 }
 
 #[derive(Debug, Clone)]
 struct InterruptRecord {
-    info: InterruptInfo,
+    info:       InterruptInfo,
     expires_at: Instant,
 }
 
@@ -189,7 +189,7 @@ impl InterruptRegistry {
         if record.info.state.terminal() {
             return Err(VoidCrawlError::InterruptTerminal {
                 interrupt_id: interrupt_id.into(),
-                state: record.info.state.as_str().into(),
+                state:        record.info.state.as_str().into(),
             });
         }
         record.info.state = next;
@@ -224,9 +224,9 @@ mod tests {
             .interrupt(
                 "target-1".into(),
                 InterruptRequest {
-                    code: "policy.review".into(),
+                    code:    "policy.review".into(),
                     summary: "Review required".into(),
-                    ttl: Duration::from_secs(1),
+                    ttl:     Duration::from_secs(1),
                 },
             )
             .await?;
@@ -245,9 +245,9 @@ mod tests {
             .interrupt(
                 "target-1".into(),
                 InterruptRequest {
-                    code: "policy.review".into(),
+                    code:    "policy.review".into(),
                     summary: "Review required".into(),
-                    ttl: Duration::from_millis(1),
+                    ttl:     Duration::from_millis(1),
                 },
             )
             .await?;
@@ -270,9 +270,9 @@ mod tests {
                 .interrupt(
                     "target-1".into(),
                     InterruptRequest {
-                        code: "Policy Review".into(),
+                        code:    "Policy Review".into(),
                         summary: "Review required".into(),
-                        ttl: Duration::from_secs(1),
+                        ttl:     Duration::from_secs(1),
                     },
                 )
                 .await
@@ -283,9 +283,9 @@ mod tests {
                 .interrupt(
                     "target-1".into(),
                     InterruptRequest {
-                        code: "policy.review".into(),
+                        code:    "policy.review".into(),
                         summary: "Review required".into(),
-                        ttl: Duration::from_secs(3601),
+                        ttl:     Duration::from_secs(3601),
                     },
                 )
                 .await
@@ -301,9 +301,9 @@ mod tests {
                 .interrupt(
                     "target-1".into(),
                     InterruptRequest {
-                        code: " ".into(),
+                        code:    " ".into(),
                         summary: "Review required".into(),
-                        ttl: Duration::from_secs(1),
+                        ttl:     Duration::from_secs(1),
                     },
                 )
                 .await

@@ -16,7 +16,12 @@ pub enum VoidCrawlError {
     NavigationFailed(String),
 
     #[error("navigation to {url:?} timed out waiting for {wait_phase} after {timeout_secs:.3}s")]
-    NavigationTimeout { url: String, wait_phase: String, timeout_secs: f64, elapsed_secs: f64 },
+    NavigationTimeout {
+        url:          String,
+        wait_phase:   String,
+        timeout_secs: f64,
+        elapsed_secs: f64,
+    },
 
     #[error("page error: {0}")]
     PageError(String),
