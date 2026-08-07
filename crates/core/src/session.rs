@@ -553,7 +553,33 @@ impl BrowserSession {
     /// List all open pages.
     pub async fn pages(&self) -> Result<Vec<Page>> {
         self.check_alive()?;
-        let browser = self.browser.lock().await;
+        let mut browser = self.browser.lock().await;
+        if self.attached {
+            // A remote-debug session may attach after its tabs already exist.
+            // `fetch_targets` queues target attachment on the handler, so wait
+            // briefly for every reported page target to become usable before
+            // returning the all-open-pages snapshot.
+            let targets =
+                browser.fetch_targets().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+            let expected_pages = targets.iter().filter(|target| target.r#type == "page").count();
+            for attempt in 0..20 {
+                let pages =
+                    browser.pages().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+                if pages.len() >= expected_pages || attempt == 19 {
+                    return Ok(pages
+                        .into_iter()
+                        .map(|page| {
+                            Page::new(
+                                page,
+                                Arc::clone(&self.capture_lock),
+                                Arc::clone(&self.interrupts),
+                            )
+                        })
+                        .collect());
+                }
+                time::sleep(Duration::from_millis(25)).await;
+            }
+        }
         let cdp_pages =
             browser.pages().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
         Ok(cdp_pages

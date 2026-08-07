@@ -55,6 +55,26 @@ async fn test_new_page_and_content() {
 }
 
 #[tokio::test]
+async fn test_attached_pages_include_preexisting_tab() {
+    let session = headless_session().await;
+    let page = session.new_blank_page().await.expect("new blank page failed");
+    let target_id = page.target_id();
+
+    let attached = BrowserSession::connect(session.websocket_url().await)
+        .await
+        .expect("attach to launched browser failed");
+    let pages = attached.pages().await.expect("attached pages failed");
+
+    assert!(
+        pages.iter().any(|candidate| candidate.target_id() == target_id),
+        "attached session omitted its pre-existing tab"
+    );
+
+    attached.close().await.expect("attached close failed");
+    session.close().await.expect("browser close failed");
+}
+
+#[tokio::test]
 async fn test_title_and_url() {
     let session = headless_session().await;
     let page = session.new_page("https://example.com").await.expect("new_page failed");
