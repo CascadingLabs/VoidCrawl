@@ -212,11 +212,13 @@ impl InterruptRegistry {
 mod tests {
     use std::time::Duration;
 
+    use tokio::time::sleep;
+
     use super::{InterruptRegistry, InterruptRequest, InterruptState};
     use crate::VoidCrawlError;
 
     #[tokio::test]
-    async fn resume_reactivates_target_without_dropping_record() {
+    async fn resume_reactivates_target_without_dropping_record() -> crate::Result<()> {
         let registry = InterruptRegistry::new();
         let info = registry
             .interrupt(
@@ -227,17 +229,17 @@ mod tests {
                     ttl: Duration::from_secs(1),
                 },
             )
-            .await
-            .unwrap();
+            .await?;
         assert!(registry.page_is_active("target-1").await.is_err());
-        let resumed = registry.resume(&info.interrupt_id).await.unwrap();
+        let resumed = registry.resume(&info.interrupt_id).await?;
         assert_eq!(resumed.state, InterruptState::Resumed);
         assert!(registry.page_is_active("target-1").await.is_ok());
         assert!(registry.resume(&info.interrupt_id).await.is_err());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn expires_parked_target() {
+    async fn expires_parked_target() -> crate::Result<()> {
         let registry = InterruptRegistry::new();
         let info = registry
             .interrupt(
@@ -248,16 +250,16 @@ mod tests {
                     ttl: Duration::from_millis(1),
                 },
             )
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        let expired = registry.status(&info.interrupt_id).await.unwrap();
+            .await?;
+        sleep(Duration::from_millis(5)).await;
+        let expired = registry.status(&info.interrupt_id).await?;
         assert_eq!(expired.state, InterruptState::Expired);
         assert!(matches!(
             registry.page_is_active("target-1").await,
             Err(VoidCrawlError::InterruptExpired { .. })
         ));
         assert!(registry.resume(&info.interrupt_id).await.is_err());
+        Ok(())
     }
 
     #[tokio::test]
