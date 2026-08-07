@@ -55,6 +55,7 @@ use crate::{
     error::{Result, VoidCrawlError},
     input::{HumanizeOptions, Rng, humanized_path},
     response::{ResponseCapture, ResponseCaptureLimits},
+    selector::{self, RawRect, SelectorEntry, SelectorKind, SelectorResolution},
     stealth::StealthConfig,
     viewport::{ScrollTarget, Viewport},
 };
@@ -299,7 +300,7 @@ fn flatten_headers(value: &serde_json::Value) -> Vec<(String, String)> {
 }
 
 /// Rectangular crop in CSS pixels for [`ScreenshotOptions::bbox`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct Bbox {
     pub x:      u32,
     pub y:      u32,
@@ -316,6 +317,14 @@ pub struct ScreenshotOptions {
     /// With `scroll` set, coordinates are relative to wherever that scroll
     /// lands rather than the top of the document.
     pub bbox:      Option<Bbox>,
+    /// Crop to a Yosoi selector's resolved rectangle instead of an explicit
+    /// `bbox`. Mutually exclusive with `bbox`: setting both is an error.
+    /// A non-[`Resolved`](crate::selector::SelectorResolution::Resolved)
+    /// outcome (nothing matched, hidden/zero-area target, ambiguous match,
+    /// or a non-visual kind like `jsonld`/`regex`) becomes an actionable
+    /// `Err` here — see [`Page::resolve_selector`] for a version that
+    /// returns the typed outcome instead of erroring.
+    pub selector:  Option<SelectorEntry>,
     /// Apply this viewport/device override for just this capture, then
     /// restore whatever was active before (even on error). See
     /// [`Page::set_viewport`] for a persistent version.
@@ -337,7 +346,14 @@ pub struct ScreenshotOptions {
 
 impl Default for ScreenshotOptions {
     fn default() -> Self {
-        Self { path: None, bbox: None, viewport: None, scroll: None, full_page: true }
+        Self {
+            path:      None,
+            bbox:      None,
+            selector:  None,
+            viewport:  None,
+            scroll:    None,
+            full_page: true,
+        }
     }
 }
 
@@ -349,6 +365,11 @@ impl ScreenshotOptions {
 
     pub fn with_bbox(mut self, bbox: Bbox) -> Self {
         self.bbox = Some(bbox);
+        self
+    }
+
+    pub fn with_selector(mut self, selector: SelectorEntry) -> Self {
+        self.selector = Some(selector);
         self
     }
 
@@ -1156,6 +1177,12 @@ impl Page {
     /// * `scroll` moves the page before capturing (see [`ScrollTarget`]) and
     ///   restores the original scroll position after, even on error.
     pub async fn screenshot(&self, opts: ScreenshotOptions) -> Result<ScreenshotOutput> {
+        if opts.bbox.is_some() && opts.selector.is_some() {
+            return Err(VoidCrawlError::Other(
+                "ScreenshotOptions: `bbox` and `selector` are mutually exclusive".into(),
+            ));
+        }
+
         // One-shot viewport override for just this capture — snapshot
         // whatever's already in effect so it's restored exactly, even on
         // error, so a temporary device identity never leaks to the next
@@ -1199,12 +1226,34 @@ impl Page {
             (0.0, 0.0)
         };
 
+        // A `selector` resolves to viewport-relative coordinates *as of
+        // right now* (after any scroll above), so unlike a caller-supplied
+        // numeric `bbox` — specified relative to the page and shifted by
+        // `bbox_shift` below — it needs no shift: `getBoundingClientRect`
+        // already reflects wherever the page is currently scrolled to.
+        let effective_bbox: Option<(Bbox, bool)> = if let Some(bbox) = opts.bbox {
+            Some((bbox, true))
+        } else if let Some(entry) = &opts.selector {
+            match self.resolve_selector(entry).await? {
+                SelectorResolution::Resolved { bbox } => Some((bbox, false)),
+                SelectorResolution::Empty { reason } => {
+                    return Err(VoidCrawlError::ElementNotVisible(reason));
+                }
+                SelectorResolution::Ambiguous { reason, .. } => {
+                    return Err(VoidCrawlError::AmbiguousSelector(reason));
+                }
+            }
+        } else {
+            None
+        };
+
         let mut builder = ScreenshotParams::builder().format(CaptureScreenshotFormat::Png);
-        if let Some(bbox) = opts.bbox {
+        if let Some((bbox, apply_shift)) = effective_bbox {
+            let (shift_x, shift_y) = if apply_shift { bbox_shift } else { (0.0, 0.0) };
             builder = builder
                 .clip(CdpClipViewport {
-                    x:      f64::from(bbox.x) + bbox_shift.0,
-                    y:      f64::from(bbox.y) + bbox_shift.1,
+                    x:      f64::from(bbox.x) + shift_x,
+                    y:      f64::from(bbox.y) + shift_y,
                     width:  f64::from(bbox.width),
                     height: f64::from(bbox.height),
                     scale:  1.0,
@@ -1650,6 +1699,151 @@ impl Page {
             .map_err(VoidCrawlError::PageError)?;
         self.inner.execute(call).await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
         Ok(())
+    }
+
+    // ── Selector-backed bbox resolution ──────────────────────────────────
+
+    /// Resolve a Yosoi [`SelectorEntry`] (any of its 8 kinds) to a CSS-pixel
+    /// rectangle. See the [`selector`](crate::selector) module docs for the
+    /// full design: all three outcomes — resolved, empty, ambiguous — are a
+    /// typed `Ok(...)`, not an exception; `Err` is reserved for genuine
+    /// infra failures (a bad regex/XPath pattern, a CDP call failing).
+    ///
+    /// For a one-off crop, pass [`ScreenshotOptions::selector`] to
+    /// [`Page::screenshot`] instead — that converts a non-`Resolved`
+    /// outcome into an actionable `Err`, since a screenshot fundamentally
+    /// needs a rectangle.
+    pub async fn resolve_selector(&self, entry: &SelectorEntry) -> Result<SelectorResolution> {
+        match entry.kind {
+            SelectorKind::Jsonld => Ok(SelectorResolution::Empty {
+                reason: "jsonld selectors address non-visual structured data (a <script> tag \
+                         has no render box); not resolved to a rectangle"
+                    .into(),
+            }),
+            SelectorKind::Regex => Ok(SelectorResolution::Empty {
+                reason: "regex selectors match raw HTML text, which has no canonical DOM \
+                         element; not resolved to a rectangle"
+                    .into(),
+            }),
+            SelectorKind::Visual => Ok(self.resolve_visual_selector(entry).await?),
+            SelectorKind::Role => self.resolve_role_selector(entry).await,
+            SelectorKind::Css
+            | SelectorKind::Xpath
+            | SelectorKind::Attr
+            | SelectorKind::GlobalId => self.resolve_dom_selector(entry).await,
+        }
+    }
+
+    /// `visual`: an exact 1x1 CSS-pixel box at `(x, y)` — no invented
+    /// hit-radius. `Empty` when coordinates are missing or fall outside the
+    /// current viewport (`window.innerWidth`/`innerHeight`).
+    async fn resolve_visual_selector(&self, entry: &SelectorEntry) -> Result<SelectorResolution> {
+        let (Some(x), Some(y)) = (entry.x, entry.y) else {
+            return Ok(SelectorResolution::Empty {
+                reason: "visual selector requires both x and y".into(),
+            });
+        };
+        if x < 0.0 || y < 0.0 {
+            return Ok(SelectorResolution::Empty {
+                reason: format!("visual point ({x}, {y}) has a negative coordinate"),
+            });
+        }
+        let dims = self
+            .evaluate_js("[window.innerWidth, window.innerHeight]")
+            .await?
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let (vw, vh) = (
+            dims.first().and_then(Value::as_f64).unwrap_or(f64::INFINITY),
+            dims.get(1).and_then(Value::as_f64).unwrap_or(f64::INFINITY),
+        );
+        if x > vw || y > vh {
+            return Ok(SelectorResolution::Empty {
+                reason: format!(
+                    "visual point ({x}, {y}) is outside the current viewport ({vw}x{vh})"
+                ),
+            });
+        }
+        Ok(SelectorResolution::Resolved {
+            bbox: RawRect { x, y, width: 1.0, height: 1.0 }.to_bbox(),
+        })
+    }
+
+    /// `role`: `Accessibility.queryAXTree` role + exact accessible-name
+    /// match — the same resolution [`Page::click_by_role`] uses, so a
+    /// selector that could click an element can also crop it.
+    async fn resolve_role_selector(&self, entry: &SelectorEntry) -> Result<SelectorResolution> {
+        let name = entry.name.as_deref();
+        let nodes = self.query_ax_nodes(Some(&entry.value), name).await?;
+        let backends: Vec<_> =
+            nodes.iter().filter(|n| !n.ignored).filter_map(|n| n.backend_dom_node_id).collect();
+        let describe = || format!("role={:?} name={:?}", entry.value, name.unwrap_or(""));
+
+        if backends.is_empty() {
+            return Ok(SelectorResolution::Empty {
+                reason: format!("{} matched no AX nodes", describe()),
+            });
+        }
+        // AX-tree matches are already "exists in the accessibility tree",
+        // which excludes `display:none`/`aria-hidden` — but the box model
+        // can still be a zero-area detached node, so resolve+filter each
+        // candidate the same way `pick_resolution` treats DOM rects.
+        let mut visible = Vec::with_capacity(backends.len());
+        for backend_id in &backends {
+            let bm = self
+                .inner
+                .execute(GetBoxModelParams {
+                    backend_node_id: Some(*backend_id),
+                    ..Default::default()
+                })
+                .await;
+            let Ok(bm) = bm else { continue };
+            // The *border* box, not the content box: it's what
+            // `getBoundingClientRect()` returns for a typical element, and
+            // every other selector kind here resolves via that same JS
+            // call — using the content box would exclude an element's own
+            // padding/border and disagree with them for no reason.
+            let q = bm.result.model.border.inner();
+            if q.len() < 8 {
+                continue;
+            }
+            let xs = [q[0], q[2], q[4], q[6]];
+            let ys = [q[1], q[3], q[5], q[7]];
+            let left = xs.iter().copied().fold(f64::INFINITY, f64::min);
+            let top = ys.iter().copied().fold(f64::INFINITY, f64::min);
+            let right = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let bottom = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let (width, height) = (right - left, bottom - top);
+            if width > 0.0 && height > 0.0 {
+                visible.push(RawRect { x: left, y: top, width, height });
+            }
+        }
+        Ok(selector::pick_resolution(backends.len(), &visible, entry.nth, describe))
+    }
+
+    /// `css` / `xpath` / `attr` / `global_id`: gather DOM candidates (see
+    /// [`selector::candidates_js`]), filter to visible ones, then resolve
+    /// via [`selector::pick_resolution`].
+    async fn resolve_dom_selector(&self, entry: &SelectorEntry) -> Result<SelectorResolution> {
+        let candidates = selector::candidates_js(entry).ok_or_else(|| {
+            VoidCrawlError::PageError(format!("{:?} has no DOM candidate step", entry.kind))
+        })?;
+        let count_js = format!("({candidates}).length");
+        let count = self.evaluate_js(&count_js).await?.as_u64().ok_or_else(|| {
+            VoidCrawlError::JsEvalError("candidate count was not a number".into())
+        })?;
+        let total_matches = usize::try_from(count).map_err(|_| {
+            VoidCrawlError::JsEvalError(format!("implausible candidate count: {count}"))
+        })?;
+
+        let rects_js = selector::visible_rects_js(&candidates);
+        let raw: Value = self.evaluate_js(&rects_js).await?;
+        let visible: Vec<RawRect> = serde_json::from_value(raw)
+            .map_err(|e| VoidCrawlError::JsEvalError(format!("rect decode failed: {e}")))?;
+
+        let describe = || format!("{:?} {:?}", entry.kind, entry.value);
+        Ok(selector::pick_resolution(total_matches, &visible, entry.nth, describe))
     }
 
     /// Compact accessibility outline of a specific (possibly cross-origin)

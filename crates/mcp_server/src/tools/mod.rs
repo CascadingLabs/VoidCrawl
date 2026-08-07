@@ -11,6 +11,7 @@ pub mod fetch;
 pub mod introspect;
 pub mod profile_registry;
 pub mod screenshot;
+pub mod selector;
 pub mod session;
 pub mod snapshot;
 pub mod viewport;

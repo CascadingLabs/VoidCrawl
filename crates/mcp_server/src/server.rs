@@ -167,9 +167,13 @@ on action downloads (no Content-Type is observed), so `clean` is not a malware-f
         name = "screenshot",
         description = "Load a URL in stealth headless Chrome and return a PNG. Full page by \
 default; pass `full_page: false` to capture only the visible viewport (cheaper — no off-screen \
-content), `bbox` to crop an exact CSS-pixel region, `viewport` for a one-shot device/size override \
-(preset name from list_device_presets, or custom width+height), and `scroll` to page down before \
-cropping. `viewport`/`scroll` never persist past this one call."
+content), `bbox` to crop an exact CSS-pixel region, `selector` to crop a Yosoi selector's resolved \
+rectangle instead (any of css/xpath/regex/jsonld/attr/global_id/role/visual — mutually exclusive \
+with `bbox`; a selector that matches nothing, is ambiguous, or is inherently non-visual \
+(jsonld/regex) fails with invalid_params rather than silently cropping an arbitrary target), \
+`viewport` for a one-shot device/size override (preset name from list_device_presets, or custom \
+width+height), and `scroll` to page down before cropping. `viewport`/`scroll` never persist past \
+this one call."
     )]
     pub async fn screenshot(
         &self,
@@ -185,8 +189,11 @@ cropping. `viewport`/`scroll` never persist past this one call."
 authenticated, post-click, paginated, or challenge state that only an open session holds. Response \
 includes devicePixelRatio guidance compatible with click_visual_coords. Optional one-shot `viewport` \
 (preset or custom size), `full_page: false` (visible viewport only, not the whole scroll), `bbox` \
-crop, and `scroll` (page down before cropping) — none of these persist past this call; use \
-session_set_viewport for a persistent device/size. Unknown or closed \
+crop, `selector` (crop a Yosoi selector's resolved rectangle — css/xpath/regex/jsonld/attr/ \
+global_id/role/visual — mutually exclusive with `bbox`; fails with invalid_params rather than \
+guessing when nothing/ambiguous/non-visual resolves), and `scroll` (page down before cropping) — \
+none of these persist past this call; use session_set_viewport for a persistent device/size. \
+Unknown or closed \
 session_ids fail with invalid_params. Prefer session_ax_tree / session_snapshot for structured \
 perception; reach for this when you need to see pixels — layout, visual state, or a thin AX tree."
     )]

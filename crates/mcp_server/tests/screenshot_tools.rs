@@ -260,6 +260,7 @@ async fn session_screenshot_bbox_and_scroll_crop_at_scrolled_position() {
                 ..Default::default()
             }),
             bbox:       Some(BboxArg { x: 5, y: 5, width: 100, height: 80 }),
+            selector:   None,
             scroll:     Some(ScrollArg { viewports: Some(2.0), ..Default::default() }),
             full_page:  None,
         },

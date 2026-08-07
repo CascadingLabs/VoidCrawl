@@ -19,7 +19,9 @@ pub fn map_err(err: VoidCrawlError) -> ErrorData {
         | VoidCrawlError::FrameNotFound(s)
         | VoidCrawlError::AmbiguousFrame(s)
         | VoidCrawlError::NavigationFailed(s)
-        | VoidCrawlError::JsEvalError(s) => ErrorData::invalid_params(s, None),
+        | VoidCrawlError::JsEvalError(s)
+        | VoidCrawlError::ElementNotVisible(s)
+        | VoidCrawlError::AmbiguousSelector(s) => ErrorData::invalid_params(s, None),
         VoidCrawlError::Timeout(s) => ErrorData::internal_error(format!("timeout: {s}"), None),
         VoidCrawlError::BrowserClosed => ErrorData::internal_error("browser closed", None),
         VoidCrawlError::CaptchaDetected { ref kind } => {

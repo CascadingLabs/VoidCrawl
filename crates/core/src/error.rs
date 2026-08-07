@@ -44,6 +44,20 @@ pub enum VoidCrawlError {
     #[error("ambiguous frame pattern: {0}")]
     AmbiguousFrame(String),
 
+    /// A `screenshot(selector: ...)` resolution came back
+    /// [`SelectorResolution::Empty`](crate::selector::SelectorResolution::Empty)
+    /// — nothing usable to crop. Distinct from `ElementNotFound`: the
+    /// selector may have matched, but hidden/zero-area/detached, or be a
+    /// kind (`jsonld`, `regex`) that never resolves to a rectangle.
+    #[error("selector resolved to no visible target: {0}")]
+    ElementNotVisible(String),
+
+    /// A `screenshot(selector: ...)` resolution came back
+    /// [`SelectorResolution::Ambiguous`](crate::selector::SelectorResolution::Ambiguous)
+    /// — multiple visible candidates, no `nth` to disambiguate.
+    #[error("ambiguous selector: {0}")]
+    AmbiguousSelector(String),
+
     #[error("timeout: {0}")]
     Timeout(String),
 

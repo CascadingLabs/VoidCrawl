@@ -226,6 +226,13 @@ class PooledTab:
         self,
         path: str | None = None,
         bbox: tuple[int, int, int, int] | None = None,
+        selector_type: str | None = None,
+        selector_value: str | None = None,
+        selector_regex: str | None = None,
+        selector_name: str | None = None,
+        selector_nth: int | None = None,
+        selector_x: float | None = None,
+        selector_y: float | None = None,
         viewport_preset: str | None = None,
         viewport_width: int | None = None,
         viewport_height: int | None = None,
@@ -236,11 +243,12 @@ class PooledTab:
         full_page: bool | None = None,
     ) -> bytes | str:
         """Capture a PNG screenshot; see :meth:`Page.screenshot` for the
-        full argument reference. No persistent ``set_viewport`` exists on a
-        pooled tab — the pool doesn't reset viewport on release, so a
-        persistent override would leak to the next unrelated caller that
-        acquires this tab. Use the one-shot ``viewport_*`` kwargs here
-        instead."""
+        full argument reference (including the ``selector_*`` kwargs — a
+        one-shot selector-backed crop is safe on a pooled tab). No
+        persistent ``set_viewport`` exists on a pooled tab — the pool
+        doesn't reset viewport on release, so a persistent override would
+        leak to the next unrelated caller that acquires this tab. Use the
+        one-shot ``viewport_*`` kwargs here instead."""
         ...
     async def download(
         self,
@@ -677,6 +685,13 @@ class Page:
         self,
         path: str | None = None,
         bbox: tuple[int, int, int, int] | None = None,
+        selector_type: str | None = None,
+        selector_value: str | None = None,
+        selector_regex: str | None = None,
+        selector_name: str | None = None,
+        selector_nth: int | None = None,
+        selector_x: float | None = None,
+        selector_y: float | None = None,
         viewport_preset: str | None = None,
         viewport_width: int | None = None,
         viewport_height: int | None = None,
@@ -697,7 +712,29 @@ class Page:
                 If omitted, returns raw bytes.
             bbox: Optional ``(x, y, width, height)`` in CSS pixels. With
                 ``scroll_viewports``/``scroll_pixels`` set, coordinates are
-                relative to wherever that scroll lands.
+                relative to wherever that scroll lands. Mutually exclusive
+                with ``selector_type``.
+            selector_type: Crop to a Yosoi selector's resolved rectangle
+                instead of an explicit ``bbox`` — one of ``"css"``,
+                ``"xpath"``, ``"regex"``, ``"jsonld"``, ``"attr"``,
+                ``"global_id"``, ``"role"``, ``"visual"``. Mutually
+                exclusive with ``bbox``. A selector that matches nothing,
+                is ambiguous, or is inherently non-visual (``jsonld``/
+                ``regex``) raises rather than silently cropping an
+                arbitrary target.
+            selector_value: CSS selector / XPath expression, depending on
+                ``selector_type`` (unused for ``role``/``visual``/
+                ``jsonld``/``regex``).
+            selector_regex: Regex pattern (``selector_type="regex"`` only —
+                currently always resolves to "empty"; not cropped).
+            selector_name: Accessible name (``role``), attribute name
+                (``attr`` — metadata only, not part of the DOM query), or
+                id-prefix filter (``global_id``).
+            selector_nth: 0-based index to disambiguate when a selector
+                matches more than one visible target.
+            selector_x: CSS-pixel x (``selector_type="visual"`` only).
+            selector_y: CSS-pixel y (``selector_type="visual"`` only) —
+                together with ``selector_x``, resolves to an exact 1x1 box.
             viewport_preset: Named device (see
                 :func:`voidcrawl.viewport.list_device_presets`). Mutually
                 exclusive with ``viewport_width``/``viewport_height``.
@@ -718,7 +755,7 @@ class Page:
             scroll_pixels: Scroll to an absolute pixel Y before capturing.
             full_page: Capture the full scrollable page (default ``True``).
                 ``False`` captures only the visible viewport. Ignored when
-                ``bbox`` is set.
+                ``bbox``/``selector_type`` is set.
         """
         ...
     async def set_viewport(

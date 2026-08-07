@@ -27,9 +27,9 @@ use void_crawl_core::{
     DeleteCookiesParams, DispatchKeyEventType, DispatchMouseEventType, DownloadCapture,
     DownloadOutcome, MAX_PROFILE_SPLIT_COPIES, ManagedProfileSnapshot, MouseButton, Page,
     PageResponse, PoolConfig, PooledTab, ProfileHandle, ProfileInfo, ProfileRegistry,
-    ResponseCapture, ResponseCaptureLimits, ScanConfig, ScanReport, ScrollTarget, StealthConfig,
-    Verdict, Viewport, acquire_profile, list_profiles, scan_bytes, scan_path,
-    viewport as viewport_mod,
+    ResponseCapture, ResponseCaptureLimits, ScanConfig, ScanReport, ScrollTarget, SelectorEntry,
+    SelectorKind, StealthConfig, Verdict, Viewport, acquire_profile, list_profiles, scan_bytes,
+    scan_path, viewport as viewport_mod,
 };
 
 // ── Error conversion ────────────────────────────────────────────────────
@@ -83,13 +83,56 @@ fn resolve_viewport_args(
     }
 }
 
+/// Resolve the raw `selector_*` kwargs `PyPage`/`PyPooledTab`'s
+/// `screenshot()` accept into a `SelectorEntry` — a Yosoi `SelectorEntry`,
+/// field-for-field (`yosoi/models/selectors.py`), so a caller can pass
+/// `entry.model_dump()` values straight through as kwargs. This module is
+/// the raw substrate and does no validation beyond parsing `selector_type`;
+/// build a validated model on the Python side if you want enum/mutual-
+/// exclusivity checking before it crosses into Rust.
+fn resolve_selector_args(
+    kind: Option<&str>,
+    value: Option<String>,
+    regex: Option<String>,
+    name: Option<String>,
+    nth: Option<u32>,
+    x: Option<f64>,
+    y: Option<f64>,
+) -> PyResult<SelectorEntry> {
+    let kind = match kind {
+        Some("css") => SelectorKind::Css,
+        Some("xpath") => SelectorKind::Xpath,
+        Some("regex") => SelectorKind::Regex,
+        Some("jsonld") => SelectorKind::Jsonld,
+        Some("attr") => SelectorKind::Attr,
+        Some("global_id") => SelectorKind::GlobalId,
+        Some("role") => SelectorKind::Role,
+        Some("visual") => SelectorKind::Visual,
+        Some(other) => {
+            return Err(PyValueError::new_err(format!(
+                "unknown selector_type {other:?}; expected one of css, xpath, regex, jsonld, \
+                 attr, global_id, role, visual"
+            )));
+        }
+        None => return Err(PyValueError::new_err("selector_type is required")),
+    };
+    Ok(SelectorEntry { kind, value: value.unwrap_or_default(), regex, name, nth, x, y })
+}
+
 /// Build a `ScreenshotOptions` from the raw kwargs `PyPage`/`PyPooledTab`'s
-/// `screenshot()` accept. Shared so both bindings resolve `viewport`/
-/// `scroll`/`full_page` identically.
+/// `screenshot()` accept. Shared so both bindings resolve `selector`/
+/// `viewport`/`scroll`/`full_page` identically.
 #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
 fn build_screenshot_options(
     path: Option<String>,
     bbox: Option<(u32, u32, u32, u32)>,
+    selector_type: Option<&str>,
+    selector_value: Option<String>,
+    selector_regex: Option<String>,
+    selector_name: Option<String>,
+    selector_nth: Option<u32>,
+    selector_x: Option<f64>,
+    selector_y: Option<f64>,
     viewport_preset: Option<&str>,
     viewport_width: Option<u32>,
     viewport_height: Option<u32>,
@@ -99,12 +142,27 @@ fn build_screenshot_options(
     scroll_pixels: Option<i64>,
     full_page: Option<bool>,
 ) -> PyResult<void_crawl_core::ScreenshotOptions> {
+    if bbox.is_some() && selector_type.is_some() {
+        return Err(PyValueError::new_err("bbox and selector_type are mutually exclusive"));
+    }
     let mut opts = void_crawl_core::ScreenshotOptions::default();
     if let Some(p) = path {
         opts = opts.with_path(p);
     }
     if let Some((x, y, w, h)) = bbox {
         opts = opts.with_bbox(void_crawl_core::Bbox { x, y, width: w, height: h });
+    }
+    if selector_type.is_some() {
+        let entry = resolve_selector_args(
+            selector_type,
+            selector_value,
+            selector_regex,
+            selector_name,
+            selector_nth,
+            selector_x,
+            selector_y,
+        )?;
+        opts = opts.with_selector(entry);
     }
     if viewport_preset.is_some() || viewport_width.is_some() || viewport_height.is_some() {
         let vp = resolve_viewport_args(
@@ -1110,7 +1168,31 @@ impl PyPage {
     ///         string. If omitted, returns raw bytes.
     ///     bbox: Optional ``(x, y, width, height)`` in CSS pixels to crop.
     ///         With ``scroll_viewports``/``scroll_pixels`` set, ``x``/``y``
-    ///         are relative to wherever that scroll lands.
+    ///         are relative to wherever that scroll lands. Mutually
+    ///         exclusive with ``selector_type``.
+    ///     selector_type: Crop to a Yosoi selector's resolved rectangle
+    ///         instead of an explicit ``bbox`` — one of ``"css"``,
+    ///         ``"xpath"``, ``"regex"``, ``"jsonld"``, ``"attr"``,
+    ///         ``"global_id"``, ``"role"``, ``"visual"``. Mutually
+    ///         exclusive with ``bbox``. A selector that matches nothing, is
+    ///         ambiguous, or is inherently non-visual (``jsonld``/
+    ///         ``regex``) raises rather than silently cropping an
+    ///         arbitrary target. Prefer building a validated
+    ///         ``voidcrawl.viewport``-style pydantic model on the Python
+    ///         side and unpacking its fields here (this layer does no
+    ///         enum/mutual-exclusivity validation beyond parsing the type).
+    ///     selector_value: CSS selector / XPath expression, depending on
+    ///         ``selector_type`` (unused for ``role``/``visual``/``jsonld``/
+    ///         ``regex``, which use ``name``/``x``/``y``/``regex`` instead).
+    ///     selector_regex: Regex pattern (``selector_type="regex"`` only —
+    ///         currently always resolves to "empty"; not cropped).
+    ///     selector_name: Accessible name (``role``), attribute name
+    ///         (``attr`` — metadata only, not part of the DOM query), or
+    ///         id-prefix filter (``global_id``).
+    ///     selector_nth: 0-based index to disambiguate when a selector
+    ///         matches more than one visible target.
+    ///     selector_x, selector_y: CSS-pixel point (``selector_type="visual"``
+    ///         only) — resolves to an exact 1x1 box.
     ///     viewport_preset: Named device (see :func:`list_device_presets`),
     ///         e.g. ``"iPhone 16 Pro Max"``. Mutually exclusive with
     ///         ``viewport_width``/``viewport_height``. One-shot: restores
@@ -1128,9 +1210,11 @@ impl PyPage {
     ///     scroll_pixels: Scroll to an absolute pixel Y before capturing.
     ///     full_page: Capture the full scrollable page (default ``True``).
     ///         Pass ``False`` to capture only the visible viewport. Ignored
-    ///         when ``bbox`` is set.
+    ///         when ``bbox``/``selector_type`` is set.
     #[pyo3(signature = (
         path=None, bbox=None,
+        selector_type=None, selector_value=None, selector_regex=None, selector_name=None,
+        selector_nth=None, selector_x=None, selector_y=None,
         viewport_preset=None, viewport_width=None, viewport_height=None,
         viewport_device_scale_factor=None, viewport_mobile=None,
         scroll_viewports=None, scroll_pixels=None, full_page=None,
@@ -1141,6 +1225,13 @@ impl PyPage {
         py: Python<'py>,
         path: Option<String>,
         bbox: Option<(u32, u32, u32, u32)>,
+        selector_type: Option<String>,
+        selector_value: Option<String>,
+        selector_regex: Option<String>,
+        selector_name: Option<String>,
+        selector_nth: Option<u32>,
+        selector_x: Option<f64>,
+        selector_y: Option<f64>,
         viewport_preset: Option<String>,
         viewport_width: Option<u32>,
         viewport_height: Option<u32>,
@@ -1153,6 +1244,13 @@ impl PyPage {
         let opts = build_screenshot_options(
             path,
             bbox,
+            selector_type.as_deref(),
+            selector_value,
+            selector_regex,
+            selector_name,
+            selector_nth,
+            selector_x,
+            selector_y,
             viewport_preset.as_deref(),
             viewport_width,
             viewport_height,
@@ -2141,6 +2239,8 @@ impl PyPooledTab {
     /// See :meth:`Page.screenshot` for the full argument reference.
     #[pyo3(signature = (
         path=None, bbox=None,
+        selector_type=None, selector_value=None, selector_regex=None, selector_name=None,
+        selector_nth=None, selector_x=None, selector_y=None,
         viewport_preset=None, viewport_width=None, viewport_height=None,
         viewport_device_scale_factor=None, viewport_mobile=None,
         scroll_viewports=None, scroll_pixels=None, full_page=None,
@@ -2151,6 +2251,13 @@ impl PyPooledTab {
         py: Python<'py>,
         path: Option<String>,
         bbox: Option<(u32, u32, u32, u32)>,
+        selector_type: Option<String>,
+        selector_value: Option<String>,
+        selector_regex: Option<String>,
+        selector_name: Option<String>,
+        selector_nth: Option<u32>,
+        selector_x: Option<f64>,
+        selector_y: Option<f64>,
         viewport_preset: Option<String>,
         viewport_width: Option<u32>,
         viewport_height: Option<u32>,
@@ -2163,6 +2270,13 @@ impl PyPooledTab {
         let opts = build_screenshot_options(
             path,
             bbox,
+            selector_type.as_deref(),
+            selector_value,
+            selector_regex,
+            selector_name,
+            selector_nth,
+            selector_x,
+            selector_y,
             viewport_preset.as_deref(),
             viewport_width,
             viewport_height,

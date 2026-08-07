@@ -15,6 +15,7 @@ pub mod pool;
 pub mod profile;
 pub mod response;
 pub mod scanner;
+pub mod selector;
 pub mod session;
 pub mod stealth;
 pub mod viewport;
@@ -51,6 +52,7 @@ pub use response::{
     ResponseBodyState, ResponseCapture, ResponseCaptureLimits,
 };
 pub use scanner::{DEFAULT_MAX_BYTES, ScanConfig, ScanReport, Verdict, scan_bytes, scan_path};
+pub use selector::{SelectorEntry, SelectorKind, SelectorResolution};
 pub use session::{BrowserMode, BrowserSession, BrowserSessionBuilder};
 pub use stealth::StealthConfig;
 pub use viewport::{ScrollTarget, Viewport, all_presets, preset as viewport_preset, preset_names};

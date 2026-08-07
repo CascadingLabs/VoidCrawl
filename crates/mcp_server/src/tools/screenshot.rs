@@ -17,6 +17,7 @@ use crate::{
     server::VoidCrawlServer,
     sessions::DedicatedSession,
     tools::{
+        selector::SelectorArg,
         viewport::{BboxArg, ScrollArg, ViewportArg},
         wait,
     },
@@ -39,17 +40,27 @@ pub struct ScreenshotArgs {
     /// or custom `width`+`height` (+ optional `device_scale_factor`, `mobile`).
     #[serde(default)]
     pub viewport:     Option<ViewportArg>,
-    /// Crop to this CSS-pixel region instead of the full page.
+    /// Crop to this CSS-pixel region instead of the full page. Mutually
+    /// exclusive with `selector`.
     #[serde(default)]
     pub bbox:         Option<BboxArg>,
-    /// Scroll before capturing. Combine with `bbox` to crop a specific
-    /// on-screen region after paging down a fixed viewport.
+    /// Crop to a Yosoi selector's resolved rectangle (any of its 8 kinds —
+    /// css/xpath/regex/jsonld/attr/global_id/role/visual) instead of an
+    /// explicit `bbox`. Mutually exclusive with `bbox`. A selector that
+    /// matches nothing, is ambiguous, or is inherently non-visual
+    /// (`jsonld`/`regex`) fails with `invalid_params` rather than silently
+    /// cropping an arbitrary target — see `SelectorArg` for the field
+    /// reference per kind.
+    #[serde(default)]
+    pub selector:     Option<SelectorArg>,
+    /// Scroll before capturing. Combine with `bbox`/`selector` to crop a
+    /// specific on-screen region after paging down a fixed viewport.
     #[serde(default)]
     pub scroll:       Option<ScrollArg>,
     /// Capture the full scrollable page (default `true`). Set `false` to
     /// capture only what's currently visible in the viewport — cheaper,
     /// and the right choice when you want "what a visitor sees first," not
-    /// the whole scroll history. Ignored when `bbox` is set.
+    /// the whole scroll history. Ignored when `bbox`/`selector` is set.
     #[serde(default)]
     pub full_page:    Option<bool>,
 }
@@ -63,33 +74,50 @@ pub struct SessionScreenshotArgs {
     /// (+ optional `device_scale_factor`, `mobile`).
     #[serde(default)]
     pub viewport:   Option<ViewportArg>,
-    /// Crop to this CSS-pixel region instead of the full page.
+    /// Crop to this CSS-pixel region instead of the full page. Mutually
+    /// exclusive with `selector`.
     #[serde(default)]
     pub bbox:       Option<BboxArg>,
-    /// Scroll before capturing. Combine with `bbox` to crop a specific
-    /// on-screen region after paging down a fixed viewport.
+    /// Crop to a Yosoi selector's resolved rectangle instead of an explicit
+    /// `bbox`. Mutually exclusive with `bbox`. See `ScreenshotArgs.selector`
+    /// / `SelectorArg` for the full field reference per kind.
+    #[serde(default)]
+    pub selector:   Option<SelectorArg>,
+    /// Scroll before capturing. Combine with `bbox`/`selector` to crop a
+    /// specific on-screen region after paging down a fixed viewport.
     #[serde(default)]
     pub scroll:     Option<ScrollArg>,
     /// Capture the full scrollable page (default `true`). Set `false` to
     /// capture only what's currently visible in the viewport — cheaper,
     /// and the right choice when you want "what's on screen right now,"
-    /// not the whole scroll history. Ignored when `bbox` is set.
+    /// not the whole scroll history. Ignored when `bbox`/`selector` is set.
     #[serde(default)]
     pub full_page:  Option<bool>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_options(
     viewport: Option<&ViewportArg>,
     bbox: Option<&BboxArg>,
+    selector: Option<SelectorArg>,
     scroll: Option<&ScrollArg>,
     full_page: Option<bool>,
 ) -> Result<ScreenshotOptions, ErrorData> {
+    if bbox.is_some() && selector.is_some() {
+        return Err(ErrorData::invalid_params(
+            "`bbox` and `selector` are mutually exclusive",
+            None,
+        ));
+    }
     let mut opts = ScreenshotOptions::default();
     if let Some(v) = viewport {
         opts = opts.with_viewport(v.resolve()?);
     }
     if let Some(b) = bbox {
         opts = opts.with_bbox((*b).into());
+    }
+    if let Some(s) = selector {
+        opts = opts.with_selector(s.into());
     }
     if let Some(s) = scroll {
         opts = opts.with_scroll(s.resolve()?);
@@ -107,6 +135,7 @@ pub async fn run(
     let opts = build_options(
         args.viewport.as_ref(),
         args.bbox.as_ref(),
+        args.selector,
         args.scroll.as_ref(),
         args.full_page,
     )?;
@@ -135,6 +164,7 @@ pub async fn session(
     let opts = build_options(
         args.viewport.as_ref(),
         args.bbox.as_ref(),
+        args.selector,
         args.scroll.as_ref(),
         args.full_page,
     )?;
