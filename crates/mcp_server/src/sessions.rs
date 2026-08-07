@@ -10,8 +10,20 @@ use tempfile::TempDir;
 use tokio::sync::{Mutex, RwLock};
 use void_crawl_core::{
     AntibotVerdict, BrowserSession, ChallengeSnapshot, CookieLease, DownloadCapture,
-    ManagedProfileLease, Page, ResolutionOutcome, ResponseCapture,
+    ManagedProfileLease, Page, RecordingHandle, ResolutionOutcome, ResponseCapture,
 };
+
+/// A recording in flight on a session, plus where its artifacts will land.
+///
+/// The output directory is carried here because a finished `Recording`
+/// doesn't report it: with no encodings requested there are no artifact paths
+/// to infer it from, and the frame directories would be reported relative to
+/// nothing.
+#[derive(Debug)]
+pub struct PendingRecording {
+    pub handle:     RecordingHandle,
+    pub output_dir: PathBuf,
+}
 
 pub type SessionId = String;
 
@@ -65,6 +77,11 @@ pub struct DedicatedSession {
     /// A network capture armed via `network_capture_arm`, pending its
     /// `network_capture_wait`.
     pub pending_network_capture: Mutex<Option<PendingNetworkCapture>>,
+    /// A recording started by `session_record_start`, pending its
+    /// `session_record_stop`. Held here rather than on the page because the
+    /// two tool calls are separate requests — the same reason
+    /// `pending_download` lives here.
+    pub pending_recording:       Mutex<Option<PendingRecording>>,
     /// Cookie handoff leases opened on this session, keyed by lease id.
     ///
     /// Owned by the session on purpose: closing or reaping the session drops

@@ -52,6 +52,7 @@ use crate::{
             ProfileDescribeArgs, ProfileListArgs, ProfileListResult, ProfilePoolCreateArgs,
             ProfilePoolDescribeArgs, ProfilePoolListArgs, ProfilePoolListResult,
         },
+        recording::{RecordArgs, SessionRecordStartArgs, SessionRecordStopArgs},
         screenshot::{ScreenshotArgs, SessionScreenshotArgs},
         session::{
             SessionCloseResult, SessionContentResult, SessionIdArgs, SessionNavigateArgs,
@@ -209,6 +210,59 @@ perception; reach for this when you need to see pixels — layout, visual state,
         Parameters(args): Parameters<SessionScreenshotArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         tools::screenshot::session(self, args).await
+    }
+
+    #[tool(
+        name = "record",
+        description = "Load a URL in stealth headless Chrome and record it as a sequence of \
+timestamped frames written to disk. The moving-picture counterpart to `screenshot`, with the same \
+`viewport` / `scroll` / crop options. Frames are NOT returned inline — a recording is hundreds of \
+images — so the response carries the output directory, per-region paths and counts; read a single \
+frame from disk if you need to see one. Differences from `screenshot`: no `full_page` (a recording \
+only ever contains the viewport — use `viewport` for a bigger area or `scroll` to pick which part \
+of a long page), `bbox` is viewport-relative, and `selectors` is a LIST — each entry becomes its \
+own cropped region cut from one recording, resolved to a rectangle once at start and then held \
+fixed (an element that moves drifts out of its crop). Chrome emits frames when it paints, so `fps` \
+is a ceiling, not a floor: a static page yields very few frames and that is expected — check \
+`effective_fps`. Optional `encode` (gif/mp4/webm) needs the matching build feature."
+    )]
+    pub async fn record(
+        &self,
+        Parameters(args): Parameters<RecordArgs>,
+    ) -> Result<Json<tools::recording::RecordResult>, ErrorData> {
+        tools::recording::run(self, args).await.map(Json).map_err(map_err)
+    }
+
+    #[tool(
+        name = "session_record_start",
+        description = "Begin recording an open session's page, then drive it normally — clicks, \
+typing, and navigation all keep recording — and call session_record_stop to finish. Use this \
+instead of `record` whenever the thing worth recording is an interaction rather than a page load. \
+Takes the same crop/viewport/scroll/fps options as `record`; `max_duration_secs` (default 30, max \
+120) is a hard bound after which the recording stops itself, so a forgotten recording can't hold \
+the browser. Only one recording per session at a time. Note that a session's tab shares a browser \
+window, so recording holds that browser's capture lock: screenshots on other tabs of the same \
+browser wait until it stops."
+    )]
+    pub async fn session_record_start(
+        &self,
+        Parameters(args): Parameters<SessionRecordStartArgs>,
+    ) -> Result<Json<tools::recording::SessionRecordStartResult>, ErrorData> {
+        tools::recording::session_start(self, args).await.map(Json).map_err(map_err)
+    }
+
+    #[tool(
+        name = "session_record_stop",
+        description = "Stop the recording started by session_record_start, write the frames and \
+any encoded artifact to disk, and return the output paths plus frame counts. Restores the \
+session's viewport and scroll position. Fails with invalid_params when no recording is running on \
+that session."
+    )]
+    pub async fn session_record_stop(
+        &self,
+        Parameters(args): Parameters<SessionRecordStopArgs>,
+    ) -> Result<Json<tools::recording::RecordResult>, ErrorData> {
+        tools::recording::session_stop(self, args).await.map(Json).map_err(map_err)
     }
 
     #[tool(

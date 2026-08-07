@@ -23,6 +23,9 @@ from voidcrawl._ext import (
     ChromeProfileBusy as ChromeProfileBusy,
 )
 from voidcrawl._ext import (
+    Frame as Frame,
+)
+from voidcrawl._ext import (
     InterruptExpired as InterruptExpired,
 )
 from voidcrawl._ext import (
@@ -57,6 +60,15 @@ from voidcrawl._ext import (
 )
 from voidcrawl._ext import (
     ProfileNotFound as ProfileNotFound,
+)
+from voidcrawl._ext import (
+    RecordedRegion as RecordedRegion,
+)
+from voidcrawl._ext import (
+    Recording as Recording,
+)
+from voidcrawl._ext import (
+    RecordingHandle as RecordingHandle,
 )
 from voidcrawl._ext import (
     ResponseExpectation as ResponseExpectation,
@@ -138,6 +150,7 @@ __all__ = [
     "CaptchaDetected",
     "CapturedResponse",
     "ChromeProfileBusy",
+    "Frame",
     "InterruptExpired",
     "InterruptNotFound",
     "InterruptRef",
@@ -157,6 +170,9 @@ __all__ = [
     "ProfileLeaseExpired",
     "ProfileNotFound",
     "ProfileRegistry",
+    "RecordedRegion",
+    "Recording",
+    "RecordingHandle",
     "ResponseExpectation",
     "ResponseTimeoutError",
     "ScaleProfile",
@@ -267,6 +283,7 @@ class BrowserSession:
         self, exc_type: object, exc_val: object, exc_tb: object
     ) -> bool: ...
     async def new_page(self, url: str | None = None) -> Page: ...
+    async def new_page_in_window(self, url: str) -> Page: ...
     def page(self, url: str | None = None) -> _PageContext: ...
     async def attach_page(self, target_id: str) -> Page: ...
     async def interrupt(

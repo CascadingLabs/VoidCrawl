@@ -19,6 +19,13 @@ use pyo3::{
     types::{PyBytes, PyDict, PyList, PyType},
 };
 use pyo3_async_runtimes::tokio::future_into_py;
+
+mod recording;
+
+use recording::{
+    PyFrame, PyRecordedRegion, PyRecording, PyRecordingHandle, build_recording_options,
+    into_py_recording,
+};
 use serde_json::Value;
 use tokio::{sync::Mutex, task::spawn_blocking};
 use void_crawl_core::{
@@ -57,7 +64,7 @@ pyo3::create_exception!(voidcrawl._ext, InterruptNotFound, VoidCrawlError);
 /// This is the raw substrate: the pydantic `Viewport` model in
 /// `voidcrawl/__init__.py` is where a Python caller gets enum-style
 /// validation before a call ever reaches here.
-fn resolve_viewport_args(
+pub(crate) fn resolve_viewport_args(
     preset: Option<&str>,
     width: Option<u32>,
     height: Option<u32>,
@@ -94,7 +101,7 @@ fn resolve_viewport_args(
 /// the raw substrate and does no validation beyond parsing `selector_type`;
 /// build a validated model on the Python side if you want enum/mutual-
 /// exclusivity checking before it crosses into Rust.
-fn resolve_selector_args(
+pub(crate) fn resolve_selector_args(
     kind: Option<&str>,
     value: Option<String>,
     regex: Option<String>,
@@ -195,7 +202,7 @@ fn build_screenshot_options(
 }
 
 #[allow(clippy::needless_pass_by_value)] // used as fn pointer in map_err(to_py_err)
-fn to_py_err(e: void_crawl_core::VoidCrawlError) -> PyErr {
+pub(crate) fn to_py_err(e: void_crawl_core::VoidCrawlError) -> PyErr {
     match e {
         void_crawl_core::VoidCrawlError::NavigationTimeout {
             ref url,
@@ -1324,6 +1331,187 @@ impl PyPage {
         })
     }
 
+    /// Record this page for ``duration_secs`` and return a
+    /// :class:`Recording`.
+    ///
+    /// The moving-picture counterpart to :meth:`screenshot`, with the same
+    /// ``viewport_*`` / ``scroll_*`` / ``bbox`` kwargs. Two differences,
+    /// both forced by CDP's screencast:
+    ///
+    /// * No ``full_page`` — a screencast only ever contains the viewport. Use
+    ///   ``viewport_*`` for a bigger visible area, or ``scroll_*`` to choose
+    ///   which part of a long page is on screen.
+    /// * ``selectors`` is a **list**: each entry becomes its own cropped region
+    ///   in ``recording.regions``, all cut from one screencast. Each is
+    ///   resolved to a rectangle once, at start, then held fixed.
+    ///
+    /// Frames arrive when Chrome paints, not on a clock, so ``fps`` is a
+    /// ceiling rather than a guarantee and a static page yields very few
+    /// frames. Every frame carries its real ``offset_ms``.
+    ///
+    /// Args:
+    ///     duration_secs: How long to record (default 30).
+    ///     selectors: List of Yosoi ``SelectorEntry``-shaped dicts to crop
+    ///         to, one region each. Mutually exclusive with ``bbox``.
+    ///     bbox: ``(x, y, width, height)`` in CSS pixels, **viewport
+    ///         relative** (unlike :meth:`screenshot`'s page-relative bbox,
+    ///         since a screencast frame only contains the viewport).
+    ///     fps: Frame-rate ceiling (default 10).
+    ///     frame_format: ``"jpeg"`` (default) or ``"png"``.
+    ///     quality: JPEG quality 1-100 (default 80).
+    ///     output_dir: Directory for encoded artifacts and, with
+    ///         ``write_frames=True``, the frames themselves.
+    ///     encode: List of ``"gif"`` / ``"mp4"`` / ``"webm"``. Requires
+    ///         ``output_dir``, and the matching cargo feature at build time —
+    ///         otherwise this raises rather than silently producing
+    ///         nothing. The frames are always available regardless.
+    ///     foreground: Force whether to pin the tab to the foreground and
+    ///         hold the browser-wide capture lock. Leave unset to detect it:
+    ///         a tab sharing its window must be foregrounded to paint at
+    ///         all, while a tab alone in its window records at full rate
+    ///         concurrently with everything else.
+    ///     max_frames: In-memory frame cap (default 900).
+    #[pyo3(signature = (duration_secs=None, selectors=None, bbox=None, viewport_preset=None,
+        viewport_width=None, viewport_height=None, viewport_device_scale_factor=None,
+        viewport_mobile=None, scroll_viewports=None, scroll_pixels=None, fps=None,
+        max_frames=None, frame_format=None, quality=None, output_dir=None, write_frames=None,
+        foreground=None, encode=None))]
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+    fn record<'py>(
+        &self,
+        py: Python<'py>,
+        duration_secs: Option<f64>,
+        selectors: Option<Vec<Py<PyAny>>>,
+        bbox: Option<(u32, u32, u32, u32)>,
+        viewport_preset: Option<String>,
+        viewport_width: Option<u32>,
+        viewport_height: Option<u32>,
+        viewport_device_scale_factor: Option<f64>,
+        viewport_mobile: Option<bool>,
+        scroll_viewports: Option<f64>,
+        scroll_pixels: Option<i64>,
+        fps: Option<u8>,
+        max_frames: Option<usize>,
+        frame_format: Option<String>,
+        quality: Option<u8>,
+        output_dir: Option<String>,
+        write_frames: Option<bool>,
+        foreground: Option<bool>,
+        encode: Option<Vec<String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = build_recording_options(
+            output_dir,
+            bbox,
+            selectors,
+            viewport_preset.as_deref(),
+            viewport_width,
+            viewport_height,
+            viewport_device_scale_factor,
+            viewport_mobile,
+            scroll_viewports,
+            scroll_pixels,
+            fps,
+            duration_secs,
+            max_frames,
+            frame_format.as_deref(),
+            quality,
+            write_frames,
+            foreground,
+            encode,
+            py,
+        )?;
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let page = inner
+                .lock()
+                .await
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
+            let recording = page.record(opts).await.map_err(to_py_err)?;
+            Python::attach(|py| into_py_recording(py, recording))
+        })
+    }
+
+    /// Begin recording and return a :class:`RecordingHandle` to stop it.
+    ///
+    /// Use this instead of :meth:`record` when you need to *drive* the page
+    /// while it records — click, type, navigate, then ``await
+    /// handle.stop()``. Takes the same kwargs as :meth:`record`, where
+    /// ``duration_secs`` becomes a hard upper bound rather than the exact
+    /// length.
+    #[pyo3(signature = (duration_secs=None, selectors=None, bbox=None, viewport_preset=None,
+        viewport_width=None, viewport_height=None, viewport_device_scale_factor=None,
+        viewport_mobile=None, scroll_viewports=None, scroll_pixels=None, fps=None,
+        max_frames=None, frame_format=None, quality=None, output_dir=None, write_frames=None,
+        foreground=None, encode=None))]
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+    fn start_recording<'py>(
+        &self,
+        py: Python<'py>,
+        duration_secs: Option<f64>,
+        selectors: Option<Vec<Py<PyAny>>>,
+        bbox: Option<(u32, u32, u32, u32)>,
+        viewport_preset: Option<String>,
+        viewport_width: Option<u32>,
+        viewport_height: Option<u32>,
+        viewport_device_scale_factor: Option<f64>,
+        viewport_mobile: Option<bool>,
+        scroll_viewports: Option<f64>,
+        scroll_pixels: Option<i64>,
+        fps: Option<u8>,
+        max_frames: Option<usize>,
+        frame_format: Option<String>,
+        quality: Option<u8>,
+        output_dir: Option<String>,
+        write_frames: Option<bool>,
+        foreground: Option<bool>,
+        encode: Option<Vec<String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = build_recording_options(
+            output_dir,
+            bbox,
+            selectors,
+            viewport_preset.as_deref(),
+            viewport_width,
+            viewport_height,
+            viewport_device_scale_factor,
+            viewport_mobile,
+            scroll_viewports,
+            scroll_pixels,
+            fps,
+            duration_secs,
+            max_frames,
+            frame_format.as_deref(),
+            quality,
+            write_frames,
+            foreground,
+            encode,
+            py,
+        )?;
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let page = inner
+                .lock()
+                .await
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
+            let handle = page.start_recording(opts).await.map_err(to_py_err)?;
+            Ok(PyRecordingHandle::new(handle, page))
+        })
+    }
+
+    /// Whether this tab is the only one in its browser window.
+    ///
+    /// Chrome composites only a window's frontmost tab, so a page sharing
+    /// its window can't paint while a sibling is active. A page alone in its
+    /// window keeps painting regardless — which is what lets :meth:`record`
+    /// run concurrently without holding the browser's capture lock.
+    fn alone_in_window<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        with_page_map!(self, py, |page| page.alone_in_window(), |v| v)
+    }
+
     /// Persistently override this page's CDP viewport — dimensions, DPR,
     /// mobile/touch identity, and (for a preset) a matching UA. Stays in
     /// effect across subsequent navigate/click/screenshot calls until
@@ -2032,6 +2220,31 @@ impl PyBrowserSession {
                 None => session.new_blank_page().await,
             }
             .map_err(to_py_err)?;
+            Ok(PyPage::new(page))
+        })
+    }
+
+    /// Open a new tab in its **own browser window** and navigate to ``url``.
+    ///
+    /// Chrome composites only the frontmost tab of a window, so tabs from
+    /// :meth:`new_page` — which share one window — can't all paint at once.
+    /// A tab alone in its window keeps painting whatever other windows do,
+    /// which is what lets :meth:`Page.record` run concurrently instead of
+    /// holding the browser's capture lock.
+    ///
+    /// Costs a real window's worth of resources, so it's opt-in. Note that a
+    /// later :meth:`new_page` targets the most recently active window and can
+    /// land inside this one — create recording windows last, or check
+    /// :meth:`Page.alone_in_window`.
+    fn new_page_in_window<'py>(&self, py: Python<'py>, url: String) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let session = inner.lock().await.as_ref().cloned().ok_or_else(|| {
+                PyRuntimeError::new_err(
+                    "browser not launched — use `async with` or call launch() first",
+                )
+            })?;
+            let page = session.new_page_in_window(&url).await.map_err(to_py_err)?;
             Ok(PyPage::new(page))
         })
     }
@@ -3842,6 +4055,10 @@ fn _ext(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyProfileHandle>()?;
     m.add_class::<PyManagedProfileSnapshot>()?;
     m.add_class::<PyManagedProfileSplit>()?;
+    m.add_class::<PyRecording>()?;
+    m.add_class::<PyRecordedRegion>()?;
+    m.add_class::<PyFrame>()?;
+    m.add_class::<PyRecordingHandle>()?;
     m.add_function(wrap_pyfunction!(py_list_profiles, m)?)?;
     m.add_function(wrap_pyfunction!(py_acquire_profile, m)?)?;
     m.add_function(wrap_pyfunction!(py_profile_registry_root, m)?)?;

@@ -170,6 +170,7 @@ pub async fn open(
         challenge: Mutex::new(None),
         pending_download: Mutex::new(None),
         pending_network_capture: Mutex::new(None),
+        pending_recording: Mutex::new(None),
         cookie_leases: Mutex::new(HashMap::new()),
     });
     server.state().sessions.insert(id.clone(), handle).await;

@@ -35,6 +35,18 @@ pub enum VoidCrawlError {
     #[error("pdf generation failed: {0}")]
     PdfError(String),
 
+    /// A screencast recording failed to start, collect, or post-process.
+    /// Distinct from [`VoidCrawlError::ScreenshotError`] because a recording
+    /// spans time: it can fail after frames have already been collected.
+    #[error("recording failed: {0}")]
+    RecordingError(String),
+
+    /// Frames were collected but encoding them to a video/animation failed —
+    /// e.g. the `encode-ffmpeg` feature is on but no `ffmpeg` binary is on
+    /// PATH. The frames themselves survive on the returned [`Recording`].
+    #[error("recording encode failed: {0}")]
+    RecordingEncodeError(String),
+
     #[error("element not found: {0}")]
     ElementNotFound(String),
 
