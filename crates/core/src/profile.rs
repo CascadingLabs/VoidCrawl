@@ -19,6 +19,7 @@ use fd_lock::{RwLock as FileLock, RwLockWriteGuard};
 use tokio::time::{Instant, sleep};
 
 use crate::{
+    deadline::saturating_deadline,
     error::{Result, VoidCrawlError},
     lease::{read_metadata, write_metadata},
     session::{BrowserSession, BrowserSessionBuilder},
@@ -212,7 +213,7 @@ pub async fn acquire_profile_in(
     let lock_box: Box<FileLock<File>> = Box::new(FileLock::new(file));
     let lock_ptr = SendPtr(Box::leak(lock_box));
 
-    let deadline = Instant::now() + lease_timeout;
+    let deadline = saturating_deadline(lease_timeout);
     let guard: RwLockWriteGuard<'static, File> = loop {
         // SAFETY: `lock_ptr.0` points to a `Box::leak`'d, `'static` allocation
         // that no one else holds. We create a unique `&'static mut` at most

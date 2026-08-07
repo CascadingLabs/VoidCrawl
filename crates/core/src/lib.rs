@@ -6,6 +6,7 @@ pub mod antibot;
 pub mod ax;
 pub mod captcha;
 pub mod challenge;
+pub mod deadline;
 pub mod error;
 pub mod input;
 mod lease;
@@ -31,6 +32,7 @@ pub use chromiumoxide::cdp::browser_protocol::{
     input::{DispatchKeyEventType, DispatchMouseEventType, MouseButton},
     network::{Cookie, CookieParam, DeleteCookiesParams},
 };
+pub use deadline::saturating_deadline;
 pub use error::{Result, VoidCrawlError};
 pub use managed_profile::{
     MAX_PROFILE_SPLIT_COPIES, ManagedProfile, ManagedProfileDescription, ManagedProfileLease,

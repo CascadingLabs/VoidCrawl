@@ -479,7 +479,15 @@ fn wrap_pair(k1: &str, v1: Value, k2: &str, v2: Value) -> Value {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "test harness")]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::as_conversions,
+        reason = "test harness"
+    )]
 
     use clap::Parser;
 

@@ -14,12 +14,23 @@ static_mut_refs = "deny"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
-# Correctness & Safety
+# `nursery` lints are unstable and known to churn/false-positive across clippy
+# releases; not denying it repo-wide to avoid tying CI green to compiler
+# version. Revisit if a specific nursery lint proves valuable.
+# Correctness & Safety — anti-panic (CAS-245)
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
-todo = "warn"
-unimplemented = "warn"
+panic_in_result_fn = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+exit = "deny"
+unchecked_time_subtraction = "deny"
+string_slice = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+as_conversions = "deny"
 # Clean imports & structure
 absolute_paths = "deny"
 cognitive_complexity = "warn"

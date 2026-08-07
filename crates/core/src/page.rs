@@ -50,6 +50,7 @@ use tokio::time;
 use crate::{
     antibot::{self, AntibotVerdict},
     ax::compact_outline,
+    deadline::saturating_deadline,
     error::{Result, VoidCrawlError},
     input::{HumanizeOptions, Rng, humanized_path},
     response::{ResponseCapture, ResponseCaptureLimits},
@@ -279,6 +280,32 @@ fn finalize_endpoints(seen: &HashSet<String>, capture: bool) -> Option<Vec<Strin
     let mut v: Vec<String> = seen.iter().cloned().collect();
     v.sort();
     Some(v)
+}
+
+/// CDP's box-model content quad is 4 `(x, y)` corners, clockwise from
+/// top-left: `[x0,y0, x1,y1, x2,y2, x3,y3]`.
+fn quad8(q: &[f64]) -> Result<[f64; 8]> {
+    <[f64; 8]>::try_from(q).map_err(|_| {
+        VoidCrawlError::PageError("box-model content quad must have 8 coordinates".into())
+    })
+}
+
+/// The quad's centre point, e.g. for a trusted click.
+fn quad_center(q: &[f64]) -> Result<(f64, f64)> {
+    let [x0, y0, x1, y1, x2, y2, x3, y3] = quad8(q)?;
+    Ok(((x0 + x1 + x2 + x3) / 4.0, (y0 + y1 + y2 + y3) / 4.0))
+}
+
+/// The quad's axis-aligned bounding box as `(left, top, right, bottom)`.
+fn quad_bbox(q: &[f64]) -> Result<(f64, f64, f64, f64)> {
+    let [x0, y0, x1, y1, x2, y2, x3, y3] = quad8(q)?;
+    let xs = [x0, x1, x2, x3];
+    let ys = [y0, y1, y2, y3];
+    let left = xs.iter().copied().fold(f64::INFINITY, f64::min);
+    let top = ys.iter().copied().fold(f64::INFINITY, f64::min);
+    let right = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let bottom = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    Ok((left, top, right, bottom))
 }
 
 /// Flatten CDP's `Network.Response.headers` (a JSON object of name → string
@@ -646,11 +673,15 @@ impl Page {
                         if event.r#type == ResourceType::Document {
                             // status is i64 from the CDP spec; real HTTP codes
                             // fit in u16, so the lossy truncation is intentional.
-                            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                            #[allow(
+                                clippy::cast_possible_truncation,
+                                clippy::cast_sign_loss,
+                                clippy::as_conversions
+                            )]
                             let code = event.response.status as u16;
                             if (300..400).contains(&code) {
                                 // Redirect in the navigation chain.
-                                redirect_count += 1;
+                                redirect_count = redirect_count.saturating_add(1);
                             } else if code != 0 {
                                 // Chrome emits 0 for cancelled/intercepted
                                 // requests — treat as "no network response".
@@ -988,7 +1019,10 @@ impl Page {
     pub async fn screenshot_png(&self) -> Result<Vec<u8>> {
         match self.screenshot(ScreenshotOptions::default()).await? {
             ScreenshotOutput::Bytes(b) => Ok(b),
-            ScreenshotOutput::Path(_) => unreachable!("no path supplied"),
+            ScreenshotOutput::Path(p) => Err(VoidCrawlError::ScreenshotError(format!(
+                "expected in-memory bytes with no path option, got path {}",
+                p.display()
+            ))),
         }
     }
 
@@ -1154,7 +1188,7 @@ impl Page {
         self.evaluate_js(&js).await?;
 
         const POLL: Duration = Duration::from_millis(200);
-        let deadline = time::Instant::now() + timeout;
+        let deadline = saturating_deadline(timeout);
         let mut settle = SettleTracker::new();
         let mut content_type: Option<String> = None;
         let mut done = false;
@@ -1328,14 +1362,7 @@ impl Page {
                 })
                 .await
                 .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
-            let q = bm.result.model.content.inner();
-            if q.len() < 8 {
-                return Err(VoidCrawlError::PageError(
-                    "element has no box-model content quad".into(),
-                ));
-            }
-            let cx = (q[0] + q[2] + q[4] + q[6]) / 4.0;
-            let cy = (q[1] + q[3] + q[5] + q[7]) / 4.0;
+            let (cx, cy) = quad_center(bm.result.model.content.inner())?;
             return self.click_xy(cx, cy, true).await;
         }
 
@@ -1417,8 +1444,7 @@ impl Page {
         humanize: bool,
     ) -> Result<()> {
         let q = self.ax_content_quad_in_frame(frame_url_pattern, role, name, nth).await?;
-        let cx = (q[0] + q[2] + q[4] + q[6]) / 4.0;
-        let cy = (q[1] + q[3] + q[5] + q[7]) / 4.0;
+        let (cx, cy) = quad_center(&q)?;
         // Trusted compositor click (optionally humanized approach).
         self.click_xy(cx, cy, humanize).await
     }
@@ -1443,12 +1469,7 @@ impl Page {
         nth: usize,
     ) -> Result<Vec<f64>> {
         let q = self.ax_content_quad_in_frame(frame_url_pattern, role, name, nth).await?;
-        let xs = [q[0], q[2], q[4], q[6]];
-        let ys = [q[1], q[3], q[5], q[7]];
-        let left = xs.iter().copied().fold(f64::INFINITY, f64::min);
-        let top = ys.iter().copied().fold(f64::INFINITY, f64::min);
-        let right = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let bottom = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let (left, top, right, bottom) = quad_bbox(&q)?;
         Ok(vec![left, top, right - left, bottom - top])
     }
 
@@ -2000,7 +2021,7 @@ impl SettleTracker {
         };
 
         if self.prev.as_ref().is_some_and(|(p, s)| *p == path && *s == size) {
-            self.stable += 1;
+            self.stable = self.stable.saturating_add(1);
         } else {
             self.prev = Some((path.clone(), size));
             self.stable = 1;
@@ -2027,7 +2048,7 @@ async fn wait_for_new_download(
     timeout: Duration,
 ) -> Result<DownloadOutcome> {
     const POLL: Duration = Duration::from_millis(250);
-    let deadline = time::Instant::now() + timeout;
+    let deadline = saturating_deadline(timeout);
     let mut settle = SettleTracker::new();
 
     loop {
@@ -2132,7 +2153,15 @@ fn client_hints_for_ua(ua: &str) -> (String, Option<UserAgentMetadata>) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "test harness")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "test harness"
+)]
 mod download_tests {
     use std::{fs, path::Path};
 
@@ -2204,7 +2233,14 @@ mod download_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, reason = "test harness")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "test harness"
+)]
 mod tests {
     use std::collections::HashSet;
 

@@ -4,7 +4,12 @@
 //! here are load-bearing. If rmcp ever renames them, this test fails
 //! loud before anything ships.
 
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::absolute_paths)]
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::absolute_paths,
+    clippy::indexing_slicing
+)]
 
 use serde_json::Value;
 use void_crawl_core::VoidCrawlError;

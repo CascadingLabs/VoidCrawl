@@ -182,7 +182,7 @@ pub async fn run_many(server: &VoidCrawlServer, args: FetchManyArgs) -> FetchMan
         .map(|(waited, r)| {
             max_waited_ms = max_waited_ms.max(waited);
             if waited > QUEUE_WAIT_THRESHOLD_MS {
-                queued += 1;
+                queued = queued.saturating_add(1);
             }
             match r {
                 Ok(result) => FetchManyItem { ok: true, result: Some(result), error: None },

@@ -229,10 +229,10 @@ fn apply_budget(
     let max_chars = requested_max_chars.unwrap_or(DEFAULT_MAX_CHARS).min(HARD_MAX_CHARS);
     let total = normalize_totals(&raw);
     let total_chars = chars_headings(&raw.headings)
-        + chars_text_blocks(&raw.text_blocks)
-        + chars_links(&raw.links)
-        + chars_controls(&raw.controls)
-        + chars_forms(&raw.forms);
+        .saturating_add(chars_text_blocks(&raw.text_blocks))
+        .saturating_add(chars_links(&raw.links))
+        .saturating_add(chars_controls(&raw.controls))
+        .saturating_add(chars_forms(&raw.forms));
 
     let mut returned_chars = 0usize;
     let headings = take_entries(raw.headings, max_chars, &mut returned_chars, heading_chars);
@@ -306,10 +306,10 @@ fn take_entries<T>(
     let mut kept = Vec::new();
     for entry in entries {
         let entry_chars = chars(&entry);
-        if *returned_chars + entry_chars > max_chars {
+        if returned_chars.saturating_add(entry_chars) > max_chars {
             break;
         }
-        *returned_chars += entry_chars;
+        *returned_chars = returned_chars.saturating_add(entry_chars);
         kept.push(entry);
     }
     kept
@@ -324,28 +324,30 @@ fn opt_chars(s: Option<&String>) -> usize {
 }
 
 fn heading_chars(h: &HeadingSnapshot) -> usize {
-    chars(&h.text) + 2
+    chars(&h.text).saturating_add(2)
 }
 
 fn text_block_chars(t: &TextBlockSnapshot) -> usize {
-    chars(&t.tag) + chars(&t.text)
+    chars(&t.tag).saturating_add(chars(&t.text))
 }
 
 fn link_chars(l: &LinkSnapshot) -> usize {
-    chars(&l.text) + chars(&l.href)
+    chars(&l.text).saturating_add(chars(&l.href))
 }
 
 fn control_chars(c: &ControlSnapshot) -> usize {
     chars(&c.tag)
-        + opt_chars(c.r#type.as_ref())
-        + opt_chars(c.role.as_ref())
-        + opt_chars(c.name.as_ref())
-        + opt_chars(c.placeholder.as_ref())
-        + usize::from(c.disabled)
+        .saturating_add(opt_chars(c.r#type.as_ref()))
+        .saturating_add(opt_chars(c.role.as_ref()))
+        .saturating_add(opt_chars(c.name.as_ref()))
+        .saturating_add(opt_chars(c.placeholder.as_ref()))
+        .saturating_add(usize::from(c.disabled))
 }
 
 fn form_chars(f: &FormSnapshot) -> usize {
-    opt_chars(f.action.as_ref()) + opt_chars(f.method.as_ref()) + chars_controls(&f.controls)
+    opt_chars(f.action.as_ref())
+        .saturating_add(opt_chars(f.method.as_ref()))
+        .saturating_add(chars_controls(&f.controls))
 }
 
 fn chars_headings(v: &[HeadingSnapshot]) -> usize {

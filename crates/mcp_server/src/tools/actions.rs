@@ -690,7 +690,7 @@ pub async fn solve_captcha(
         })()
     "#;
     let wait_for = Duration::from_secs(args.wait_secs.unwrap_or(20));
-    let deadline = Instant::now() + wait_for;
+    let deadline = void_crawl_core::saturating_deadline(wait_for);
     let mut token: Option<String> = None;
     let mut solved = false;
     while Instant::now() < deadline {

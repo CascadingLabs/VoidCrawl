@@ -666,6 +666,12 @@ async fn resolve_ws_url(url: &str) -> Result<String> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "test harness"
+)]
 mod tests {
     use super::{DEFAULT_CHROME_ARGS, assemble_chrome_args};
 

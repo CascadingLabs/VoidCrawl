@@ -340,7 +340,7 @@ pub async fn wait_for_resolution(
         ErrorData::invalid_params(format!("unknown session_id: {}", args.session_id), None)
     })?;
     let timeout = Duration::from_secs(args.timeout_secs.unwrap_or(300));
-    let deadline = Instant::now() + timeout;
+    let deadline = void_crawl_core::saturating_deadline(timeout);
     loop {
         let outcome = {
             let guard = handle.challenge.lock().await;

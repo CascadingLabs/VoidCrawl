@@ -67,7 +67,7 @@ fn walk(id: &str, depth: usize, by_id: &HashMap<&str, &Value>, out: &mut String)
             let _ = write!(out, "{role} {name:?}");
         }
         out.push('\n');
-        depth + 1
+        depth.saturating_add(1)
     } else {
         depth
     };

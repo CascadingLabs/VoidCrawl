@@ -1,7 +1,14 @@
 //! Integration tests for `void_crawl_core`.
 //!
 //! These tests require a real Chromium/Chrome binary to be available.
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::absolute_paths)]
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::absolute_paths,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions
+)]
 
 use std::{collections::HashMap, time::Duration};
 

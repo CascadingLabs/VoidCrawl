@@ -1,0 +1,17 @@
+{
+  "version": "voidcrawl.browser-substrate.v1",
+  "provider": "kernel-images/chromium-headful",
+  "status": "ready",
+  "container": "voidcrawl-kernel-browser",
+  "image": "voidcrawl-kernel-chromium-headful:local",
+  "kernel_images_ref": "main",
+  "handoff_url": "http://127.0.0.1:3069",
+  "remote_browser_url": "http://127.0.0.1:3069",
+  "cdp_version_url": "http://127.0.0.1:19222/json/version",
+  "websocket_url": "ws://127.0.0.1:19222/devtools/browser/b8206b53-528b-4b8c-ad41-976b3787d3ed",
+  "playwright_url": "http://127.0.0.1:19224",
+  "recording_api_url": "http://127.0.0.1:3060",
+  "profile_dir": "/home/andrew/Desktop/cl/VoidCrawl/.kernel/runtime/profile",
+  "recordings_dir": "/home/andrew/Desktop/cl/VoidCrawl/.kernel/runtime/recordings",
+  "flags_file": "/home/andrew/Desktop/cl/VoidCrawl/.kernel/runtime/chromium/flags.json"
+}

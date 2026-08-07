@@ -347,7 +347,7 @@ fn bounded_response(
     let keep = body.len().min(limits.max_response_bytes).min(remaining);
     let truncated = keep < body.len();
     body.truncate(keep);
-    *retained += keep;
+    *retained = retained.saturating_add(keep);
     CapturedResponse {
         url:                 meta.url,
         status:              meta.status,

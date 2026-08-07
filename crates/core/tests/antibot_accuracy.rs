@@ -7,6 +7,7 @@
 //! shapes rather than overfitting to one live target.
 //!
 //! Run: `cargo test -p void_crawl_core --test antibot_accuracy -- --nocapture`
+#![allow(clippy::as_conversions, reason = "test harness: usize -> f64 for precision/recall math")]
 
 use void_crawl_core::classify_antibot;
 

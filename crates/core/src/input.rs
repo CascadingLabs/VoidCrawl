@@ -68,6 +68,7 @@ impl Rng {
     }
 
     /// Uniform in `[0, 1)`.
+    #[allow(clippy::as_conversions)] // u64 -> f64: no lossless `From`, value fits the 53-bit mantissa by construction
     fn unit(&mut self) -> f64 {
         // 53-bit mantissa for an even distribution.
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
@@ -91,6 +92,9 @@ fn min_jerk(t: f64) -> f64 {
 /// the **last of which lands exactly on `end`**, optionally followed by a dwell
 /// step (same coords, `dwell_ms`). Total of all `delay_ms` is bounded by
 /// `opts.max_duration_ms` (+ the dwell).
+// float<->int casts below are all bounds-checked or Rust's saturating `as`
+// semantics apply — timing/pixel math, not a panic source.
+#[allow(clippy::as_conversions)]
 #[must_use]
 pub fn humanized_path(
     start: (f64, f64),
@@ -112,7 +116,7 @@ pub fn humanized_path(
     let (nx, ny) = if dist > 1e-6 { (-dy / dist, dx / dist) } else { (0.0, 0.0) };
     let bow = rng.range(-opts.curve, opts.curve);
 
-    let mut out = Vec::with_capacity(steps + 1);
+    let mut out = Vec::with_capacity(steps.saturating_add(1));
     let mut prev_e = 0.0_f64;
     for i in 1..=steps {
         let t = i as f64 / steps as f64;
@@ -145,6 +149,8 @@ pub fn humanized_path(
 }
 
 #[cfg(test)]
+// Panicking on a bad index/slice/cast IS the test failure mode here.
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects, clippy::as_conversions)]
 mod tests {
     use super::*;
 

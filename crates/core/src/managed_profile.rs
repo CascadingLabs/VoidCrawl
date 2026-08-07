@@ -363,11 +363,7 @@ impl ProfileRegistry {
             manifest.profiles.remove(id);
             for pool in manifest.pools.values_mut() {
                 pool.profile_ids.retain(|profile_id| profile_id != id);
-                if pool.profile_ids.is_empty() {
-                    pool.next_index = 0;
-                } else {
-                    pool.next_index %= pool.profile_ids.len();
-                }
+                pool.next_index = pool.next_index.checked_rem(pool.profile_ids.len()).unwrap_or(0);
             }
             Ok(true)
         })
@@ -452,11 +448,16 @@ impl ProfileRegistry {
             }
 
             let active_cap = pool.max_active.max(1).min(pool.profile_ids.len());
-            let start = if pool.round_robin { pool.next_index % pool.profile_ids.len() } else { 0 };
+            let pool_len = pool.profile_ids.len();
+            let start = if pool.round_robin {
+                pool.next_index.checked_rem(pool_len).unwrap_or(0)
+            } else {
+                0
+            };
             let mut last_busy: Option<String> = None;
             for offset in 0..active_cap {
-                let index = (start + offset) % pool.profile_ids.len();
-                let id = pool.profile_ids[index].clone();
+                let index = start.wrapping_add(offset).checked_rem(pool_len).unwrap_or(0);
+                let Some(id) = pool.profile_ids.get(index).cloned() else { continue };
                 let profile = manifest.profiles.get_mut(&id).ok_or_else(|| {
                     VoidCrawlError::ProfileNotFound {
                         name:     id.clone(),
@@ -465,7 +466,7 @@ impl ProfileRegistry {
                 })?;
                 match acquire_profile_lock(&profile.id, &profile.path) {
                     Ok(lease) => {
-                        pool.next_index = (index + 1) % pool.profile_ids.len();
+                        pool.next_index = index.wrapping_add(1).checked_rem(pool_len).unwrap_or(0);
                         profile.last_used_at = Some(now_epoch_secs());
                         return Ok(lease);
                     }
@@ -678,7 +679,7 @@ fn lock_status(path: &Path) -> Result<ProfileStatus> {
 }
 
 fn dir_size(path: &Path) -> Result<u64> {
-    let mut total = 0;
+    let mut total: u64 = 0;
     let entries = fs::read_dir(path)
         .map_err(|e| VoidCrawlError::Other(format!("read_dir {}: {e}", path.display())))?;
     for entry in entries {
@@ -688,9 +689,9 @@ fn dir_size(path: &Path) -> Result<u64> {
             .metadata()
             .map_err(|e| VoidCrawlError::Other(format!("metadata {}: {e}", path.display())))?;
         if metadata.is_dir() {
-            total += dir_size(&path)?;
+            total = total.saturating_add(dir_size(&path)?);
         } else {
-            total += metadata.len();
+            total = total.saturating_add(metadata.len());
         }
     }
     Ok(total)

@@ -1,4 +1,12 @@
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::missing_panics_doc, clippy::panic)]
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::missing_panics_doc,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions
+)]
 
 use std::{
     fs::{self, OpenOptions},

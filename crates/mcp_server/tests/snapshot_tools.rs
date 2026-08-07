@@ -1,4 +1,12 @@
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic, reason = "test harness")]
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "test harness"
+)]
 
 //! Integration tests for compact page snapshot MCP tools.
 //!

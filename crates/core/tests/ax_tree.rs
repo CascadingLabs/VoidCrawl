@@ -3,7 +3,13 @@
 //! Require a real Chromium/Chrome binary. Run serially:
 //!
 //!     cargo test -p void_crawl_core --test ax_tree -- --test-threads=1
-#![allow(clippy::expect_used, clippy::unwrap_used)]
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions
+)]
 
 use serde_json::Value;
 use void_crawl_core::{BrowserSession, Page};

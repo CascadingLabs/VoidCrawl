@@ -195,7 +195,7 @@ fn flatten(s: &str) -> String {
 /// Normalize a status line + headers into the `S:`/`H:` form signals match
 /// against. Header names and values are lowercased and joined `name: value`.
 fn normalize_head(status: u16, headers: &[(String, String)]) -> String {
-    let mut out = String::with_capacity(64 + headers.len() * 48);
+    let mut out = String::with_capacity(64_usize.saturating_add(headers.len().saturating_mul(48)));
     out.push_str("S:");
     out.push_str(&status.to_string());
     for (name, value) in headers {
@@ -249,11 +249,10 @@ pub fn classify(status: u16, headers: &[(String, String)], body: &str) -> Antibo
 
     // Otherwise fall back to the body prefix for 200-cloaking challenges and
     // body-only presence tells.
-    let prefix_end =
-        body.char_indices().map(|(i, _)| i).nth(BODY_PREFIX_LIMIT).unwrap_or(body.len());
+    let prefix: String = body.chars().take(BODY_PREFIX_LIMIT).collect();
     let mut full = head;
     full.push_str("\nB:");
-    full.push_str(&flatten(&body[..prefix_end].to_lowercase()));
+    full.push_str(&flatten(&prefix.to_lowercase()));
     let (vendors, challenge_vendor) = scan(&full);
 
     if vendors.is_empty() {

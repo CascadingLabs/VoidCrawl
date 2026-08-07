@@ -153,7 +153,7 @@ impl BrowserPool {
     /// [`acquire()`](Self::acquire) or optionally pre-created via
     /// [`warmup()`](Self::warmup).
     pub fn new(config: PoolConfig, sessions: Vec<BrowserSession>) -> Self {
-        let total_tabs = config.browsers * config.tabs_per_browser;
+        let total_tabs = config.browsers.saturating_mul(config.tabs_per_browser);
         Self {
             sessions,
             ready: Mutex::new(VecDeque::with_capacity(total_tabs)),
@@ -270,16 +270,19 @@ impl BrowserPool {
 
     /// Pick the next session index (round-robin).
     fn next_browser_idx(&self) -> usize {
-        if self.sessions.len() == 1 {
-            return 0;
-        }
-        self.next_session.fetch_add(1, Ordering::Relaxed) % self.sessions.len()
+        self.next_session
+            .fetch_add(1, Ordering::Relaxed)
+            .checked_rem(self.sessions.len())
+            .unwrap_or(0)
     }
 
     /// Create a fresh tab on a round-robin browser session.
     async fn create_tab(&self) -> Result<PooledTab> {
         let idx = self.next_browser_idx();
-        let page = self.sessions[idx].new_blank_page().await?;
+        let session = self.sessions.get(idx).ok_or_else(|| {
+            VoidCrawlError::Other(format!("pool session index {idx} out of range"))
+        })?;
+        let page = session.new_blank_page().await?;
         Ok(PooledTab { page, use_count: 0, last_used: Instant::now(), browser_idx: idx })
     }
 
@@ -293,7 +296,8 @@ impl BrowserPool {
     /// first [`acquire()`](Self::acquire).
     pub async fn warmup(&self) -> Result<()> {
         // Build futures for all tabs across all sessions
-        let mut futs = Vec::with_capacity(self.config.browsers * self.config.tabs_per_browser);
+        let mut futs =
+            Vec::with_capacity(self.config.browsers.saturating_mul(self.config.tabs_per_browser));
         for (idx, session) in self.sessions.iter().enumerate() {
             for _ in 0..self.config.tabs_per_browser {
                 futs.push(async move {
@@ -374,7 +378,7 @@ impl BrowserPool {
                     return Err(VoidCrawlError::Timeout(format!(
                         "pool.acquire() timed out after {}s — all {} tabs are checked out",
                         self.config.acquire_timeout_secs,
-                        self.config.browsers * self.config.tabs_per_browser,
+                        self.config.browsers.saturating_mul(self.config.tabs_per_browser),
                     )));
                 }
             }
@@ -409,7 +413,13 @@ impl BrowserPool {
         if tab.use_count >= self.config.tab_max_uses {
             let browser_idx = tab.browser_idx;
             let _ = tab.page.close().await;
-            match self.sessions[browser_idx].new_blank_page().await {
+            let Some(session) = self.sessions.get(browser_idx) else {
+                self.semaphore.add_permits(1);
+                return Err(VoidCrawlError::Other(format!(
+                    "pool session index {browser_idx} out of range"
+                )));
+            };
+            match session.new_blank_page().await {
                 Ok(page) => {
                     return Ok((
                         PooledTab { page, use_count: 0, last_used: Instant::now(), browser_idx },
@@ -441,7 +451,7 @@ impl BrowserPool {
     /// `allowAndName` pointing at a since-deleted quarantine dir. This costs
     /// one CDP call only on the rare armed-but-abandoned path.
     pub async fn release(&self, mut tab: PooledTab) {
-        tab.use_count += 1;
+        tab.use_count = tab.use_count.saturating_add(1);
         tab.last_used = Instant::now();
 
         if tab.page.is_download_armed() {
@@ -484,10 +494,10 @@ impl BrowserPool {
         // would permanently shrink the pool.
         let futs: Vec<_> = to_evict
             .into_iter()
-            .map(|tab| {
+            .filter_map(|tab| {
                 let browser_idx = tab.browser_idx;
-                let session = &self.sessions[browser_idx];
-                async move {
+                let session = self.sessions.get(browser_idx)?;
+                Some(async move {
                     if !session.is_alive() {
                         // Session is dead — return the old tab unchanged so
                         // the pool doesn't lose capacity.
@@ -503,7 +513,7 @@ impl BrowserPool {
                         }),
                         Err(e) => Err(e),
                     }
-                }
+                })
             })
             .collect();
 
