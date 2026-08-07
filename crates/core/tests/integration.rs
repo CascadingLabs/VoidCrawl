@@ -262,6 +262,69 @@ async fn test_pool_parallel() {
     pool.close().await.expect("pool close failed");
 }
 
+/// Regression test for the per-browser screenshot capture lock
+/// (`Page::screenshot` / `BrowserSession::capture_lock`): headless Chrome
+/// only reliably composites a frame for the foregrounded tab, so screenshot
+/// capture across tabs sharing one browser must serialize the
+/// activate+capture instant without deadlocking or starving any tab.
+///
+/// Oversubscribes 4 tabs with 24 concurrent screenshot tasks across 3 rounds
+/// (72 captures total) and asserts every one succeeds inside a hard timeout
+/// — a deadlock or a lost wakeup on the capture lock would hang this test
+/// rather than fail it cleanly, so the timeout turns that into a normal
+/// test failure instead of a stuck CI job.
+#[tokio::test]
+async fn test_pool_screenshot_stress_no_deadlock() {
+    let config = PoolConfig {
+        browsers:             1,
+        tabs_per_browser:     4,
+        tab_max_uses:         50,
+        tab_max_idle_secs:    60,
+        acquire_timeout_secs: 30,
+        auto_evict:           false,
+    };
+    let pool = test_pool(config).await;
+    pool.warmup().await.expect("warmup failed");
+
+    const ROUNDS: usize = 3;
+    const TASKS_PER_ROUND: usize = 24;
+
+    for round in 0..ROUNDS {
+        let outcome = time::timeout(Duration::from_secs(60), async {
+            let tasks = (0..TASKS_PER_ROUND).map(|i| {
+                let pool = &pool;
+                async move {
+                    let tab = pool.acquire().await.map_err(|e| format!("acquire {i}: {e}"))?;
+                    let html = format!(
+                        "data:text/html,<h1 style=\"height:{}px\">stress {i}</h1>",
+                        200 + i * 10
+                    );
+                    tab.page.navigate(&html).await.map_err(|e| format!("navigate {i}: {e}"))?;
+                    let png = tab
+                        .page
+                        .screenshot_png()
+                        .await
+                        .map_err(|e| format!("screenshot {i}: {e}"))?;
+                    pool.release(tab).await;
+                    if png.is_empty() {
+                        return Err(format!("screenshot {i}: empty PNG"));
+                    }
+                    Ok(())
+                }
+            });
+            futures::future::join_all(tasks).await
+        })
+        .await;
+        let timeout_msg = format!("round {round} deadlocked or exceeded the 60s stress timeout");
+        let outcome = outcome.expect(&timeout_msg);
+
+        let failures: Vec<String> = outcome.into_iter().filter_map(Result::err).collect();
+        assert!(failures.is_empty(), "round {round} had failures: {failures:?}");
+    }
+
+    pool.close().await.expect("pool close failed");
+}
+
 #[tokio::test]
 async fn test_acquire_timed_reports_queue_wait() {
     // Single tab slot so the second acquire must queue behind the first.

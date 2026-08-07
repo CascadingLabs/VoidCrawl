@@ -174,6 +174,22 @@ on action downloads (no Content-Type is observed), so `clean` is not a malware-f
     }
 
     #[tool(
+        name = "session_screenshot",
+        description = "Capture a PNG of the given session's page exactly as it stands right now \
+— no navigation, no URL change. The visual counterpart to session_content / session_snapshot for \
+authenticated, post-click, paginated, or challenge state that only an open session holds. Response \
+includes devicePixelRatio guidance compatible with click_visual_coords. Unknown or closed \
+session_ids fail with invalid_params. Prefer session_ax_tree / session_snapshot for structured \
+perception; reach for this when you need to see pixels — layout, visual state, or a thin AX tree."
+    )]
+    pub async fn session_screenshot(
+        &self,
+        Parameters(args): Parameters<SessionIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        tools::screenshot::session(self, args).await
+    }
+
+    #[tool(
         name = "profile_list",
         description = "List VoidCrawl-managed Chromium profiles. Returns metadata only; cookies and storage values are never exposed."
     )]
@@ -617,8 +633,10 @@ session_close; sessions are cookie-isolated.\n\n\
 PERCEIVE → ACT → EXTRACT. To inspect a large rendered page, prefer `fetch_snapshot` first, or \
 `session_snapshot` after clicking/pagination/login flows. For role/name interaction targeting, \
 call `session_ax_tree` — a compact outline of the accessibility tree. If `named_count` is low vs \
-`node_count` the accessibility tree is thin; fall back to `session_snapshot` or `screenshot`. Use \
-raw `fetch` / `session_content` only when you truly need markup. To click: `click` (CSS selector) \
+`node_count` the accessibility tree is thin; fall back to `session_snapshot` or `session_screenshot`. \
+`session_screenshot` captures the current session's page as-is (no navigation) — reach for it before \
+`click_visual_coords` to see authenticated, post-click, paginated, or challenge state that `fetch`-based \
+`screenshot` can't reach. Use raw `fetch` / `session_content` only when you truly need markup. To click: `click` (CSS selector) \
 or `click_by_role` (accessibility role + accessible name — durable across redesigns); last resort \
 `click_visual_coords` for React forms that ignore synthetic clicks. To extract data, run `extract` \
 / `eval_js` with a JS expression and return data, not markup.\n\n\

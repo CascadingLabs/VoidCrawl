@@ -69,12 +69,28 @@ Open a session → navigate → operate → close. Each session is a dedicated C
 | `session_navigate` | Navigate session to URL, wait for settle. |
 | `session_content` | Return HTML, title, URL. |
 | `session_snapshot` | Return a compact rendered-page snapshot of the current session page. |
+| `session_screenshot` | Return a PNG of the current session page exactly as it stands — no navigation, no URL change. |
 | `session_close` | Tear down. |
 
 Prefer `fetch_snapshot` for first-pass inspection of large pages, and
 `session_snapshot` after clicking, pagination, login, or other stateful flows.
 Use `session_ax_tree` for role/name targeting before `click_by_role`. Use
 `fetch` and `session_content` only when the caller truly needs raw HTML.
+
+**Choosing a perception tool for a stateful session:**
+- `session_ax_tree` — default. Cheapest, semantic, best for locating clickable
+  targets by role/name. Check `named_count` vs `node_count`; a low ratio means
+  a thin accessibility tree.
+- `session_snapshot` — structured headings/text/links/controls/forms when you
+  need more page content than the AX tree surfaces, without the cost of raw HTML.
+- `session_screenshot` — reach for this when you need *pixels*: layout, visual
+  state, a challenge/CAPTCHA rendering, or a thin AX tree/snapshot that doesn't
+  explain what's on screen. It's the visual fallback before `click_visual_coords`
+  and the only one of the three that can show authenticated, post-click,
+  paginated, or challenge state without disturbing it — `screenshot` (stateless)
+  always navigates first, so it can't see state that only exists inside an
+  already-open session. Unknown or closed `session_id`s fail explicitly with
+  `invalid_params`.
 
 ### Managed profiles
 

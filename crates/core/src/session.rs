@@ -343,6 +343,9 @@ pub struct BrowserSession {
     /// Dropped after `browser` and `_handler_task`, so Chrome has already
     /// been signalled to close before the directory is deleted.
     _user_data_dir: Option<tempfile::TempDir>,
+    /// Shared with every `Page` this session creates, so screenshot capture
+    /// is serialized per-browser rather than per-tab. See [`Page::screenshot`].
+    capture_lock:   Arc<Mutex<()>>,
 }
 
 impl fmt::Debug for BrowserSession {
@@ -496,6 +499,7 @@ impl BrowserSession {
             stealth,
             attached: matches!(mode, BrowserMode::RemoteDebug { .. }),
             _user_data_dir: owned_user_data_dir,
+            capture_lock: Arc::new(Mutex::new(())),
         })
     }
 
@@ -512,7 +516,7 @@ impl BrowserSession {
                 .new_page("about:blank")
                 .await
                 .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
-            Page::new(cdp_page)
+            Page::new(cdp_page, Arc::clone(&self.capture_lock))
         }; // browser lock released before navigation
 
         page.apply_stealth(&self.stealth).await?;
@@ -529,7 +533,7 @@ impl BrowserSession {
                 .new_page("about:blank")
                 .await
                 .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
-            Page::new(cdp_page)
+            Page::new(cdp_page, Arc::clone(&self.capture_lock))
         };
         page.apply_stealth(&self.stealth).await?;
         Ok(page)
@@ -541,7 +545,7 @@ impl BrowserSession {
         let browser = self.browser.lock().await;
         let cdp_pages =
             browser.pages().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
-        Ok(cdp_pages.into_iter().map(Page::new).collect())
+        Ok(cdp_pages.into_iter().map(|p| Page::new(p, Arc::clone(&self.capture_lock))).collect())
     }
 
     /// The browser's CDP WebSocket endpoint (`ws://…`).
@@ -574,7 +578,7 @@ impl BrowserSession {
             .get_page(TargetId::new(target_id))
             .await
             .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
-        Ok(Page::new(cdp_page))
+        Ok(Page::new(cdp_page, Arc::clone(&self.capture_lock)))
     }
 
     /// Get browser version string.

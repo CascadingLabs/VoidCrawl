@@ -72,6 +72,7 @@ get stealth, `fetch_many` concurrency, and isolated profiles for free.
 | Lifecycle | `session_open` → `session_navigate` → … → `session_close` | Each session is a dedicated Chrome + profile. Cookies never leak across sessions. |
 | Read page HTML/title/url | `session_content` | The whole document — large; prefer `extract`/AX below. |
 | Perceive the page | `session_ax_tree` | Compact `role "name"` outline (or `mode:"raw"` for full CDP nodes). See the ladder below. |
+| Screenshot the current session state | `session_screenshot` | PNG of the page exactly as it stands — no navigation. Visual fallback before `click_visual_coords`; the only way to see authenticated/post-click/paginated/challenge state without disturbing it. |
 | Click by selector | `click` | `{ session_id, selector }`. Real CDP click (hover + focus). |
 | Click by role + name | `click_by_role` | `{ session_id, role, name, nth? }`. Durable across redesigns. |
 | Click by pixel | `click_visual_coords` | `{ session_id, x, y }` CSS px. Last resort (see recipe). |
@@ -101,8 +102,13 @@ it to reason over a page.**
    - **Trust signal:** compare `named_count` to `node_count`. A low ratio means a
      thin AX tree (a div-soup site with poor accessibility) — *don't over-trust
      it*; fall to a screenshot or a targeted HTML/`extract` pull.
-2. **`screenshot`** — when layout, visual state, or pixel position matters, or
-   when the AX tree came back thin.
+2. **`session_screenshot`** (stateful) / **`screenshot`** (stateless) — when
+   layout, visual state, or pixel position matters, or when the AX tree came
+   back thin. Within a session, prefer `session_screenshot`: it captures the
+   page exactly as it stands — no navigation — so it's the only perception
+   tool that can show authenticated, post-click, paginated, or challenge state
+   without disturbing it. `screenshot` always navigates first, so it can't see
+   session-only state.
 3. **`session_content` / raw HTML** — last resort. If you only need a few fields,
    reach for `extract` instead of reading the whole document.
 
@@ -164,7 +170,7 @@ context stays clean. Two rules that keep token cost sane:
 ## `click_visual_coords` recipe
 Some React forms bind only to real compositor input; a selector `click`
 (dispatchEvent-style) fires but the handler never runs. Drive it through pixels:
-1. `screenshot` → identify the target's pixel coordinates.
+1. `session_screenshot` → identify the target's pixel coordinates without navigating away from the form's current state.
 2. `click_visual_coords { x, y }` → sends `mousePressed`+`mouseReleased`; the handler fires.
 3. `type_text { text }` (no selector) → keys go to the now-focused element.
 4. Repeat for submit.

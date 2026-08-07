@@ -21,6 +21,7 @@ concurrent by construction — ten tabs in parallel is the norm.
 | `session_open`    | stateful  | Launches a dedicated Chrome, returns `session_id`.          |
 | `session_navigate`| stateful  | Goto URL within a session and wait for settle.              |
 | `session_content` | stateful  | HTML + title + URL of the session's current page.           |
+| `session_screenshot` | stateful | PNG of the session's current page as-is — no navigation. |
 | `session_close`   | stateful  | Shut down the session's Chrome.                             |
 | `pool_status`     | diag      | Pool config + live session count.                           |
 | `download`        | stateless | Download a file by URL through stealth Chrome and scan it with the built-in antivirus gate. **Opt-in** (`VOIDCRAWL_ALLOW_DOWNLOADS=1`). |

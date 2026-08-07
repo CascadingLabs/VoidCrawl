@@ -5,7 +5,7 @@ use std::{
     fs, future,
     path::{Path, PathBuf},
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -45,7 +45,7 @@ use chromiumoxide::{
 };
 use futures::StreamExt;
 use serde_json::Value;
-use tokio::time;
+use tokio::{sync::Mutex as AsyncMutex, time};
 
 use crate::{
     antibot::{self, AntibotVerdict},
@@ -408,12 +408,24 @@ pub struct Page {
     /// Last virtual cursor position (CSS px), so a humanized move starts from
     /// where the pointer actually is. Defaults to the top-left.
     cursor:         Mutex<(f64, f64)>,
+    /// Shared with every other `Page` from the same `BrowserSession`.
+    /// Headless Chrome only reliably composites frames for the
+    /// foregrounded tab, so `screenshot()` holds this while it brings
+    /// itself to front and captures — serializing just that instant
+    /// across tabs on one browser, not the tabs' navigation/JS work.
+    capture_lock:   Arc<AsyncMutex<()>>,
 }
 
 impl Page {
-    /// Wrap an existing CDP page.
-    pub(crate) fn new(inner: CdpPage) -> Self {
-        Self { inner, download_armed: AtomicBool::new(false), cursor: Mutex::new((0.0, 0.0)) }
+    /// Wrap an existing CDP page. `capture_lock` must be the same shared
+    /// lock for every page created from the same `BrowserSession`.
+    pub(crate) fn new(inner: CdpPage, capture_lock: Arc<AsyncMutex<()>>) -> Self {
+        Self {
+            inner,
+            download_armed: AtomicBool::new(false),
+            cursor: Mutex::new((0.0, 0.0)),
+            capture_lock,
+        }
     }
 
     /// Whether a download is currently armed on this page (set by
@@ -1011,6 +1023,19 @@ impl Page {
         } else {
             builder = builder.full_page(true);
         }
+
+        // Headless Chrome only reliably composites a frame for the
+        // foregrounded tab. With several tabs sharing one browser process
+        // (the pool's normal case), an un-guarded capture on a backgrounded
+        // tab can fail with CDP -32000 ("Unable to capture screenshot").
+        // Hold the browser-wide capture lock only for the activate+capture
+        // instant — navigation, JS, and extraction on other tabs stay fully
+        // concurrent; they just take turns for this one step.
+        let _capture_guard = self.capture_lock.lock().await;
+        self.inner
+            .bring_to_front()
+            .await
+            .map_err(|e| VoidCrawlError::ScreenshotError(e.to_string()))?;
         let bytes = self
             .inner
             .screenshot(builder.build())
