@@ -22,6 +22,18 @@ require_uint VNC_PORT_BASE "${VNC_PORT_BASE:-5900}"
 require_uint VNC_WIDTH "${VNC_WIDTH:-1920}"
 require_uint VNC_HEIGHT "${VNC_HEIGHT:-1080}"
 
+case "${CHROME_NO_SANDBOX:-0}" in
+    0|false|no) CHROME_SANDBOX_ARG="" ;;
+    1|true|yes)
+        CHROME_SANDBOX_ARG="--no-sandbox"
+        echo "[security] WARNING: Chrome sandbox disabled by CHROME_NO_SANDBOX" >&2
+        ;;
+    *)
+        echo "[config] CHROME_NO_SANDBOX must be 0 or 1 (got '${CHROME_NO_SANDBOX}')" >&2
+        exit 64
+        ;;
+esac
+
 BROWSER_COUNT="${BROWSER_COUNT:-2}"
 CDP_PORT_BASE="${CDP_PORT_BASE:-19222}"
 VNC_PORT_BASE="${VNC_PORT_BASE:-5900}"
@@ -135,7 +147,7 @@ EOF
         cat >> "$config" <<EOF
 
 [program:chrome-$i]
-command=google-chrome-stable --no-sandbox --class=chrome-$i --ozone-platform=wayland --enable-features=UseOzonePlatform --ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy --disable-dev-shm-usage --disable-background-networking --disable-component-update --disable-blink-features=AutomationControlled --disable-infobars --disable-session-crashed-bubble --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-ipc-flooding-protection --disable-hang-monitor --disable-features=PaintHolding,DeferRendererTasksAfterInput --no-first-run --no-default-browser-check --remote-debugging-port=$cdp_port --user-data-dir=$profile_dir
+command=google-chrome-stable${CHROME_SANDBOX_ARG:+ $CHROME_SANDBOX_ARG} --class=chrome-$i --ozone-platform=wayland --enable-features=UseOzonePlatform --ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy --disable-dev-shm-usage --disable-background-networking --disable-component-update --disable-blink-features=AutomationControlled --disable-infobars --disable-session-crashed-bubble --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-ipc-flooding-protection --disable-hang-monitor --disable-features=PaintHolding,DeferRendererTasksAfterInput --no-first-run --no-default-browser-check --remote-debugging-port=$cdp_port --user-data-dir=$profile_dir
 environment=XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR",WAYLAND_DISPLAY="wayland-1",DBUS_SESSION_BUS_ADDRESS="unix:path=$DBUS_SOCKET",DISPLAY=""
 autostart=true
 autorestart=true

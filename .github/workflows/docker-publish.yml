@@ -100,6 +100,42 @@ jobs:
           CI: "true"
         run: dive voidcrawl-${{ matrix.variant }}:ci --ci-config .github/dive-ci.yml
 
+      - name: Smoke-test rootless sandboxed headful Chrome
+        if: matrix.variant == 'headful'
+        run: |
+          set -euo pipefail
+          trap 'docker rm -f voidcrawl-headful-smoke >/dev/null 2>&1 || true' EXIT
+          docker run -d --name voidcrawl-headful-smoke --init --shm-size=2g \
+            --user 10001:10001 --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --security-opt "seccomp=$PWD/docker/seccomp-chrome.json" \
+            -e BROWSER_COUNT=1 -e WLR_RENDERER=pixman \
+            -e WLR_RENDERER_ALLOW_SOFTWARE=1 -e VIEWER_MODE=disabled \
+            voidcrawl-headful:ci
+          for _ in $(seq 1 45); do
+            docker exec voidcrawl-headful-smoke \
+              curl -fsS http://127.0.0.1:19222/json/version >/dev/null && break
+            sleep 1
+          done
+          docker exec voidcrawl-headful-smoke \
+            curl -fsS http://127.0.0.1:19222/json/version >/dev/null
+          test "$(docker exec voidcrawl-headful-smoke id -u)" = 10001
+          ! docker exec voidcrawl-headful-smoke grep -Eq \
+            '(^|[[:space:]])--no-sandbox($|[[:space:]])' \
+            /tmp/voidcrawl/config/supervisord.conf
+          # Docker contributes one seccomp filter; a renderer with Chrome's
+          # own sandbox active has at least one additional filter.
+          docker exec voidcrawl-headful-smoke sh -ec '
+            renderer=$(pgrep -f -- "--type=renderer" | head -1)
+            test -n "$renderer"
+            filters=$(awk "/^Seccomp_filters:/ {print \$2}" "/proc/$renderer/status")
+            test "$filters" -ge 2
+          '
+          test "$(docker exec voidcrawl-headful-smoke viewerctl status)" = \
+            'viewer: inactive'
+          ! docker exec voidcrawl-headful-smoke sh -c \
+            'ps -eo comm | grep -Eq "^(wayvnc|websockify)$"'
+
       - name: Build & push (multi-arch)
         if: github.event_name != 'pull_request'
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6

@@ -104,10 +104,10 @@ services:
       TAB_MAX_IDLE_SECS: "60"
 
       # ─── Chrome flags ────────────────────────────────────────────────
-      # Disable Chrome's sandbox. REQUIRED inside most containers
-      # (the sandbox needs CAP_SYS_ADMIN or a userns setup that's
-      # rarely worth configuring). Leave this at "1" unless you know
-      # you've set up a sandbox-capable container.
+      # The rootful headless image selected at the top currently requires this
+      # compatibility mode. Do NOT copy it into the rootless headful stack:
+      # docker-compose.headful.yml defaults to sandboxed Chrome ("0") and loads
+      # docker/seccomp-chrome.json for the namespace bootstrap.
       CHROME_NO_SANDBOX: "1"
 
       # ─── Headful-only: generated outputs + on-demand viewer ─────────
