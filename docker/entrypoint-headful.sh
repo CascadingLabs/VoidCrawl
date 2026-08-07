@@ -9,6 +9,9 @@
 #   5. Starts supervisord
 set -euo pipefail
 
+# ── DNS override (optional) ──────────────────────────────────────────────
+/usr/local/bin/ensure-dns.sh
+
 # ── 1. Match host render group GID for /dev/dri access ──────────────────
 if [ -e /dev/dri/renderD128 ]; then
     HOST_RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)

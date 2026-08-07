@@ -36,7 +36,8 @@ COPY docker/config/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
 # Dynamic entrypoint — generates supervisord.conf via voidcrawl.scale at start
 COPY docker/entrypoint.sh /docker/entrypoint.sh
-RUN chmod +x /docker/entrypoint.sh
+COPY docker/ensure-dns.sh /usr/local/bin/ensure-dns.sh
+RUN chmod +x /docker/entrypoint.sh /usr/local/bin/ensure-dns.sh
 
 # Scale profile drives Chrome farm sizing (minimal | balanced | advanced).
 # CDP_PORT_1 / CDP_PORT_2 are overridable at runtime (`docker run -e
@@ -46,7 +47,8 @@ ENV SCALE_PROFILE=balanced \
     TAB_MAX_USES=50 \
     CHROME_NO_SANDBOX=1 \
     CDP_PORT_1=9222 \
-    CDP_PORT_2=9223
+    CDP_PORT_2=9223 \
+    VOIDCRAWL_DNS_SERVERS=""
 
 EXPOSE 9222 9223
 
