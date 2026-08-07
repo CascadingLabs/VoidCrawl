@@ -186,7 +186,7 @@ GPU container** ([docker-headful.md](docker-headful.md)) rather than headless.
 > by the edge in front of a route) is harder — headful + GPU is *not* enough for
 > it. See the next section.
 
-## Minimal CDP footprint (full-page Managed Challenge)  — `VOIDCRAWL_STEALTH_NO_RUNTIME`
+## Minimal CDP footprint (full-page Managed Challenge) — `cdp_mode="minimal"`
 
 The full-page Cloudflare **Managed Challenge** interstitial is decided by
 **CDP/automation detection**, not by rendering, GPU, profile, or clicks. We
@@ -208,28 +208,51 @@ eagerly on every page:
 | `Target.setAutoAttach(waitForDebuggerOnStart)` | automation-shaped | **skipped** (lose OOPIF auto-attach) |
 | isolated-world `addScriptToEvaluateOnNewDocument` | persistent injected script | **skipped** (lose `evaluate_function`) |
 
-Set **`VOIDCRAWL_STEALTH_NO_RUNTIME=1`** before launching to enable the minimal
-mode (a vendored chromiumoxide patch reads it at session init). VoidCrawl then
-enables only `Page` + on-demand `Accessibility`/`DOM`/`Input`, and **auto-passes
-the Managed Challenge like nodriver** (verified 3/3). `eval_js` still works.
+Pass **`cdp_mode="minimal"`** to enable it. VoidCrawl then enables only `Page` +
+on-demand `Accessibility`/`DOM`/`Input`, and **auto-passes the Managed Challenge
+like nodriver** (verified 3/3). `eval_js` still works.
 
 ```python
-import os
-os.environ["VOIDCRAWL_STEALTH_NO_RUNTIME"] = "1"   # before BrowserSession launches Chrome
 from voidcrawl import BrowserConfig, BrowserSession
 
-async with BrowserSession(BrowserConfig(headless=False, stealth=True)) as b:
+async with BrowserSession(
+    BrowserConfig(headless=False, stealth=True, cdp_mode="minimal")
+) as b:
     page = await b.new_page("about:blank")
     await page.navigate("https://site-behind-a-cloudflare-challenge.com")  # Network off → don't await idle
     # the interstitial clears on its own in a few seconds; poll the title:
     # while "just a moment" in (await page.eval_js("document.title")).lower(): await asyncio.sleep(1)
 ```
 
+The mode is **per session**, not process-global, so one process can run a
+minimal session against a walled target and a normal session for capture work at
+the same time. In Rust: `BrowserSessionBuilder::minimal_cdp()`, or
+`.cdp_mode(CdpMode::Minimal)`.
+
 Trade-offs (acceptable for *challenge traversal*, not bulk crawling): no network
-capture / network-idle `goto`, no cross-origin `evaluate_js_in_frame` (needs
-Runtime), no `evaluate_function`, no OOPIF auto-attach. Default behavior is
-unchanged when the env var is unset. (CAS-217. A future release promotes this to a
-first-class `BrowserConfig` flag.)
+capture (`network_capture_arm` / `network_capture_wait` and CDP request-header
+capture return nothing), no network-idle `goto` or `wait_for_network_idle`, no
+cross-origin `evaluate_js_in_frame` (needs Runtime), no `evaluate_function`, no
+OOPIF auto-attach. **`"normal"` remains the default** precisely because those
+losses are silent — nothing errors, the data simply never arrives.
+
+> The older process-global **`VOIDCRAWL_STEALTH_NO_RUNTIME=1`** env var still
+> works and still selects minimal mode when no explicit `cdp_mode` is given.
+> Prefer `cdp_mode`: the env var applies to every session in the process, so it
+> cannot express "minimal here, normal there."
+
+To measure the difference on your own targets rather than taking the table above
+on faith, `scripts/bench_antibot_cdp.py` runs both modes against the same URL and
+reports passed/challenged/blocked plus a fingerprint snapshot:
+
+```bash
+uv run python scripts/bench_antibot_cdp.py \
+  --url https://<cloudflare-managed-challenge-target> \
+  --engine voidcrawl --cdp-mode normal --cdp-mode minimal --runs 3 --headful
+```
+
+It can also compare against `nodriver` and `zendriver` (`--engine nodriver`) when
+those are installed. Targets are operator-supplied; none are committed here.
 
 ## Overriding the defaults
 
