@@ -31,9 +31,12 @@ pub use challenge::{
     AttachCoordinates, ChallengeSnapshot, ChallengeStatus, DomCaptchaSnapshot, ResolutionOutcome,
     ResolutionRequest, ResolverType, captcha_is_active,
 };
-pub use chromiumoxide::cdp::browser_protocol::{
-    input::{DispatchKeyEventType, DispatchMouseEventType, MouseButton},
-    network::{Cookie, CookieParam, DeleteCookiesParams},
+pub use chromiumoxide::{
+    CdpMode,
+    cdp::browser_protocol::{
+        input::{DispatchKeyEventType, DispatchMouseEventType, MouseButton},
+        network::{Cookie, CookieParam, DeleteCookiesParams},
+    },
 };
 pub use cookie_jar::{CookieLease, CookieProvenance, LeaseScope, fork_scoped};
 pub use error::{Result, VoidCrawlError};

@@ -11,9 +11,9 @@ use std::{
 };
 
 use chromiumoxide::{
-    browser::{Browser, BrowserConfig},
+    browser::{Browser, BrowserConfig, CdpMode},
     cdp::browser_protocol::target::TargetId,
-    handler::Handler,
+    handler::{Handler, HandlerConfig},
 };
 use rustls::crypto::ring::default_provider as ring_crypto_provider;
 use serde_json::Value;
@@ -199,6 +199,10 @@ pub struct BrowserSessionBuilder {
     /// existing profile (e.g. one you've logged into `LinkedIn` in) and
     /// leave the directory on disk after the session ends.
     user_data_dir:     Option<PathBuf>,
+    /// How many CDP domains to eagerly enable. Defaults to
+    /// [`CdpMode::Normal`], which every capture-dependent feature needs.
+    /// See [`BrowserSessionBuilder::cdp_mode`].
+    cdp_mode:          CdpMode,
 }
 
 impl Default for BrowserSessionBuilder {
@@ -213,6 +217,7 @@ impl Default for BrowserSessionBuilder {
             window_size:       None,
             port:              None,
             user_data_dir:     None,
+            cdp_mode:          CdpMode::from_env_default(),
         }
     }
 }
@@ -298,6 +303,38 @@ impl BrowserSessionBuilder {
         self
     }
 
+    /// Choose how many CDP domains to eagerly enable for this session.
+    ///
+    /// [`CdpMode::Normal`] (the default) enables `Runtime`, `Network`,
+    /// `Performance`, `Log`, and target auto-attach up front — the behavior
+    /// every capture-dependent feature is built on.
+    ///
+    /// [`CdpMode::Minimal`] skips all of them, which is what lets a session
+    /// clear a Cloudflare Managed Challenge that a normal CDP client
+    /// cannot. It is a real trade, not a free win — in Minimal mode these
+    /// stop working:
+    ///
+    /// - [`Page::arm_response_capture`](crate::Page::arm_response_capture) and
+    ///   everything over it (`network_capture_arm` / `network_capture_wait`,
+    ///   CDP request-header capture) — no `Network.enable`, so no events arrive
+    /// - [`Page::wait_for_network_idle`](crate::Page::wait_for_network_idle)
+    /// - cross-origin `evaluate_js_in_frame` and `evaluate_function` — both
+    ///   need `Runtime` / the isolated utility world
+    /// - OOPIF and child-target auto-attach
+    ///
+    /// Navigation, screenshots, accessibility, input, and main-world
+    /// `eval_js` are unaffected.
+    pub fn cdp_mode(mut self, mode: CdpMode) -> Self {
+        self.cdp_mode = mode;
+        self
+    }
+
+    /// Shorthand for [`cdp_mode(CdpMode::Minimal)`](Self::cdp_mode). Read that
+    /// method's list of what Minimal gives up before reaching for this.
+    pub fn minimal_cdp(self) -> Self {
+        self.cdp_mode(CdpMode::Minimal)
+    }
+
     /// Override the stealth viewport dimensions.
     ///
     /// This sets the CDP device metrics override that the page reports to
@@ -321,6 +358,7 @@ impl BrowserSessionBuilder {
             self.window_size,
             self.port,
             self.user_data_dir,
+            self.cdp_mode,
         )
         .await
     }
@@ -403,13 +441,17 @@ impl BrowserSession {
         window_size: Option<(u32, u32)>,
         port: Option<u16>,
         persistent_user_data_dir: Option<PathBuf>,
+        cdp_mode: CdpMode,
     ) -> Result<Self> {
         let mut owned_user_data_dir: Option<tempfile::TempDir> = None;
 
         let (browser, handler) = match &mode {
             BrowserMode::RemoteDebug { ws_url } => {
                 let ws = resolve_ws_url(ws_url).await?;
-                Browser::connect(&ws)
+                // `Browser::connect` hardcodes `HandlerConfig::default()`, which would
+                // re-read the environment and discard an explicit `cdp_mode`.
+                let handler_config = HandlerConfig { cdp_mode, ..HandlerConfig::default() };
+                Browser::connect_with_config(&ws, handler_config)
                     .await
                     .map_err(|e| VoidCrawlError::ConnectionFailed(e.to_string()))?
             }
@@ -417,7 +459,8 @@ impl BrowserSession {
                 // Disable chromiumoxide's DEFAULT_ARGS which include
                 // `--enable-automation` and `--disable-extensions` —
                 // both are instant giveaways to WAFs like Akamai.
-                let mut builder = BrowserConfig::builder().disable_default_args();
+                let mut builder =
+                    BrowserConfig::builder().disable_default_args().cdp_mode(cdp_mode);
 
                 // Caller-supplied persistent profile vs. ephemeral
                 // `TempDir`. The ephemeral path handles SingletonLock

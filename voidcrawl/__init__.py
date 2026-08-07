@@ -220,6 +220,15 @@ class BrowserConfig(BaseModel):
             adopt one of its tabs with
             :meth:`BrowserSession.attach_page`. ``None`` (default) lets the OS
             pick a free ephemeral port.
+        cdp_mode: How many CDP domains to enable eagerly. ``"normal"``
+            (the default) enables ``Runtime``, ``Network``, ``Performance``,
+            ``Log``, and target auto-attach up front — every capture-dependent
+            feature needs this. ``"minimal"`` skips them, which is what lets a
+            session clear a Cloudflare Managed Challenge that a normal CDP
+            client cannot; in exchange, response capture,
+            :meth:`Page.wait_for_network_idle`, cross-origin frame eval, and
+            OOPIF auto-attach are unavailable. ``None`` keeps the default and
+            still honors ``VOIDCRAWL_STEALTH_NO_RUNTIME``.
         debug: Wrap pages in an interactive step-debugger.  When ``True``,
             :meth:`BrowserSession.new_page` returns a
             :class:`~voidcrawl.debug.DebugPage` and
@@ -256,6 +265,7 @@ class BrowserConfig(BaseModel):
     user_data_dir: str | None = None
     ws_url: str | None = None
     port: int | None = None
+    cdp_mode: Literal["normal", "minimal"] | None = None
     debug: bool = False
     stepping: bool = True
     highlight: bool = True
@@ -559,6 +569,7 @@ class BrowserSession:
             user_data_dir=bc.user_data_dir,
             ws_url=bc.ws_url,
             port=bc.port,
+            cdp_mode=bc.cdp_mode,
         )
         self._inner = await inner.__aenter__()
         return self
@@ -791,6 +802,7 @@ class BrowserPool:
             chrome_executable=bc.chrome_executable,
             extra_args=bc.extra_args,
             user_data_dir=bc.user_data_dir,
+            cdp_mode=bc.cdp_mode,
         )
         self._inner = await ctx.__aenter__()
         return self

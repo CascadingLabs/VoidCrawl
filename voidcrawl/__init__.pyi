@@ -186,6 +186,7 @@ class BrowserConfig:
     user_data_dir: str | None
     ws_url: str | None
     port: int | None
+    cdp_mode: Literal["normal", "minimal"] | None
     debug: bool
     stepping: bool
     highlight: bool
@@ -203,6 +204,7 @@ class BrowserConfig:
         user_data_dir: str | None = None,
         ws_url: str | None = None,
         port: int | None = None,
+        cdp_mode: Literal["normal", "minimal"] | None = None,
         debug: bool = False,
         stepping: bool = True,
         highlight: bool = True,
