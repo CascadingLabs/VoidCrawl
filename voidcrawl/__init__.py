@@ -37,6 +37,7 @@ from voidcrawl._ext import (
     ChromeProfileBusy,
     DownloadCapture,
     DownloadOutcome,
+    Frame,
     InterruptExpired,
     InterruptNotFound,
     InterruptTerminal,
@@ -49,6 +50,9 @@ from voidcrawl._ext import (
     ProfileHandle,
     ProfileLeaseExpired,
     ProfileNotFound,
+    RecordedRegion,
+    Recording,
+    RecordingHandle,
     ResponseExpectation,
     ResponseTimeoutError,
     ScanReport,
@@ -94,6 +98,7 @@ __all__ = [
     "ChromeProfileBusy",
     "DownloadCapture",
     "DownloadOutcome",
+    "Frame",
     "InterruptExpired",
     "InterruptNotFound",
     "InterruptRef",
@@ -113,6 +118,9 @@ __all__ = [
     "ProfileLeaseExpired",
     "ProfileNotFound",
     "ProfileRegistry",
+    "RecordedRegion",
+    "Recording",
+    "RecordingHandle",
     "ResponseExpectation",
     "ResponseTimeoutError",
     "ScaleProfile",
@@ -601,6 +609,30 @@ class BrowserSession:
                 step_delay=bc.step_delay,
             )
         return page
+
+    async def new_page_in_window(self, url: str) -> Page:
+        """Open a tab in its **own browser window** and navigate to *url*.
+
+        Chrome composites only the frontmost tab of a window, so tabs from
+        :meth:`new_page` (which share one window) cannot all paint at once. A
+        tab alone in its window keeps painting regardless of what other
+        windows do — which is what lets :meth:`Page.record` run concurrently
+        instead of holding the browser's capture lock.
+
+        Costs a real window's worth of resources, so it is opt-in. A later
+        :meth:`new_page` targets the most recently active window and can land
+        inside this one, so create recording windows last (or check
+        :meth:`Page.alone_in_window`).
+
+        Args:
+            url: The URL to load in the new window.
+
+        Returns:
+            The new tab handle.
+        """
+        if self._inner is None:
+            raise RuntimeError("BrowserSession not started — use async with")
+        return await self._inner.new_page_in_window(url)
 
     def page(self, url: str | None = None) -> _PageContext:
         """Create a page context that always closes its tab.

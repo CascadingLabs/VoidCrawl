@@ -12,7 +12,7 @@ use std::{
 
 use chromiumoxide::{
     browser::{Browser, BrowserConfig},
-    cdp::browser_protocol::target::TargetId,
+    cdp::browser_protocol::target::{CreateTargetParams, TargetId},
     handler::Handler,
 };
 use rustls::crypto::ring::default_provider as ring_crypto_provider;
@@ -539,6 +539,46 @@ impl BrowserSession {
             Page::new(cdp_page, Arc::clone(&self.capture_lock), Arc::clone(&self.interrupts))
         };
         page.apply_stealth(&self.stealth).await?;
+        Ok(page)
+    }
+
+    /// Open a new tab **in its own browser window**, apply stealth settings,
+    /// and navigate to `url`.
+    ///
+    /// Headless Chrome composites the frontmost tab of a window. Tabs opened
+    /// by [`BrowserSession::new_page`] share one window, so bringing any of
+    /// them to the front stops the others painting — which is why
+    /// [`Page::screenshot`](crate::Page::screenshot) serializes on a
+    /// browser-wide capture lock, and why a
+    /// [`recording`](crate::recording) on a shared-window tab goes silent as
+    /// soon as a sibling captures.
+    ///
+    /// A tab in its own window is not occluded by activity in another
+    /// window, so it keeps painting and keeps delivering screencast frames
+    /// while other tabs capture. That makes this the tab to record on when
+    /// recording has to run concurrently with other work — see
+    /// [`RecordingOptions::foreground`](crate::RecordingOptions::foreground).
+    ///
+    /// Costs a real browser window's worth of resources, so this is opt-in
+    /// rather than what `new_page` does by default.
+    pub async fn new_page_in_window(&self, url: &str) -> Result<Page> {
+        self.check_alive()?;
+        let params = CreateTargetParams::builder()
+            .url("about:blank")
+            .new_window(true)
+            .build()
+            .map_err(VoidCrawlError::PageError)?;
+        let page = {
+            let browser = self.browser.lock().await;
+            let cdp_page = browser
+                .new_page(params)
+                .await
+                .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+            Page::new(cdp_page, Arc::clone(&self.capture_lock), Arc::clone(&self.interrupts))
+        }; // browser lock released before navigation
+
+        page.apply_stealth(&self.stealth).await?;
+        page.navigate(url).await?;
         Ok(page)
     }
 

@@ -585,6 +585,61 @@ class BrowserPool:
         self, exc_type: object = None, exc_val: object = None, exc_tb: object = None
     ) -> bool: ...
 
+class Frame:
+    """One captured frame of a :class:`Recording`."""
+
+    index: int
+    """Position in the sequence, 0-based."""
+    offset_ms: float
+    """Real elapsed milliseconds since the recording started. Frames are
+    **not** evenly spaced — encode against this, not ``index / fps``."""
+    data: bytes
+    """Encoded image bytes, in the recording's ``format``."""
+
+    def __len__(self) -> int: ...
+
+class RecordedRegion:
+    """One recorded region: the viewport, a ``bbox``, or one selector."""
+
+    label: str
+    """``"viewport"``, ``"bbox"``, or a name derived from the selector."""
+    bbox: tuple[int, int, int, int] | None
+    """``(x, y, width, height)`` in CSS pixels, resolved once at start."""
+    frames: list[Frame]
+    outputs: list[str]
+    """Paths of encoded artifacts written for this region."""
+
+class Recording:
+    """The result of :meth:`Page.record` / :meth:`RecordingHandle.stop`."""
+
+    regions: list[RecordedRegion]
+    """One per requested region; a single ``"viewport"`` region when neither
+    ``bbox`` nor ``selectors`` was given."""
+    format: str
+    """``"jpeg"`` or ``"png"``."""
+    duration_ms: float
+    frames_captured: int
+    frames_dropped: int
+    """Frames discarded by the ``fps`` ceiling or the frame cap."""
+    device_pixel_ratio: float
+    foregrounded: bool
+    """Whether the recording pinned its tab to the foreground and held the
+    browser's capture lock. ``False`` means it ran concurrently."""
+
+    def effective_fps(self) -> float:
+        """Frames per second actually achieved — at most the requested
+        ``fps``, and usually below it on a mostly-static page."""
+        ...
+
+class RecordingHandle:
+    """A recording in flight, from :meth:`Page.start_recording`."""
+
+    async def stop(self) -> Recording:
+        """Stop the recording and return the :class:`Recording`. Restores
+        viewport and scroll position, releases the capture lock if one was
+        taken, then crops and encodes. Raises on a second call."""
+        ...
+
 class Page:
     """A single browser tab created via :meth:`BrowserSession.new_page`."""
 
@@ -681,6 +736,92 @@ class Page:
         ...
     async def screenshot_png(self) -> bytes:
         """Capture a full-page screenshot as PNG bytes."""
+        ...
+    async def record(
+        self,
+        duration_secs: float | None = None,
+        selectors: list[dict[str, object]] | None = None,
+        bbox: tuple[int, int, int, int] | None = None,
+        viewport_preset: str | None = None,
+        viewport_width: int | None = None,
+        viewport_height: int | None = None,
+        viewport_device_scale_factor: float | None = None,
+        viewport_mobile: bool | None = None,
+        scroll_viewports: float | None = None,
+        scroll_pixels: int | None = None,
+        fps: int | None = None,
+        max_frames: int | None = None,
+        frame_format: str | None = None,
+        quality: int | None = None,
+        output_dir: str | None = None,
+        write_frames: bool | None = None,
+        foreground: bool | None = None,
+        encode: list[str] | None = None,
+    ) -> Recording:
+        """Record this page for ``duration_secs`` seconds.
+
+        The moving-picture counterpart to :meth:`screenshot`, with the same
+        ``viewport_*`` / ``scroll_*`` / ``bbox`` kwargs. Two differences,
+        both forced by CDP's screencast:
+
+        * No ``full_page`` — a screencast only ever contains the viewport.
+        * ``selectors`` is a **list**: each entry becomes its own cropped
+          region in ``recording.regions``, all cut from one screencast, each
+          resolved to a rectangle once at start and then held fixed.
+
+        Frames arrive when Chrome paints rather than on a clock, so ``fps``
+        is a ceiling, not a guarantee, and a static page yields very few
+        frames. ``bbox`` here is viewport-relative (a screencast frame only
+        contains the viewport), unlike :meth:`screenshot`'s page-relative
+        one.
+
+        ``encode`` (``"gif"`` / ``"mp4"`` / ``"webm"``) requires ``output_dir``
+        and
+        the matching cargo feature; without it this raises rather than
+        silently producing nothing, and the frames remain available.
+
+        Leave ``foreground`` unset to detect it: a tab sharing its window
+        must be foregrounded (holding the browser's capture lock) to paint
+        at all, while a tab alone in its window records at full rate
+        concurrently.
+        """
+        ...
+    async def start_recording(
+        self,
+        duration_secs: float | None = None,
+        selectors: list[dict[str, object]] | None = None,
+        bbox: tuple[int, int, int, int] | None = None,
+        viewport_preset: str | None = None,
+        viewport_width: int | None = None,
+        viewport_height: int | None = None,
+        viewport_device_scale_factor: float | None = None,
+        viewport_mobile: bool | None = None,
+        scroll_viewports: float | None = None,
+        scroll_pixels: int | None = None,
+        fps: int | None = None,
+        max_frames: int | None = None,
+        frame_format: str | None = None,
+        quality: int | None = None,
+        output_dir: str | None = None,
+        write_frames: bool | None = None,
+        foreground: bool | None = None,
+        encode: list[str] | None = None,
+    ) -> RecordingHandle:
+        """Begin recording and return a handle to stop it.
+
+        Use instead of :meth:`record` when you need to drive the page while
+        it records. Same kwargs, except ``duration_secs`` becomes a hard
+        upper bound rather than the exact length.
+        """
+        ...
+    async def alone_in_window(self) -> bool:
+        """Whether this tab is the only one in its browser window.
+
+        Chrome composites only a window's frontmost tab, so a page sharing
+        its window can't paint while a sibling is active. A page alone in
+        its window keeps painting — which is what lets :meth:`record` run
+        without holding the browser's capture lock.
+        """
         ...
     async def screenshot(
         self,
@@ -1051,6 +1192,7 @@ class BrowserSession:
     ) -> None: ...
     async def launch(self) -> None: ...
     async def new_page(self, url: str | None = None) -> Page: ...
+    async def new_page_in_window(self, url: str) -> Page: ...
     async def attach_page(self, target_id: str) -> Page: ...
     async def interrupt(
         self, page: Page, code: str, summary: str, ttl_seconds: int = 600

@@ -34,6 +34,7 @@ async fn server_with_page() -> VoidCrawlServer {
         challenge:               Mutex::new(None),
         pending_download:        Mutex::new(None),
         pending_network_capture: Mutex::new(None),
+        pending_recording:       Mutex::new(None),
         cookie_leases:           Mutex::new(HashMap::new()),
     });
     let sessions = Arc::new(SessionRegistry::default());

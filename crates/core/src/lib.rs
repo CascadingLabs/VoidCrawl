@@ -15,6 +15,7 @@ pub mod managed_profile;
 pub mod page;
 pub mod pool;
 pub mod profile;
+pub mod recording;
 pub mod response;
 pub mod scanner;
 pub mod selector;
@@ -50,6 +51,9 @@ pub use pool::{BrowserPool, PoolConfig, PooledTab};
 pub use profile::{
     ProfileHandle, ProfileInfo, acquire_profile, acquire_profile_in, chrome_user_data_dirs,
     list_profiles, release_profile, resolve_profile,
+};
+pub use recording::{
+    Encoding, Frame, FrameFormat, RecordedRegion, Recording, RecordingHandle, RecordingOptions,
 };
 pub use response::{
     CapturedResponse, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_MAX_TOTAL_RESPONSE_BYTES,

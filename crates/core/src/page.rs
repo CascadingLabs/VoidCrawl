@@ -17,8 +17,8 @@ use chromiumoxide::{
         browser_protocol::{
             accessibility::{AxNode, AxValue, GetFullAxTreeParams, QueryAxTreeParams},
             browser::{
-                PermissionDescriptor, PermissionSetting, SetDownloadBehaviorBehavior,
-                SetDownloadBehaviorParams, SetPermissionParams,
+                GetWindowForTargetParams, PermissionDescriptor, PermissionSetting,
+                SetDownloadBehaviorBehavior, SetDownloadBehaviorParams, SetPermissionParams,
             },
             dom::{BackendNodeId, GetBoxModelParams, GetDocumentParams, ResolveNodeParams},
             emulation::{
@@ -40,6 +40,7 @@ use chromiumoxide::{
                 EventLifecycleEvent, FrameId, PrintToPdfParams, SetBypassCspParams,
                 Viewport as CdpClipViewport,
             },
+            target::GetTargetsParams,
         },
         js_protocol::runtime::{CallFunctionOnParams, EvaluateParams},
     },
@@ -616,6 +617,77 @@ impl Page {
             capture_lock,
             viewport_override: Mutex::new(None),
         }
+    }
+
+    /// The underlying CDP page, for sibling modules that need to issue raw
+    /// protocol commands (see [`crate::recording`], which drives the
+    /// `Page.startScreencast` domain directly).
+    pub(crate) fn cdp(&self) -> &CdpPage {
+        &self.inner
+    }
+
+    /// The browser-wide capture lock this page shares with its siblings.
+    /// Cloned rather than borrowed so a caller can hold it across an await
+    /// without borrowing the page for that whole span.
+    pub(crate) fn capture_lock(&self) -> Arc<AsyncMutex<()>> {
+        Arc::clone(&self.capture_lock)
+    }
+
+    /// The id of the browser window this tab lives in.
+    ///
+    /// Chrome composites only the frontmost tab *of a window*, so two pages
+    /// sharing a window id cannot both paint — the constraint behind
+    /// [`Page::screenshot`]'s capture lock and
+    /// [`RecordingOptions::foreground`](crate::RecordingOptions::foreground).
+    /// Use this to check that a page intended for concurrent recording really
+    /// is alone in its window.
+    pub async fn window_id(&self) -> Result<i64> {
+        let params =
+            GetWindowForTargetParams::builder().target_id(self.inner.target_id().clone()).build();
+        let result = self
+            .inner
+            .execute(params)
+            .await
+            .map_err(|e| VoidCrawlError::PageError(format!("getWindowForTarget: {e}")))?;
+        Ok(result.result.window_id.inner().to_owned())
+    }
+
+    /// Whether this tab is the only one in its browser window.
+    ///
+    /// Chrome composites only a window's frontmost tab, so a page that shares
+    /// its window with others cannot paint while a sibling is active. A page
+    /// that is alone in its window keeps painting regardless of what other
+    /// windows do — which is what makes a concurrent, non-foregrounded
+    /// [`recording`](crate::recording) possible.
+    ///
+    /// Costs one `Target.getTargets` plus one `Browser.getWindowForTarget`
+    /// per page target, so it's a per-operation check, not a per-frame one.
+    pub async fn alone_in_window(&self) -> Result<bool> {
+        let mine = self.window_id().await?;
+        let targets = self
+            .inner
+            .execute(GetTargetsParams::default())
+            .await
+            .map_err(|e| VoidCrawlError::PageError(format!("getTargets: {e}")))?;
+
+        let own_target = self.target_id();
+        for info in &targets.result.target_infos {
+            // Only page targets occupy a window's tab strip; workers and
+            // iframes report a window but never occlude anything.
+            if info.r#type != "page" || info.target_id.inner() == &own_target {
+                continue;
+            }
+            let params =
+                GetWindowForTargetParams::builder().target_id(info.target_id.clone()).build();
+            // A target can die between enumeration and lookup; a target we
+            // can't place can't be proven to share this window.
+            if let Ok(result) = self.inner.execute(params).await
+                && *result.result.window_id.inner() == mine
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Reject a mutation while this target is parked by an explicit interrupt.
@@ -1462,7 +1534,7 @@ impl Page {
     }
 
     /// Current `window.scrollX`/`scrollY`, in CSS pixels.
-    async fn scroll_position(&self) -> Result<(f64, f64)> {
+    pub(crate) async fn scroll_position(&self) -> Result<(f64, f64)> {
         let value = self.evaluate_js("[window.scrollX, window.scrollY]").await?;
         let arr = value.as_array().ok_or_else(|| {
             VoidCrawlError::JsEvalError("scroll position: expected a [x, y] array".into())
@@ -1479,7 +1551,7 @@ impl Page {
         clippy::cast_precision_loss,
         reason = "scroll offsets are CSS pixels, always far below f64's 2^52 exact-integer range"
     )]
-    async fn scroll_to(&self, target: ScrollTarget) -> Result<()> {
+    pub(crate) async fn scroll_to(&self, target: ScrollTarget) -> Result<()> {
         let y = match target {
             ScrollTarget::Pixels(y) => y as f64,
             ScrollTarget::Viewports(n) => {

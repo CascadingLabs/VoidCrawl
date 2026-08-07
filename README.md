@@ -162,6 +162,7 @@ uv run pytest tests/ -v
 - [Anti-bot / CDN detection](docs/antibot.md)
 - [Challenge escalation with VNC/noVNC](docs/challenge-escalation.md)
 - [Cross-origin & closed-shadow frames](docs/cross-origin-frames.md)
+- [Screen recording](docs/recording.md)
 - [Examples](examples/)
 
 ## Community

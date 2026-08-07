@@ -12,6 +12,7 @@ pub mod interrupt;
 pub mod introspect;
 pub mod network;
 pub mod profile_registry;
+pub mod recording;
 pub mod screenshot;
 pub mod selector;
 pub mod session;

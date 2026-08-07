@@ -57,6 +57,7 @@ Native profile discovery and leasing stay outside the MCP tool surface. MCP clie
 | `fetch_snapshot` | One URL → compact rendered-page snapshot with headings, text blocks, links, controls, forms, metadata, and truncation stats. |
 | `fetch_many` | Parallel fan-out over the pool. |
 | `screenshot` | Load URL, return PNG. |
+| `record` | Load URL, record it, write frames/video to disk and return paths. |
 | `pool_status` | Current pool config + open session count. |
 
 ### Stateful sessions
@@ -68,6 +69,7 @@ Open a session → navigate → operate → close. Each session is a dedicated C
 | `session_open` | Launch dedicated Chrome. Returns `session_id`. Optional `profile_id`, `profile_pool`, or `user_data_dir` selects persistent state. |
 | `session_navigate` | Navigate session to URL, wait for settle. |
 | `session_content` | Return HTML, title, URL. |
+| `session_record_start` / `session_record_stop` | Record the session while you drive it; writes frames/video to disk. |
 | `session_snapshot` | Return a compact rendered-page snapshot of the current session page. |
 | `session_screenshot` | Return a PNG of the current session page exactly as it stands — no navigation, no URL change. |
 | `session_close` | Tear down. |
@@ -91,6 +93,23 @@ Use `session_ax_tree` for role/name targeting before `click_by_role`. Use
   always navigates first, so it can't see state that only exists inside an
   already-open session. Unknown or closed `session_id`s fail explicitly with
   `invalid_params`.
+
+#### Recording
+
+`record` and `session_record_start` / `session_record_stop` capture a page as a
+sequence of frames rather than a single image. Unlike the screenshot tools they
+never return frames inline — a recording is hundreds of images, which would
+swamp an agent's context — so frames and any encoded artifact are written to
+disk and the response carries the output directory, per-region paths, and
+counts.
+
+Two behaviors to expect: `fps` is a **ceiling**, not a floor (Chrome emits
+frames when it paints, so a static page yields very few — check
+`effective_fps`), and `selectors` is a **list**, producing one cropped region
+per selector from a single recording. Recordings are capped at 120s, and a
+session recording holds that browser's capture lock, so screenshots on its
+sibling tabs wait until it stops. See [recording.md](recording.md) for the
+full model, including how to record concurrently.
 
 ### Managed profiles
 
