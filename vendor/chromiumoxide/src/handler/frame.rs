@@ -19,6 +19,7 @@ use chromiumoxide_cdp::cdp::{
 };
 use chromiumoxide_types::{Method, MethodId, Request};
 
+use crate::browser::CdpMode;
 use crate::error::DeadlineExceeded;
 use crate::handler::REQUEST_TIMEOUT;
 use crate::handler::domworld::DOMWorld;
@@ -212,7 +213,7 @@ impl FrameManager {
     }
 
     /// The commands to execute in order to initialize this frame manager
-    pub fn init_commands(timeout: Duration) -> CommandChain {
+    pub fn init_commands(timeout: Duration, cdp_mode: CdpMode) -> CommandChain {
         let enable = page::EnableParams::default();
         let get_tree = page::GetFrameTreeParams::default();
         let set_lifecycle = page::SetLifecycleEventsEnabledParams::new(true);
@@ -228,11 +229,11 @@ impl FrameManager {
         // most-cited CDP automation tell — enabling the Runtime domain makes Chrome
         // emit `Runtime.consoleAPICalled`, which Cloudflare/DataDome detect to flag
         // headless/automation (this is exactly why a Managed Challenge clears for a
-        // human but not for a CDP-driven browser). When `VOIDCRAWL_STEALTH_NO_RUNTIME`
-        // is set we skip it; `Runtime.evaluate` still works in the page's main world
-        // without it (the nodriver approach). Trade-off: no per-frame execution-context
-        // tracking, so cross-origin `evaluate_js_in_frame` is unavailable in this mode.
-        if std::env::var_os("VOIDCRAWL_STEALTH_NO_RUNTIME").is_none() {
+        // human but not for a CDP-driven browser). In minimal CDP mode we skip it;
+        // `Runtime.evaluate` still works in the page's main world without it (the
+        // nodriver approach). Trade-off: no per-frame execution-context tracking, so
+        // cross-origin `evaluate_js_in_frame` is unavailable in this mode.
+        if !cdp_mode.is_minimal() {
             let enable_runtime = runtime::EnableParams::default();
             cmds.push((
                 enable_runtime.identifier(),
