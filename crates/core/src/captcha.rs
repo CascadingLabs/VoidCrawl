@@ -14,9 +14,8 @@
 //! back into the page's hidden response field.
 //!
 //! Heuristics are intentionally conservative — false negatives are
-//! preferable to false positives that would poison retry logic
-//! upstream. See `docs/captcha-detection.md` for the full list and
-//! known gaps.
+//! preferable to false positives that would poison retry logic upstream.
+//! The integration tests cover the supported detection signals and known gaps.
 
 use serde::Serialize;
 use serde_json::Value;

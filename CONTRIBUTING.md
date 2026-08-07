@@ -92,18 +92,18 @@ Restart Claude Code and the `voidcrawl` MCP server + its tools (`fetch`, `sessio
 
 A skill lives at `.claude/skills/voidcrawl/SKILL.md`. Claude Code auto-discovers skills in any project that has a `.claude/skills/` directory — you don't need to do anything beyond having `.mcp.json` + the built binary on disk. The skill tells Claude when to pick `voidcrawl` over `claude-in-chrome`, how to chain `click_visual_coords` for React forms, and how to react to `CaptchaDetected` errors.
 
-For full protocol + tool reference see [`docs/mcp-server.md`](docs/mcp-server.md).
+Run `voidcrawl-mcp --help` for the current tool list and server options.
 
 ### Run Python tests
 
 ```bash
-uv run pytest tests/unit/core/fetcher/test_browser.py -v
+uv run pytest tests/ -v
 ```
 
 ### Full CI check
 
 ```bash
-uv run poe ci-check
+uv run poe ci
 ```
 
 ## Linting & Formatting
@@ -120,7 +120,7 @@ cargo fmt --check
 - Clippy config lives in `clippy.toml` -enforces cognitive complexity thresholds, MSRV 1.86
 - `print!`/`println!` are disallowed -use `tracing` instead
 - Use `thiserror` for error types -every new error variant goes in `error.rs`
-- Map chromiumoxide errors to `YosoiError` at the boundary, not deep inside methods
+- Map chromiumoxide errors to `VoidCrawlError` at the boundary, not deep inside methods
 - Builders use the owned-self pattern: `.method(self) -> Self`
 
 ### Python
@@ -175,25 +175,26 @@ test(driver): add stealth config integration test
 ## Project Layout
 
 ```
-void_crawl/
+VoidCrawl/
 ├── crates/
-│   ├── core/              # void_crawl_core -pure Rust CDP wrapper
+│   ├── core/              # void_crawl_core — pure Rust CDP wrapper
 │   │   ├── src/           # Library source
 │   │   └── tests/         # Integration tests (require Chrome)
-│   └── pyo3_bindings/     # void_crawl -PyO3 extension module
+│   ├── mcp_server/        # voidcrawl-mcp binary and package
+│   └── pyo3_bindings/     # voidcrawl._ext PyO3 extension module
 │       └── src/lib.rs     # Python class definitions
+├── voidcrawl/             # Python package and type stubs
 ├── Cargo.toml             # Workspace root
 ├── pyproject.toml         # maturin build config
-├── build.sh               # Build helper
-└── void_crawl.pyi         # Python type stubs
+└── build.sh               # Build helper
 ```
 
 ## Adding a New Page Method
 
 1. **Rust core** (`crates/core/src/page.rs`): Add the async method on `Page`
 2. **PyO3 binding** (`crates/pyo3_bindings/src/lib.rs`): Add corresponding `#[pymethods]` on `PyPage`
-3. **Type stub** (`void_crawl.pyi`): Add the async signature
-4. **Test**: Add a Rust test in `crates/core/tests/integration.rs` and a Python test in `tests/unit/core/fetcher/test_browser.py`
+3. **Type stub** (`voidcrawl/__init__.pyi`): Add the async signature
+4. **Test**: Add focused Rust and Python tests alongside the affected behavior under `crates/core/tests/` and `tests/`.
 
 ## Adding a New BrowserSession Option
 
@@ -206,7 +207,7 @@ void_crawl/
 
 - Every Python-facing async method uses `pyo3_async_runtimes::tokio::future_into_py`
 - The inner Rust object is wrapped in `Arc<Mutex<Option<T>>>` -`Option` for clean shutdown semantics
-- Error conversion: `YosoiError` -> `PyRuntimeError` via `to_py_err()`
+- Error conversion: `VoidCrawlError` -> typed Python exceptions via `to_py_err()`
 - Keep the binding layer thin -business logic belongs in `crates/core/`
 
 ## License

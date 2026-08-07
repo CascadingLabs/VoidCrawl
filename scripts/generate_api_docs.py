@@ -9,11 +9,11 @@ Each symbol heading includes a linked GitHub source icon pointing to the
 exact line in the repository.
 
 Usage:
-    # Single combined file:
-    uv run python scripts/generate_api_docs.py --output api-reference.md
+    # Write the canonical reference in the sibling VoidCrawlDocs repository:
+    uv run python scripts/generate_api_docs.py
 
-    # Split into per-category files:
-    uv run python scripts/generate_api_docs.py --output-dir docs/reference
+    # Generate an explicitly requested local artifact when needed:
+    uv run python scripts/generate_api_docs.py --output-dir /tmp/voidcrawl-reference
 """
 
 from __future__ import annotations

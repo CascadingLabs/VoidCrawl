@@ -16,7 +16,7 @@ out-of-process regardless. Reaching THOSE is an explicit opt-in: launch with
 default because it weakens the browser's isolation posture.
 
 Run:
-    uv run python examples/cross_origin_iframe_eval.py
+    uv run python examples/advanced/cross_origin_iframe_eval.py
 
 Part 1 is self-contained (a data: page embedding a separate-origin data: child),
 so it always runs. Part 2 hits a live third-party page that embeds reCAPTCHA

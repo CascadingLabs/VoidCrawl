@@ -28,7 +28,7 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://github.com/CascadingLabs/VoidCrawl"
-Documentation = "https://github.com/CascadingLabs/VoidCrawl/blob/main/docs/mcp-server.md"
+Documentation = "https://cascadinglabs.com/voidcrawl/"
 Repository = "https://github.com/CascadingLabs/VoidCrawl"
 Issues = "https://github.com/CascadingLabs/VoidCrawl/issues"
 Changelog = "https://github.com/CascadingLabs/VoidCrawl/blob/main/CHANGELOG.md"

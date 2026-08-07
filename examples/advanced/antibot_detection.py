@@ -17,15 +17,14 @@ Honesty notes baked in, because the live web doesn't read our annotations:
     higher-cost than a header tell.
   * "no vendor detected" is **not** proof we got through. A cloaked block can
     serve a decoy 200 with no telling header and look identical to a clean pass;
-    a response fingerprinter cannot tell them apart (that's the DOM detector's
-    job — see docs/antibot.md).
+    a response fingerprinter cannot tell them apart (use a DOM-level detector
+    when that distinction matters).
 
 This fetches live third-party sites from your IP. Hammering known walls
 (fortress, DataDome storefronts) repeatedly can flag your IP — run sparingly.
-The routing table below is illustrative; the shipped policy lives in
-docs/antibot.md, not here.
+The routing table below is illustrative, not a complete production policy.
 
-Run:  python examples/antibot_detection.py
+Run:  uv run python examples/advanced/antibot_detection.py
 """
 
 import asyncio
@@ -70,7 +69,7 @@ TARGETS = [
 ]
 
 
-# ── Routing policy (illustrative; the shipped policy lives in docs/antibot.md) ─
+# ── Routing policy (illustrative, not a complete production policy) ─
 
 
 def decide_route(verdict: AntibotVerdict | None) -> str:

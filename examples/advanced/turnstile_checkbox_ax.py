@@ -22,7 +22,7 @@ default, so launch with `extra_args=["disable-site-isolation-trials"]` or the
 frame is unreachable (`FrameNotFound`).
 
 Run:
-    uv run python examples/turnstile_checkbox_ax.py
+    uv run python examples/advanced/turnstile_checkbox_ax.py
 
 Hits a live third-party demo that embeds managed Turnstile; degrades gracefully
 without network or if the demo changes.

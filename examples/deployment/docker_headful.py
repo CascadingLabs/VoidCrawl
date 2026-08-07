@@ -11,7 +11,7 @@ Setup (run this first in a separate terminal):
 
 Then run this script:
 
-    python examples/docker_headful.py
+    uv run python examples/deployment/docker_headful.py
 
 Watch Chrome live in your browser:
     Open http://localhost:6080 and click Connect.
