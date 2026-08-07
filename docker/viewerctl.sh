@@ -3,6 +3,9 @@
 set -euo pipefail
 
 RUNTIME_DIR="${RUNTIME_DIR:-/tmp/voidcrawl}"
+XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$RUNTIME_DIR/xdg}"
+WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}"
+export XDG_RUNTIME_DIR WAYLAND_DISPLAY
 VIEWER_DIR="$RUNTIME_DIR/viewer"
 STATE_FILE="$VIEWER_DIR/lease.env"
 TOKEN_FILE="$VIEWER_DIR/tokens"
@@ -54,6 +57,36 @@ load_state() {
 
 pid_is_running() {
     [[ "${1:-}" =~ ^[1-9][0-9]*$ ]] && kill -0 "$1" 2>/dev/null
+}
+
+listener_ready() {
+    local wanted_port="$1"
+    python3 - "$wanted_port" <<'PY'
+from pathlib import Path
+import sys
+
+wanted = int(sys.argv[1])
+for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+    for line in Path(path).read_text().splitlines()[1:]:
+        address, state = line.split()[1:4:2]
+        if state == "0A" and int(address.rsplit(":", 1)[1], 16) == wanted:
+            raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+wait_for_listeners() {
+    local vnc_port="$1" novnc_port="$2" attempt
+    for ((attempt = 1; attempt <= 30; attempt++)); do
+        if listener_ready "$vnc_port" && listener_ready "$novnc_port"; then
+            return 0
+        fi
+        if ! pid_is_running "$WAYVNC_PID" || ! pid_is_running "$WEBSOCKIFY_PID"; then
+            return 1
+        fi
+        sleep 0.1
+    done
+    return 1
 }
 
 clear_state() {
@@ -150,7 +183,15 @@ open_lease() {
         >> "$LOG_DIR/websockify.log" 2>&1 &
     local websockify_pid=$!
 
-    local url="http://127.0.0.1:${VIEWER_NOVNC_PORT:-6080}/vnc.html?autoconnect=true&path=websockify%3Ftoken%3D${token}"
+    # Scale the 1920x1080 RFB framebuffer to the operator's available browser
+    # viewport. noVNC otherwise defaults to `resize=off`, leaving a clipped or
+    # panned canvas when the browser window is narrower than the virtual output.
+    # Pin connection settings in the URL so a browser's persisted noVNC
+    # preferences cannot switch this loopback, plaintext websockify listener to
+    # WSS or a stale host/port.
+    local url="http://127.0.0.1:${VIEWER_NOVNC_PORT:-6080}/vnc.html?autoconnect=true&resize=scale&encrypt=false&host=127.0.0.1&port=${VIEWER_NOVNC_PORT:-6080}&path=websockify%3Ftoken%3D${token}"
+    WAYVNC_PID="$wayvnc_pid"
+    WEBSOCKIFY_PID="$websockify_pid"
     {
         printf 'LEASE_TOKEN=%q\n' "$token"
         printf 'LEASE_BROWSER=%q\n' "$browser"
@@ -160,6 +201,12 @@ open_lease() {
         printf 'LEASE_URL=%q\n' "$url"
     } > "$STATE_FILE"
     chmod 0600 "$STATE_FILE" "$TOKEN_FILE"
+
+    if ! wait_for_listeners "$vnc_port" "${VIEWER_NOVNC_PORT:-6080}"; then
+        echo "[viewer] backend failed to start; see $LOG_DIR/{wayvnc,websockify}.log" >&2
+        close_lease "$token"
+        return 1
+    fi
 
     # Detach expiry cleanup from docker exec. A stale watcher cannot close a
     # replacement lease because close_lease verifies its original token.

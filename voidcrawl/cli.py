@@ -90,7 +90,7 @@ def docker() -> None:
     "--res",
     default="1920x1080",
     metavar="WxH",
-    help="VNC resolution (headful only).  [default: 1920x1080]",
+    help="Headful output resolution.  [default: 1920x1080]",
 )
 @click.option("-d", "--detach", is_flag=True, help="Run in the background.")
 @click.option("--build", is_flag=True, help="Rebuild the Docker image first.")
@@ -109,9 +109,9 @@ def docker_up(
 
     \b
     Headful:
-      CDP   localhost:19222, localhost:19223
-      VNC   localhost:5900
-      noVNC http://localhost:6080
+      CDP     localhost:19222, localhost:19223
+      Viewer  disabled by default; enable VIEWER_MODE=local, then run
+              docker/viewer.sh open --browser <n> --ttl <duration>
     """
     docker_dir = _find_docker_dir()
 
@@ -132,8 +132,8 @@ def docker_up(
         click.echo("Starting headful Chrome container...")
         click.echo(f"  GPU profile : {profile}{detected}")
         click.echo(f"  Resolution  : {res}")
-        click.echo("  VNC         : localhost:5900")
-        click.echo("  noVNC       : http://localhost:6080")
+        click.echo("  Viewer      : disabled (set VIEWER_MODE=local to enable)")
+        click.echo("                then use docker/viewer.sh open --browser <n> --ttl 15m")
         click.echo("  CDP         : localhost:19222, localhost:19223")
         click.echo("")
 

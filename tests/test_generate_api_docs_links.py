@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,7 +19,10 @@ REPO_URL = "https://github.com/CascadingLabs/VoidCrawl"
 
 
 def _current_ref() -> str:
-    return generate_api_docs._current_git_ref()
+    try:
+        return generate_api_docs._current_git_ref()
+    except subprocess.CalledProcessError:
+        pytest.skip("source-link validation requires a Git worktree")
 
 
 def test_validate_source_links_rejects_existing_file_with_bad_line() -> None:

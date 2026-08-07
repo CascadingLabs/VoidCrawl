@@ -162,6 +162,7 @@ sequence = [
 target-version = "py310"
 line-length = 88
 src = [ "voidcrawl", "tests", "examples" ]
+extend-exclude = [ "examples/development" ]
 
 [tool.ruff.lint]
 select = [
