@@ -222,6 +222,26 @@ class PooledTab:
     async def screenshot_png(self) -> bytes:
         """Capture a full-page screenshot as PNG bytes."""
         ...
+    async def screenshot(
+        self,
+        path: str | None = None,
+        bbox: tuple[int, int, int, int] | None = None,
+        viewport_preset: str | None = None,
+        viewport_width: int | None = None,
+        viewport_height: int | None = None,
+        viewport_device_scale_factor: float | None = None,
+        viewport_mobile: bool | None = None,
+        scroll_viewports: float | None = None,
+        scroll_pixels: int | None = None,
+        full_page: bool | None = None,
+    ) -> bytes | str:
+        """Capture a PNG screenshot; see :meth:`Page.screenshot` for the
+        full argument reference. No persistent ``set_viewport`` exists on a
+        pooled tab — the pool doesn't reset viewport on release, so a
+        persistent override would leak to the next unrelated caller that
+        acquires this tab. Use the one-shot ``viewport_*`` kwargs here
+        instead."""
+        ...
     async def download(
         self,
         url: str,
@@ -657,14 +677,66 @@ class Page:
         self,
         path: str | None = None,
         bbox: tuple[int, int, int, int] | None = None,
+        viewport_preset: str | None = None,
+        viewport_width: int | None = None,
+        viewport_height: int | None = None,
+        viewport_device_scale_factor: float | None = None,
+        viewport_mobile: bool | None = None,
+        scroll_viewports: float | None = None,
+        scroll_pixels: int | None = None,
+        full_page: bool | None = None,
     ) -> bytes | str:
-        """Capture a PNG screenshot with optional disk output and/or crop.
+        """Capture a PNG screenshot with optional disk output, cropping, a
+        one-shot device/viewport override, scrolling, and/or viewport-only
+        capture. Prefer building a validated
+        :class:`voidcrawl.viewport.Viewport` and unpacking it with
+        ``**vp.as_kwargs(prefix="viewport_")`` over passing these directly.
 
         Args:
             path: If set, writes PNG to this path and returns the path.
                 If omitted, returns raw bytes.
-            bbox: Optional ``(x, y, width, height)`` in CSS pixels.
+            bbox: Optional ``(x, y, width, height)`` in CSS pixels. With
+                ``scroll_viewports``/``scroll_pixels`` set, coordinates are
+                relative to wherever that scroll lands.
+            viewport_preset: Named device (see
+                :func:`voidcrawl.viewport.list_device_presets`). Mutually
+                exclusive with ``viewport_width``/``viewport_height``.
+                One-shot: restores whatever viewport was active before,
+                even on error.
+            viewport_width: Custom one-shot viewport width in CSS pixels.
+                Requires ``viewport_height``.
+            viewport_height: Custom one-shot viewport height in CSS pixels.
+                Requires ``viewport_width``.
+            viewport_device_scale_factor: DPR for a custom viewport
+                (default ``1.0``). Ignored with ``viewport_preset``.
+            viewport_mobile: Emulate a mobile viewport for a custom size —
+                also enables touch (default ``False``). Ignored with
+                ``viewport_preset``.
+            scroll_viewports: Scroll to N viewport-heights from the top
+                before capturing (``2.0`` = "scrolled down twice"). Mutually
+                exclusive with ``scroll_pixels``. Restored after capture.
+            scroll_pixels: Scroll to an absolute pixel Y before capturing.
+            full_page: Capture the full scrollable page (default ``True``).
+                ``False`` captures only the visible viewport. Ignored when
+                ``bbox`` is set.
         """
+        ...
+    async def set_viewport(
+        self,
+        preset: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        device_scale_factor: float | None = None,
+        mobile: bool | None = None,
+    ) -> None:
+        """Persistently override this page's CDP viewport — dimensions, DPR,
+        mobile/touch identity, and (for a preset) a matching UA. Stays in
+        effect until :meth:`clear_viewport` or another `set_viewport` call.
+        Pass either ``preset`` or ``width``+``height``."""
+        ...
+    async def clear_viewport(self) -> None:
+        """Clear a :meth:`set_viewport` override, returning to the
+        session's launch-time default viewport."""
         ...
     async def detect_captcha(self) -> str | None:
         """Probe DOM for captcha / bot-wall markers.
@@ -1031,6 +1103,13 @@ def scan_bytes(
 ) -> ScanReport:
     """Scan an in-memory buffer with the content-safety gate. See
     :func:`scan_file`."""
+    ...
+
+def list_device_presets() -> list[tuple[str, int, int, float, bool]]:
+    """List named device presets as ``(name, width, height,
+    device_scale_factor, mobile)`` tuples. See
+    :func:`voidcrawl.viewport.list_device_presets` for the validated
+    Python-facing wrapper."""
     ...
 
 # ── Exceptions ──────────────────────────────────────────────────────────

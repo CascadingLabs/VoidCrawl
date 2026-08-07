@@ -55,8 +55,8 @@ use crate::{
     error::{Result, VoidCrawlError},
     input::{HumanizeOptions, Rng, humanized_path},
     response::{ResponseCapture, ResponseCaptureLimits},
-    viewport::{ScrollTarget, Viewport},
     stealth::StealthConfig,
+    viewport::{ScrollTarget, Viewport},
 };
 
 /// Wall-clock-derived seed for live humanized pointer paths. Tests seed the
@@ -308,23 +308,37 @@ pub struct Bbox {
 }
 
 /// Options for [`Page::screenshot`].
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct ScreenshotOptions {
     /// Write PNG to this path instead of returning bytes.
-    pub path:     Option<PathBuf>,
-    /// Crop to this CSS-pixel region. None = full page. With `scroll` set,
-    /// coordinates are relative to wherever that scroll lands rather than
-    /// the top of the document.
-    pub bbox:     Option<Bbox>,
+    pub path:      Option<PathBuf>,
+    /// Crop to this CSS-pixel region. Takes precedence over `full_page`.
+    /// With `scroll` set, coordinates are relative to wherever that scroll
+    /// lands rather than the top of the document.
+    pub bbox:      Option<Bbox>,
     /// Apply this viewport/device override for just this capture, then
     /// restore whatever was active before (even on error). See
     /// [`Page::set_viewport`] for a persistent version.
-    pub viewport: Option<Viewport>,
+    pub viewport:  Option<Viewport>,
     /// Scroll to this position before capturing, then restore the original
-    /// scroll position after (even on error). Only meaningful combined with
-    /// `bbox` — lets a fixed viewport be paged through and a specific
-    /// on-screen region cropped from wherever it lands.
-    pub scroll:   Option<ScrollTarget>,
+    /// scroll position after (even on error). Combine with `bbox` to crop a
+    /// specific on-screen region after paging down a fixed viewport, or use
+    /// alone with `full_page: false` to capture whatever's scrolled into
+    /// view without cropping.
+    pub scroll:    Option<ScrollTarget>,
+    /// Capture the full scrollable page (default `true`) vs just what's
+    /// currently visible in the viewport. Ignored when `bbox` is set — a
+    /// crop always wins. Set `false` via [`ScreenshotOptions::viewport_only`]
+    /// to capture only the visible fold: cheaper, and the right choice when
+    /// "screenshot this page" really means "what does a visitor see first,"
+    /// not the whole scroll history.
+    pub full_page: bool,
+}
+
+impl Default for ScreenshotOptions {
+    fn default() -> Self {
+        Self { path: None, bbox: None, viewport: None, scroll: None, full_page: true }
+    }
 }
 
 impl ScreenshotOptions {
@@ -345,6 +359,13 @@ impl ScreenshotOptions {
 
     pub fn with_scroll(mut self, scroll: ScrollTarget) -> Self {
         self.scroll = Some(scroll);
+        self
+    }
+
+    /// Capture only the currently visible viewport instead of the full
+    /// scrollable page.
+    pub fn viewport_only(mut self) -> Self {
+        self.full_page = false;
         self
     }
 }
@@ -424,20 +445,20 @@ impl DownloadCapture {
 /// Thin wrapper over `chromiumoxide::Page` exposing a clean async API.
 #[derive(Debug)]
 pub struct Page {
-    inner:          CdpPage,
+    inner:             CdpPage,
     /// `true` between [`Page::arm_download`] / a `download_to_dir` in flight
     /// and the matching reset. The pool checks this on release to reset an
     /// abandoned download behavior cheaply (no CDP call on the common path).
-    download_armed: AtomicBool,
+    download_armed:    AtomicBool,
     /// Last virtual cursor position (CSS px), so a humanized move starts from
     /// where the pointer actually is. Defaults to the top-left.
-    cursor:         Mutex<(f64, f64)>,
+    cursor:            Mutex<(f64, f64)>,
     /// Shared with every other `Page` from the same `BrowserSession`.
     /// Headless Chrome only reliably composites frames for the
     /// foregrounded tab, so `screenshot()` holds this while it brings
     /// itself to front and captures — serializing just that instant
     /// across tabs on one browser, not the tabs' navigation/JS work.
-    capture_lock:   Arc<AsyncMutex<()>>,
+    capture_lock:      Arc<AsyncMutex<()>>,
     /// The viewport/device override currently in effect via
     /// [`Page::set_viewport`], or `None` when using the session's
     /// launch-time default. `screenshot()`'s one-shot `viewport` option
@@ -533,14 +554,13 @@ impl Page {
                 .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
         }
 
-        // 3. Viewport / device metrics
-        let metrics = SetDeviceMetricsOverrideParams::new(
-            i64::from(cfg.viewport_width),
-            i64::from(cfg.viewport_height),
-            1.0,
-            false,
-        );
-        self.inner.execute(metrics).await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        // 3. Viewport / device metrics — through `set_viewport` (not a raw
+        // CDP call) so `viewport_override` reflects this as the page's
+        // baseline. Otherwise a later one-shot `screenshot(viewport: ...)`
+        // would see `current_viewport() == None`, "restore" by calling
+        // `clear_viewport`, and wipe this launch-time override instead of
+        // putting it back.
+        self.set_viewport(Viewport::custom(cfg.viewport_width, cfg.viewport_height)).await?;
 
         // 4. Bypass CSP so our injected JS can run
         if cfg.bypass_csp {
@@ -1030,6 +1050,16 @@ impl Page {
     /// Stays in effect until [`Page::clear_viewport`] or another call to
     /// this method; does **not** auto-restore.
     ///
+    /// `device_scale_factor` drives `window.devicePixelRatio` and CSS
+    /// media-query matching (`min-resolution`, etc.) correctly, so layout
+    /// and JS see a real Retina/mobile device. It does **not** change the
+    /// pixel dimensions of a [`Page::screenshot`] PNG, though — CDP's
+    /// `Page.captureScreenshot` renders at CSS-pixel size regardless of
+    /// DPR in this configuration (tried both the device-metrics `scale`
+    /// field and the per-clip `scale`; neither affected raster output).
+    /// For pixel-perfect high-DPI captures, request `width`/`height`
+    /// already multiplied by the density you want.
+    ///
     /// For a one-off override scoped to a single capture, pass
     /// [`ScreenshotOptions::viewport`] to [`Page::screenshot`] instead —
     /// that snapshots and restores whatever was here before, so it can't
@@ -1063,8 +1093,14 @@ impl Page {
                 .await
                 .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
         }
-        *self.viewport_override.lock().unwrap() = Some(viewport);
-        Ok(())
+        *self
+            .viewport_override
+            .lock()
+            .map_err(|_| VoidCrawlError::Other("viewport lock poisoned".into()))? = Some(viewport);
+        // The device-metrics change doesn't always reflect in
+        // `window.innerWidth`/media queries synchronously once the CDP
+        // response returns — settle it before returning.
+        self.wait_for_repaint().await
     }
 
     /// Clear a [`Page::set_viewport`] override, returning to the session's
@@ -1080,14 +1116,17 @@ impl Page {
             .execute(SetTouchEmulationEnabledParams::new(false))
             .await
             .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
-        *self.viewport_override.lock().unwrap() = None;
-        Ok(())
+        *self
+            .viewport_override
+            .lock()
+            .map_err(|_| VoidCrawlError::Other("viewport lock poisoned".into()))? = None;
+        self.wait_for_repaint().await
     }
 
     /// The viewport override currently in effect via [`Page::set_viewport`],
     /// or `None` if using the session's launch-time default.
     pub fn current_viewport(&self) -> Option<Viewport> {
-        self.viewport_override.lock().unwrap().clone()
+        self.viewport_override.lock().ok().and_then(|guard| guard.clone())
     }
 
     // ── Screenshots & PDF ───────────────────────────────────────────────
@@ -1112,10 +1151,10 @@ impl Page {
     ///   set, `bbox.x`/`bbox.y` are relative to wherever that scroll lands
     ///   rather than the top of the document.
     /// * `viewport` swaps in a device/dimension override (see
-    ///   [`Page::set_viewport`]) for just this capture and restores
-    ///   whatever was active before, even on error.
-    /// * `scroll` moves the page before capturing (see [`ScrollTarget`])
-    ///   and restores the original scroll position after, even on error.
+    ///   [`Page::set_viewport`]) for just this capture and restores whatever
+    ///   was active before, even on error.
+    /// * `scroll` moves the page before capturing (see [`ScrollTarget`]) and
+    ///   restores the original scroll position after, even on error.
     pub async fn screenshot(&self, opts: ScreenshotOptions) -> Result<ScreenshotOutput> {
         // One-shot viewport override for just this capture — snapshot
         // whatever's already in effect so it's restored exactly, even on
@@ -1137,9 +1176,7 @@ impl Page {
                 Some(v) => self.set_viewport(v).await,
                 None => self.clear_viewport().await,
             };
-            if let Err(e) = restored {
-                tracing::warn!("failed to restore viewport after screenshot: {e}");
-            }
+            let _ = restored;
         }
 
         result
@@ -1177,9 +1214,28 @@ impl Page {
                 // `scroll`), so always allow capture beyond it rather than
                 // silently clamping to whatever's currently on screen.
                 .capture_beyond_viewport(true);
-        } else {
+        } else if opts.full_page {
             builder = builder.full_page(true);
+        } else if let Some(vp) = self.current_viewport() {
+            // Viewport-only: an explicit clip at the tracked viewport's
+            // exact size, rather than relying on Chrome's ambient "current
+            // ly visible" state. A prior full-page/capture-beyond-viewport
+            // capture on this same page can leave that ambient state
+            // stale (observed: viewport-only immediately after full-page
+            // returns the *previous* full-page height, not the viewport's),
+            // so an explicit size is the only way to make this mode
+            // order-independent.
+            builder = builder.clip(CdpClipViewport {
+                x:      0.0,
+                y:      0.0,
+                width:  f64::from(vp.width),
+                height: f64::from(vp.height),
+                scale:  1.0,
+            });
         }
+        // else: no tracked viewport (e.g. a page adopted via attach_page
+        // that skipped apply_stealth) — leave unset and take whatever
+        // Chrome currently considers the visible viewport.
 
         // Headless Chrome only reliably composites a frame for the
         // foregrounded tab. With several tabs sharing one browser process
@@ -1201,9 +1257,7 @@ impl Page {
         drop(capture_guard);
 
         if let Some((x, y)) = restore_scroll {
-            if let Err(e) = self.evaluate_js(&format!("window.scrollTo({x}, {y})")).await {
-                tracing::warn!("failed to restore scroll position after screenshot: {e}");
-            }
+            let _ = self.evaluate_js(&format!("window.scrollTo({x}, {y})")).await;
         }
 
         if let Some(path) = opts.path.clone() {
@@ -1230,18 +1284,45 @@ impl Page {
     /// Scroll to `target` (see [`ScrollTarget`]) and wait for the resulting
     /// layout to actually paint — two animation frames — before the caller
     /// captures, rather than a blind sleep.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "scroll offsets are CSS pixels, always far below f64's 2^52 exact-integer range"
+    )]
     async fn scroll_to(&self, target: ScrollTarget) -> Result<()> {
         let y = match target {
             ScrollTarget::Pixels(y) => y as f64,
             ScrollTarget::Viewports(n) => {
-                let height =
-                    self.evaluate_js("window.innerHeight").await?.as_f64().unwrap_or(0.0);
+                let height = self.evaluate_js("window.innerHeight").await?.as_f64().unwrap_or(0.0);
                 height * n
             }
         };
         self.evaluate_js(&format!("window.scrollTo(0, {y})")).await?;
-        self.evaluate_js("new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
-            .await?;
+        self.wait_for_repaint().await
+    }
+
+    /// Wait for two animation frames — a layout-affecting CDP command
+    /// (device-metrics override, scroll) doesn't always reflect in
+    /// `window.innerWidth`/`scrollY`/etc. synchronously once the CDP
+    /// response returns; this settles it before the caller reads or
+    /// captures, without a blind sleep.
+    ///
+    /// Bounded: `requestAnimationFrame` never fires on a backgrounded tab in
+    /// headless Chrome (the same reason `screenshot()` brings a tab to
+    /// front before capturing — see `capture_lock`), and this is called
+    /// from `set_viewport`/`clear_viewport`, which run on pool tabs that
+    /// are *not* guaranteed to be foregrounded. An unbounded wait there
+    /// would deadlock pool warmup/eviction forever instead of just being
+    /// occasionally stale. Best-effort: on timeout the caller's JS-visible
+    /// state may lag by a frame until the tab is next foregrounded or
+    /// navigated, which is an acceptable trade for "never hangs."
+    async fn wait_for_repaint(&self) -> Result<()> {
+        let _ = time::timeout(
+            Duration::from_millis(500),
+            self.evaluate_js(
+                "new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))",
+            ),
+        )
+        .await;
         Ok(())
     }
 
@@ -2347,6 +2428,51 @@ fn client_hints_for_ua(ua: &str) -> (String, Option<UserAgentMetadata>) {
     // platform_version, architecture, model, and mobile are all set above, so
     // this is `Some` in practice. `None` (unreachable) simply skips metadata.
     (nav_platform.to_string(), builder.build().ok())
+}
+
+/// The mobile counterpart to [`client_hints_for_ua`], used by
+/// [`Page::set_viewport`] for device-preset UAs. Real Safari (iPhone/iPad
+/// UAs) never sends Client-Hints headers at all, so those get a plain UA
+/// override with no fabricated metadata — matching a real device rather
+/// than inventing brands Safari itself doesn't have. Chrome-on-Android UAs
+/// get `mobile: true` metadata built the same way `client_hints_for_ua`
+/// builds it for desktop Chrome.
+fn mobile_ua_platform_and_metadata(ua: &str) -> (String, Option<UserAgentMetadata>) {
+    if ua.contains("iPad") {
+        return ("iPad".to_string(), None);
+    }
+    if ua.contains("iPhone") {
+        return ("iPhone".to_string(), None);
+    }
+
+    let chrome_ver: Option<&str> =
+        ua.split("Chrome/").nth(1).and_then(|s| s.split_whitespace().next());
+    let major: Option<&str> = chrome_ver.and_then(|v| v.split('.').next());
+
+    let mut builder = UserAgentMetadata::builder()
+        .platform("Android")
+        .platform_version("14.0.0")
+        .architecture("")
+        .model("")
+        .mobile(true)
+        .bitness("64")
+        .wow64(false);
+
+    if let (Some(major), Some(full)) = (major, chrome_ver) {
+        builder = builder
+            .brands([
+                UserAgentBrandVersion::new("Chromium", major),
+                UserAgentBrandVersion::new("Google Chrome", major),
+                UserAgentBrandVersion::new("Not_A Brand", "24"),
+            ])
+            .full_version_lists([
+                UserAgentBrandVersion::new("Chromium", full),
+                UserAgentBrandVersion::new("Google Chrome", full),
+                UserAgentBrandVersion::new("Not_A Brand", "24.0.0.0"),
+            ]);
+    }
+
+    ("Linux armv8l".to_string(), builder.build().ok())
 }
 
 #[cfg(test)]

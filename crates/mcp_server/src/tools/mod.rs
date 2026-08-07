@@ -13,4 +13,5 @@ pub mod profile_registry;
 pub mod screenshot;
 pub mod session;
 pub mod snapshot;
+pub mod viewport;
 pub mod wait;

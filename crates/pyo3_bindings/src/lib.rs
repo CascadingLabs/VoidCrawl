@@ -27,8 +27,9 @@ use void_crawl_core::{
     DeleteCookiesParams, DispatchKeyEventType, DispatchMouseEventType, DownloadCapture,
     DownloadOutcome, MAX_PROFILE_SPLIT_COPIES, ManagedProfileSnapshot, MouseButton, Page,
     PageResponse, PoolConfig, PooledTab, ProfileHandle, ProfileInfo, ProfileRegistry,
-    ResponseCapture, ResponseCaptureLimits, ScanConfig, ScanReport, StealthConfig, Verdict,
-    acquire_profile, list_profiles, scan_bytes, scan_path,
+    ResponseCapture, ResponseCaptureLimits, ScanConfig, ScanReport, ScrollTarget, StealthConfig,
+    Verdict, Viewport, acquire_profile, list_profiles, scan_bytes, scan_path,
+    viewport as viewport_mod,
 };
 
 // ── Error conversion ────────────────────────────────────────────────────
@@ -44,6 +45,92 @@ pyo3::create_exception!(voidcrawl._ext, ProfileLeaseExpired, VoidCrawlError);
 pyo3::create_exception!(voidcrawl._ext, ProfileNotFound, VoidCrawlError);
 pyo3::create_exception!(voidcrawl._ext, CaptchaDetected, VoidCrawlError);
 pyo3::create_exception!(voidcrawl._ext, AntibotChallenge, VoidCrawlError);
+
+/// Resolve `(preset, width, height, device_scale_factor, mobile)` kwargs —
+/// shared by `PyPage`/`PyPooledTab`'s `set_viewport` and `screenshot`
+/// methods — into a `Viewport`. Pass either `preset` (a name from
+/// `list_device_presets()`) or `width`+`height`; mixing them is an error.
+/// This is the raw substrate: the pydantic `Viewport` model in
+/// `voidcrawl/__init__.py` is where a Python caller gets enum-style
+/// validation before a call ever reaches here.
+fn resolve_viewport_args(
+    preset: Option<&str>,
+    width: Option<u32>,
+    height: Option<u32>,
+    device_scale_factor: Option<f64>,
+    mobile: Option<bool>,
+) -> PyResult<Viewport> {
+    match (preset, width, height) {
+        (Some(name), None, None) => viewport_mod::preset(name).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "unknown device preset {name:?}; call list_device_presets() for valid names"
+            ))
+        }),
+        (None, Some(w), Some(h)) => {
+            let mut vp = Viewport::custom(w, h);
+            vp.device_scale_factor = device_scale_factor.unwrap_or(1.0);
+            vp.mobile = mobile.unwrap_or(false);
+            vp.has_touch = vp.mobile;
+            Ok(vp)
+        }
+        (Some(_), _, _) => {
+            Err(PyValueError::new_err("preset is mutually exclusive with width/height"))
+        }
+        (None, Some(_), None) | (None, None, Some(_)) => {
+            Err(PyValueError::new_err("width and height must both be set together"))
+        }
+        (None, None, None) => Err(PyValueError::new_err("pass either preset= or width=+height=")),
+    }
+}
+
+/// Build a `ScreenshotOptions` from the raw kwargs `PyPage`/`PyPooledTab`'s
+/// `screenshot()` accept. Shared so both bindings resolve `viewport`/
+/// `scroll`/`full_page` identically.
+#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+fn build_screenshot_options(
+    path: Option<String>,
+    bbox: Option<(u32, u32, u32, u32)>,
+    viewport_preset: Option<&str>,
+    viewport_width: Option<u32>,
+    viewport_height: Option<u32>,
+    viewport_device_scale_factor: Option<f64>,
+    viewport_mobile: Option<bool>,
+    scroll_viewports: Option<f64>,
+    scroll_pixels: Option<i64>,
+    full_page: Option<bool>,
+) -> PyResult<void_crawl_core::ScreenshotOptions> {
+    let mut opts = void_crawl_core::ScreenshotOptions::default();
+    if let Some(p) = path {
+        opts = opts.with_path(p);
+    }
+    if let Some((x, y, w, h)) = bbox {
+        opts = opts.with_bbox(void_crawl_core::Bbox { x, y, width: w, height: h });
+    }
+    if viewport_preset.is_some() || viewport_width.is_some() || viewport_height.is_some() {
+        let vp = resolve_viewport_args(
+            viewport_preset,
+            viewport_width,
+            viewport_height,
+            viewport_device_scale_factor,
+            viewport_mobile,
+        )?;
+        opts = opts.with_viewport(vp);
+    }
+    match (scroll_viewports, scroll_pixels) {
+        (Some(n), None) => opts = opts.with_scroll(ScrollTarget::Viewports(n)),
+        (None, Some(y)) => opts = opts.with_scroll(ScrollTarget::Pixels(y)),
+        (Some(_), Some(_)) => {
+            return Err(PyValueError::new_err(
+                "scroll_viewports and scroll_pixels are mutually exclusive",
+            ));
+        }
+        (None, None) => {}
+    }
+    if full_page == Some(false) {
+        opts = opts.viewport_only();
+    }
+    Ok(opts)
+}
 
 #[allow(clippy::needless_pass_by_value)] // used as fn pointer in map_err(to_py_err)
 fn to_py_err(e: void_crawl_core::VoidCrawlError) -> PyErr {
@@ -1015,19 +1102,66 @@ impl PyPage {
         with_page_map!(self, py, |page| page.screenshot_png(), |bytes| PyBytesResult(bytes))
     }
 
-    /// Take a PNG screenshot with optional disk output and/or cropping.
+    /// Take a PNG screenshot with optional disk output, cropping, a one-shot
+    /// device/viewport override, scrolling, and/or viewport-only capture.
     ///
     /// Args:
     ///     path: If set, writes PNG to this path and returns the path as a
     ///         string. If omitted, returns raw bytes.
     ///     bbox: Optional ``(x, y, width, height)`` in CSS pixels to crop.
-    #[pyo3(signature = (path=None, bbox=None))]
+    ///         With ``scroll_viewports``/``scroll_pixels`` set, ``x``/``y``
+    ///         are relative to wherever that scroll lands.
+    ///     viewport_preset: Named device (see :func:`list_device_presets`),
+    ///         e.g. ``"iPhone 16 Pro Max"``. Mutually exclusive with
+    ///         ``viewport_width``/``viewport_height``. One-shot: restores
+    ///         whatever viewport was active before, even on error.
+    ///     viewport_width, viewport_height: Custom one-shot viewport size in
+    ///         CSS pixels. Both required together.
+    ///     viewport_device_scale_factor: DPR for a custom viewport
+    ///         (default 1.0). Ignored with ``viewport_preset``.
+    ///     viewport_mobile: Emulate a mobile viewport for a custom size —
+    ///         also enables touch (default ``False``). Ignored with
+    ///         ``viewport_preset``.
+    ///     scroll_viewports: Scroll to N viewport-heights from the top
+    ///         before capturing (``2.0`` = "scrolled down twice"). Mutually
+    ///         exclusive with ``scroll_pixels``. Restored after capture.
+    ///     scroll_pixels: Scroll to an absolute pixel Y before capturing.
+    ///     full_page: Capture the full scrollable page (default ``True``).
+    ///         Pass ``False`` to capture only the visible viewport. Ignored
+    ///         when ``bbox`` is set.
+    #[pyo3(signature = (
+        path=None, bbox=None,
+        viewport_preset=None, viewport_width=None, viewport_height=None,
+        viewport_device_scale_factor=None, viewport_mobile=None,
+        scroll_viewports=None, scroll_pixels=None, full_page=None,
+    ))]
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
     fn screenshot<'py>(
         &self,
         py: Python<'py>,
         path: Option<String>,
         bbox: Option<(u32, u32, u32, u32)>,
+        viewport_preset: Option<String>,
+        viewport_width: Option<u32>,
+        viewport_height: Option<u32>,
+        viewport_device_scale_factor: Option<f64>,
+        viewport_mobile: Option<bool>,
+        scroll_viewports: Option<f64>,
+        scroll_pixels: Option<i64>,
+        full_page: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = build_screenshot_options(
+            path,
+            bbox,
+            viewport_preset.as_deref(),
+            viewport_width,
+            viewport_height,
+            viewport_device_scale_factor,
+            viewport_mobile,
+            scroll_viewports,
+            scroll_pixels,
+            full_page,
+        )?;
         let inner = Arc::clone(&self.inner);
         future_into_py(py, async move {
             let page = inner
@@ -1036,16 +1170,45 @@ impl PyPage {
                 .as_ref()
                 .cloned()
                 .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
-            let mut opts = void_crawl_core::ScreenshotOptions::default();
-            if let Some(p) = path {
-                opts = opts.with_path(p);
-            }
-            if let Some((x, y, w, h)) = bbox {
-                opts = opts.with_bbox(void_crawl_core::Bbox { x, y, width: w, height: h });
-            }
             let result = page.screenshot(opts).await.map_err(to_py_err)?;
             Ok(PyScreenshotOutput(result))
         })
+    }
+
+    /// Persistently override this page's CDP viewport — dimensions, DPR,
+    /// mobile/touch identity, and (for a preset) a matching UA. Stays in
+    /// effect across subsequent navigate/click/screenshot calls until
+    /// :meth:`clear_viewport` or another `set_viewport` call. For a
+    /// one-off override scoped to a single capture, pass ``viewport_*``
+    /// kwargs to :meth:`screenshot` instead.
+    ///
+    /// Args:
+    ///     preset: Named device (see :func:`list_device_presets`).
+    ///         Mutually exclusive with ``width``/``height``.
+    ///     width, height: Custom viewport size in CSS pixels.
+    ///     device_scale_factor: DPR for a custom viewport (default 1.0).
+    ///     mobile: Emulate a mobile viewport for a custom size (default
+    ///         ``False``; also enables touch).
+    #[pyo3(signature = (preset=None, width=None, height=None, device_scale_factor=None, mobile=None))]
+    #[allow(clippy::needless_pass_by_value)]
+    fn set_viewport<'py>(
+        &self,
+        py: Python<'py>,
+        preset: Option<String>,
+        width: Option<u32>,
+        height: Option<u32>,
+        device_scale_factor: Option<f64>,
+        mobile: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let viewport =
+            resolve_viewport_args(preset.as_deref(), width, height, device_scale_factor, mobile)?;
+        with_page_map!(self, py, |page| page.set_viewport(viewport), |_r| ())
+    }
+
+    /// Clear a :meth:`set_viewport` override, returning to the session's
+    /// launch-time default viewport.
+    fn clear_viewport<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        with_page_map!(self, py, |page| page.clear_viewport(), |_r| ())
     }
 
     /// Probe DOM for captcha / bot-wall markers. Returns the kind tag
@@ -1971,6 +2134,47 @@ impl PyPooledTab {
 
     fn screenshot_png<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         with_pooled_page_map!(self, py, |page| page.screenshot_png(), |bytes| PyBytesResult(bytes))
+    }
+
+    /// Take a PNG screenshot with optional disk output, cropping, a one-shot
+    /// device/viewport override, scrolling, and/or viewport-only capture.
+    /// See :meth:`Page.screenshot` for the full argument reference.
+    #[pyo3(signature = (
+        path=None, bbox=None,
+        viewport_preset=None, viewport_width=None, viewport_height=None,
+        viewport_device_scale_factor=None, viewport_mobile=None,
+        scroll_viewports=None, scroll_pixels=None, full_page=None,
+    ))]
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+    fn screenshot<'py>(
+        &self,
+        py: Python<'py>,
+        path: Option<String>,
+        bbox: Option<(u32, u32, u32, u32)>,
+        viewport_preset: Option<String>,
+        viewport_width: Option<u32>,
+        viewport_height: Option<u32>,
+        viewport_device_scale_factor: Option<f64>,
+        viewport_mobile: Option<bool>,
+        scroll_viewports: Option<f64>,
+        scroll_pixels: Option<i64>,
+        full_page: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = build_screenshot_options(
+            path,
+            bbox,
+            viewport_preset.as_deref(),
+            viewport_width,
+            viewport_height,
+            viewport_device_scale_factor,
+            viewport_mobile,
+            scroll_viewports,
+            scroll_pixels,
+            full_page,
+        )?;
+        with_pooled_page_map!(self, py, |page| page.screenshot(opts), |result| PyScreenshotOutput(
+            result
+        ))
     }
 
     /// Download the resource at ``url`` into directory ``dir`` over this pooled
@@ -3283,6 +3487,21 @@ fn py_scan_file(
     Ok(PyScanReport::from(report))
 }
 
+/// List named device presets (phones, tablets, desktop sizes) available to
+/// `Page.set_viewport` / `Page.screenshot(viewport_preset=...)` — Chrome
+/// DevTools' device-toolbar dropdown, as data. Returns
+/// ``(name, width, height, device_scale_factor, mobile)`` tuples.
+#[pyfunction]
+#[pyo3(name = "list_device_presets")]
+fn py_list_device_presets() -> Vec<(String, u32, u32, f64, bool)> {
+    viewport_mod::all_presets()
+        .into_iter()
+        .map(|(name, vp)| {
+            (name.to_string(), vp.width, vp.height, vp.device_scale_factor, vp.mobile)
+        })
+        .collect()
+}
+
 /// Scan an in-memory buffer with the content-safety gate. See
 /// :func:`scan_file`.
 #[pyfunction]
@@ -3333,6 +3552,7 @@ fn _ext(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_profile_pool_describe, m)?)?;
     m.add_function(wrap_pyfunction!(py_scan_file, m)?)?;
     m.add_function(wrap_pyfunction!(py_scan_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(py_list_device_presets, m)?)?;
     let py = m.py();
     m.add("VoidCrawlError", py.get_type::<VoidCrawlError>())?;
     m.add("NavigationError", py.get_type::<NavigationError>())?;

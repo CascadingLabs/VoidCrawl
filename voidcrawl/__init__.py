@@ -72,6 +72,7 @@ from voidcrawl.profiles import (
 )
 from voidcrawl.scale import ScaleProfile, ScaleReport
 from voidcrawl.schema import Attr, Schema, Text, safe_url, strip_tags
+from voidcrawl.viewport import Viewport, list_device_presets
 
 Selector = Text
 
@@ -111,9 +112,11 @@ __all__ = [
     "Selector",
     "Tab",
     "Text",
+    "Viewport",
     "VoidCrawlError",
     "acquire_profile",
     "capture_download",
+    "list_device_presets",
     "list_profiles",
     "safe_url",
     "scan_bytes",

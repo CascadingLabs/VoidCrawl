@@ -1,12 +1,25 @@
 //! Integration tests for `void_crawl_core`.
 //!
 //! These tests require a real Chromium/Chrome binary to be available.
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::absolute_paths)]
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic, clippy::absolute_paths)]
 
 use std::{collections::HashMap, time::Duration};
 
 use tokio::time;
-use void_crawl_core::{BrowserPool, BrowserSession, PoolConfig, StealthConfig};
+use void_crawl_core::{
+    Bbox, BrowserPool, BrowserSession, PoolConfig, ScreenshotOptions, ScreenshotOutput,
+    ScrollTarget, StealthConfig, Viewport, viewport,
+};
+
+/// Read width/height from a PNG's IHDR chunk (bytes 16..24, big-endian u32
+/// each — fixed by spec, right after the 8-byte signature + 4-byte length +
+/// 4-byte "IHDR" tag). Avoids pulling in an image-decoding dependency just
+/// to assert a capture's pixel dimensions in tests.
+fn png_dimensions(bytes: &[u8]) -> (u32, u32) {
+    let width = u32::from_be_bytes(bytes[16..20].try_into().expect("IHDR width bytes"));
+    let height = u32::from_be_bytes(bytes[20..24].try_into().expect("IHDR height bytes"));
+    (width, height)
+}
 
 /// Helper: launch headless with no-sandbox (required for CI / containers).
 async fn headless_session() -> BrowserSession {
@@ -417,4 +430,135 @@ async fn test_pool_idle_eviction() {
     pool.release(tab).await; // infallible
 
     pool.close().await.expect("pool close failed");
+}
+
+// ── Viewport tests ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn set_viewport_overrides_dimensions_scale_and_mobile_ua_persistently() {
+    let session = headless_session().await;
+    let page = session.new_page("https://example.com").await.expect("new_page failed");
+
+    let vp = viewport::preset("iPhone 16 Pro Max").expect("known preset");
+    page.set_viewport(vp.clone()).await.expect("set_viewport failed");
+
+    let width = page.evaluate_js("window.innerWidth").await.expect("eval failed");
+    let height = page.evaluate_js("window.innerHeight").await.expect("eval failed");
+    assert_eq!(width.as_f64(), Some(f64::from(vp.width)));
+    assert_eq!(height.as_f64(), Some(f64::from(vp.height)));
+
+    let ua = page.evaluate_js("navigator.userAgent").await.expect("eval failed");
+    assert!(ua.as_str().expect("string").contains("iPhone"), "expected iPhone UA, got {ua:?}");
+
+    let max_touch = page.evaluate_js("navigator.maxTouchPoints").await.expect("eval failed");
+    assert!(max_touch.as_f64().expect("number") > 0.0, "mobile preset should enable touch");
+
+    assert_eq!(page.current_viewport(), Some(vp));
+
+    page.close().await.ok();
+    session.close().await.ok();
+}
+
+#[tokio::test]
+async fn clear_viewport_removes_the_override() {
+    let session = headless_session().await;
+    let page = session.new_page("https://example.com").await.expect("new_page failed");
+
+    page.set_viewport(Viewport::custom(500, 400)).await.expect("set_viewport failed");
+    assert_eq!(
+        page.evaluate_js("window.innerWidth").await.expect("eval failed").as_f64(),
+        Some(500.0)
+    );
+
+    page.clear_viewport().await.expect("clear_viewport failed");
+    assert!(page.current_viewport().is_none(), "clear_viewport should drop the override");
+
+    let width_after_clear =
+        page.evaluate_js("window.innerWidth").await.expect("eval failed").as_f64();
+    assert_ne!(
+        width_after_clear,
+        Some(500.0),
+        "clearing the override should stop reporting the custom width"
+    );
+
+    page.close().await.ok();
+    session.close().await.ok();
+}
+
+#[tokio::test]
+async fn screenshot_one_shot_viewport_restores_after_capture() {
+    let session = headless_session().await;
+    let page = session.new_page("https://example.com").await.expect("new_page failed");
+
+    page.set_viewport(Viewport::custom(1024, 768)).await.expect("set_viewport failed");
+
+    let mobile = viewport::preset("Pixel 7").expect("known preset");
+    let opts = ScreenshotOptions::default().with_viewport(mobile);
+    page.screenshot(opts).await.expect("screenshot failed");
+
+    // The one-shot override must be undone, restoring the persistent
+    // 1024x768 override set above — not left on the mobile preset, and not
+    // cleared to the session default either.
+    let width = page.evaluate_js("window.innerWidth").await.expect("eval failed");
+    assert_eq!(width.as_f64(), Some(1024.0), "one-shot viewport should restore prior override");
+    assert_eq!(page.current_viewport(), Some(Viewport::custom(1024, 768)));
+
+    page.close().await.ok();
+    session.close().await.ok();
+}
+
+#[tokio::test]
+async fn screenshot_scroll_then_bbox_crops_relative_to_scrolled_position() {
+    let session = headless_session().await;
+    let html = "data:text/html,<body%20style='margin:0'>\
+                <div%20style='height:5000px;background:red'></div>\
+                <div%20style='height:5000px;background:blue'></div></body>";
+    let page = session.new_page(html).await.expect("new_page failed");
+    page.set_viewport(Viewport::custom(800, 600)).await.expect("set_viewport failed");
+
+    let opts = ScreenshotOptions::default()
+        .with_scroll(ScrollTarget::Viewports(2.0))
+        .with_bbox(Bbox { x: 10, y: 20, width: 200, height: 150 });
+    let output = page.screenshot(opts).await.expect("screenshot failed");
+    let ScreenshotOutput::Bytes(bytes) = output else { panic!("expected in-memory bytes") };
+    assert_eq!(png_dimensions(&bytes), (200, 150));
+
+    // Scroll position must be restored after the capture.
+    let scroll_y = page.evaluate_js("window.scrollY").await.expect("eval failed");
+    assert_eq!(scroll_y.as_f64(), Some(0.0), "scroll position should be restored after capture");
+
+    page.close().await.ok();
+    session.close().await.ok();
+}
+
+#[tokio::test]
+async fn screenshot_viewport_only_is_shorter_than_full_page() {
+    let session = headless_session().await;
+    let html = "data:text/html,<body%20style='margin:0'>\
+                <div%20style='height:6000px;background:linear-gradient(red,blue)'></div></body>";
+    let page = session.new_page(html).await.expect("new_page failed");
+    page.set_viewport(Viewport::custom(800, 600)).await.expect("set_viewport failed");
+
+    let full = page.screenshot(ScreenshotOptions::default()).await.expect("full-page failed");
+    let ScreenshotOutput::Bytes(full_bytes) = full else { panic!("expected bytes") };
+    let (full_w, full_h) = png_dimensions(&full_bytes);
+
+    let cropped = page
+        .screenshot(ScreenshotOptions::default().viewport_only())
+        .await
+        .expect("viewport-only failed");
+    let ScreenshotOutput::Bytes(cropped_bytes) = cropped else { panic!("expected bytes") };
+    let (crop_w, crop_h) = png_dimensions(&cropped_bytes);
+
+    assert_eq!(full_w, 800, "full-page width should still match the viewport");
+    assert_eq!(
+        crop_w, 800,
+        "viewport-only width should match the viewport exactly (explicit clip)"
+    );
+    assert!(full_h >= 5900, "full-page height should cover the 6000px page, got {full_h}");
+    assert_eq!(crop_h, 600, "viewport-only height should be exactly the viewport height");
+    assert!(full_h > crop_h * 2, "full-page capture should be much taller than viewport-only");
+
+    page.close().await.ok();
+    session.close().await.ok();
 }

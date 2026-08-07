@@ -17,17 +17,21 @@ pub struct Viewport {
     pub width:               u32,
     /// CSS-pixel viewport height.
     pub height:              u32,
-    /// Device pixel ratio (1.0 = standard, 2.0/3.0 = Retina/HiDPI).
+    /// Device pixel ratio (1.0 = standard, 2.0/3.0 = Retina/HiDPI). Affects
+    /// `window.devicePixelRatio` and CSS media queries correctly; does
+    /// **not** upscale `Page::screenshot`'s PNG output — see that method's
+    /// doc comment.
     pub device_scale_factor: f64,
     /// Whether to emulate a mobile viewport (affects meta-viewport parsing
     /// and `navigator.userAgentData.mobile`).
-    pub mobile:               bool,
-    /// Whether to emulate touch input (`ontouchstart`, `navigator.maxTouchPoints`).
-    pub has_touch:            bool,
+    pub mobile:              bool,
+    /// Whether to emulate touch input (`ontouchstart`,
+    /// `navigator.maxTouchPoints`).
+    pub has_touch:           bool,
     /// UA string to present alongside this device, if any. `None` leaves
     /// whatever UA is already in effect (e.g. the session's stealth UA)
     /// untouched.
-    pub user_agent:           Option<String>,
+    pub user_agent:          Option<String>,
 }
 
 impl Viewport {
@@ -150,6 +154,7 @@ pub enum ScrollTarget {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "test harness")]
 mod tests {
     use super::*;
 

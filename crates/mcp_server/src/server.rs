@@ -45,12 +45,13 @@ use crate::{
             ProfileDescribeArgs, ProfileListArgs, ProfileListResult, ProfilePoolCreateArgs,
             ProfilePoolDescribeArgs, ProfilePoolListArgs, ProfilePoolListResult,
         },
-        screenshot::ScreenshotArgs,
+        screenshot::{ScreenshotArgs, SessionScreenshotArgs},
         session::{
             SessionCloseResult, SessionContentResult, SessionIdArgs, SessionNavigateArgs,
             SessionNavigateResult, SessionOpenArgs, SessionOpenResult,
         },
         snapshot::{FetchSnapshotArgs, PageSnapshot, SessionSnapshotArgs},
+        viewport::{DevicePresetsResult, SessionSetViewportArgs},
     },
 };
 
@@ -164,7 +165,11 @@ on action downloads (no Content-Type is observed), so `clean` is not a malware-f
 
     #[tool(
         name = "screenshot",
-        description = "Load a URL in stealth headless Chrome and return a full-page PNG."
+        description = "Load a URL in stealth headless Chrome and return a PNG. Full page by \
+default; pass `full_page: false` to capture only the visible viewport (cheaper — no off-screen \
+content), `bbox` to crop an exact CSS-pixel region, `viewport` for a one-shot device/size override \
+(preset name from list_device_presets, or custom width+height), and `scroll` to page down before \
+cropping. `viewport`/`scroll` never persist past this one call."
     )]
     pub async fn screenshot(
         &self,
@@ -178,15 +183,59 @@ on action downloads (no Content-Type is observed), so `clean` is not a malware-f
         description = "Capture a PNG of the given session's page exactly as it stands right now \
 — no navigation, no URL change. The visual counterpart to session_content / session_snapshot for \
 authenticated, post-click, paginated, or challenge state that only an open session holds. Response \
-includes devicePixelRatio guidance compatible with click_visual_coords. Unknown or closed \
+includes devicePixelRatio guidance compatible with click_visual_coords. Optional one-shot `viewport` \
+(preset or custom size), `full_page: false` (visible viewport only, not the whole scroll), `bbox` \
+crop, and `scroll` (page down before cropping) — none of these persist past this call; use \
+session_set_viewport for a persistent device/size. Unknown or closed \
 session_ids fail with invalid_params. Prefer session_ax_tree / session_snapshot for structured \
 perception; reach for this when you need to see pixels — layout, visual state, or a thin AX tree."
     )]
     pub async fn session_screenshot(
         &self,
-        Parameters(args): Parameters<SessionIdArgs>,
+        Parameters(args): Parameters<SessionScreenshotArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         tools::screenshot::session(self, args).await
+    }
+
+    #[tool(
+        name = "session_set_viewport",
+        description = "Persistently override a session's CDP viewport: dimensions, device pixel \
+ratio, mobile/touch identity, and (for a preset) a matching UA — Chrome DevTools' device toolbar as \
+a tool call. Stays in effect across subsequent session_navigate/click/screenshot calls until \
+session_clear_viewport or another session_set_viewport. Pass `preset` (see list_device_presets, \
+e.g. \"iPhone 16 Pro Max\", \"iPad Pro 11\", \"Desktop 1080p\") or custom `width`+`height` \
+(+ optional `device_scale_factor`, `mobile`). For a one-off change scoped to a single capture, use \
+the `viewport` option on screenshot/session_screenshot instead — it doesn't persist. NOT available \
+on stateless fetch/screenshot: pooled tabs are reused across unrelated callers, so a persistent \
+device identity there would leak to the next caller."
+    )]
+    pub async fn session_set_viewport(
+        &self,
+        Parameters(args): Parameters<SessionSetViewportArgs>,
+    ) -> Result<Json<OkResult>, ErrorData> {
+        tools::viewport::session_set(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "session_clear_viewport",
+        description = "Clear a session_set_viewport override, returning to the session's \
+launch-time default viewport."
+    )]
+    pub async fn session_clear_viewport(
+        &self,
+        Parameters(args): Parameters<SessionIdArgs>,
+    ) -> Result<Json<OkResult>, ErrorData> {
+        tools::viewport::session_clear(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "list_device_presets",
+        description = "List named device presets available to `viewport` (on screenshot / \
+session_screenshot) and session_set_viewport — phones, tablets, and desktop sizes with their CSS \
+pixel dimensions, device pixel ratio, and mobile flag. The DevTools device-toolbar dropdown, as data."
+    )]
+    pub async fn list_device_presets(&self) -> Result<Json<DevicePresetsResult>, ErrorData> {
+        Ok(Json(tools::viewport::list_presets()))
     }
 
     #[tool(
