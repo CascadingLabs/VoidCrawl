@@ -17,6 +17,7 @@ pub mod response;
 pub mod scanner;
 pub mod session;
 pub mod stealth;
+pub mod viewport;
 
 // Re-export CDP types for downstream crates (pyo3_bindings).
 pub use antibot::{AntibotVerdict, Evidence as AntibotEvidence, classify as classify_antibot};
@@ -52,3 +53,4 @@ pub use response::{
 pub use scanner::{DEFAULT_MAX_BYTES, ScanConfig, ScanReport, Verdict, scan_bytes, scan_path};
 pub use session::{BrowserMode, BrowserSession, BrowserSessionBuilder};
 pub use stealth::StealthConfig;
+pub use viewport::{ScrollTarget, Viewport, all_presets, preset as viewport_preset, preset_names};

@@ -22,9 +22,10 @@ use chromiumoxide::{
             },
             dom::{BackendNodeId, GetBoxModelParams, GetDocumentParams, ResolveNodeParams},
             emulation::{
-                SetDeviceMetricsOverrideParams, SetGeolocationOverrideParams,
-                SetLocaleOverrideParams, SetTimezoneOverrideParams, SetUserAgentOverrideParams,
-                UserAgentBrandVersion, UserAgentMetadata,
+                ClearDeviceMetricsOverrideParams, SetDeviceMetricsOverrideParams,
+                SetGeolocationOverrideParams, SetLocaleOverrideParams, SetTimezoneOverrideParams,
+                SetTouchEmulationEnabledParams, SetUserAgentOverrideParams, UserAgentBrandVersion,
+                UserAgentMetadata,
             },
             input::{
                 DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams,
@@ -36,7 +37,8 @@ use chromiumoxide::{
             },
             page::{
                 AddScriptToEvaluateOnNewDocumentParams, CaptureScreenshotFormat,
-                EventLifecycleEvent, FrameId, PrintToPdfParams, SetBypassCspParams, Viewport,
+                EventLifecycleEvent, FrameId, PrintToPdfParams, SetBypassCspParams,
+                Viewport as CdpClipViewport,
             },
         },
         js_protocol::runtime::{CallFunctionOnParams, EvaluateParams},
@@ -53,6 +55,7 @@ use crate::{
     error::{Result, VoidCrawlError},
     input::{HumanizeOptions, Rng, humanized_path},
     response::{ResponseCapture, ResponseCaptureLimits},
+    viewport::{ScrollTarget, Viewport},
     stealth::StealthConfig,
 };
 
@@ -308,9 +311,20 @@ pub struct Bbox {
 #[derive(Debug, Default, Clone)]
 pub struct ScreenshotOptions {
     /// Write PNG to this path instead of returning bytes.
-    pub path: Option<PathBuf>,
-    /// Crop to this CSS-pixel region. None = full page.
-    pub bbox: Option<Bbox>,
+    pub path:     Option<PathBuf>,
+    /// Crop to this CSS-pixel region. None = full page. With `scroll` set,
+    /// coordinates are relative to wherever that scroll lands rather than
+    /// the top of the document.
+    pub bbox:     Option<Bbox>,
+    /// Apply this viewport/device override for just this capture, then
+    /// restore whatever was active before (even on error). See
+    /// [`Page::set_viewport`] for a persistent version.
+    pub viewport: Option<Viewport>,
+    /// Scroll to this position before capturing, then restore the original
+    /// scroll position after (even on error). Only meaningful combined with
+    /// `bbox` — lets a fixed viewport be paged through and a specific
+    /// on-screen region cropped from wherever it lands.
+    pub scroll:   Option<ScrollTarget>,
 }
 
 impl ScreenshotOptions {
@@ -321,6 +335,16 @@ impl ScreenshotOptions {
 
     pub fn with_bbox(mut self, bbox: Bbox) -> Self {
         self.bbox = Some(bbox);
+        self
+    }
+
+    pub fn with_viewport(mut self, viewport: Viewport) -> Self {
+        self.viewport = Some(viewport);
+        self
+    }
+
+    pub fn with_scroll(mut self, scroll: ScrollTarget) -> Self {
+        self.scroll = Some(scroll);
         self
     }
 }
@@ -414,6 +438,12 @@ pub struct Page {
     /// itself to front and captures — serializing just that instant
     /// across tabs on one browser, not the tabs' navigation/JS work.
     capture_lock:   Arc<AsyncMutex<()>>,
+    /// The viewport/device override currently in effect via
+    /// [`Page::set_viewport`], or `None` when using the session's
+    /// launch-time default. `screenshot()`'s one-shot `viewport` option
+    /// snapshots and restores this so a temporary override never leaks to
+    /// later calls on the same page.
+    viewport_override: Mutex<Option<Viewport>>,
 }
 
 impl Page {
@@ -425,6 +455,7 @@ impl Page {
             download_armed: AtomicBool::new(false),
             cursor: Mutex::new((0.0, 0.0)),
             capture_lock,
+            viewport_override: Mutex::new(None),
         }
     }
 
@@ -991,6 +1022,74 @@ impl Page {
         Ok(urls)
     }
 
+    // ── Viewport / device emulation ──────────────────────────────────────
+
+    /// Persistently override this page's CDP viewport: dimensions, device
+    /// pixel ratio, mobile/touch identity, and (if set) UA — the "set the
+    /// viewport once, then click/navigate/screenshot as that device" flow.
+    /// Stays in effect until [`Page::clear_viewport`] or another call to
+    /// this method; does **not** auto-restore.
+    ///
+    /// For a one-off override scoped to a single capture, pass
+    /// [`ScreenshotOptions::viewport`] to [`Page::screenshot`] instead —
+    /// that snapshots and restores whatever was here before, so it can't
+    /// leak a device identity to the next unrelated caller of a pooled tab.
+    pub async fn set_viewport(&self, viewport: Viewport) -> Result<()> {
+        let metrics = SetDeviceMetricsOverrideParams::new(
+            i64::from(viewport.width),
+            i64::from(viewport.height),
+            viewport.device_scale_factor,
+            viewport.mobile,
+        );
+        self.inner.execute(metrics).await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        self.inner
+            .execute(SetTouchEmulationEnabledParams::new(viewport.has_touch))
+            .await
+            .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        if let Some(ua) = viewport.user_agent.clone() {
+            let (nav_platform, metadata) = if viewport.mobile {
+                mobile_ua_platform_and_metadata(&ua)
+            } else {
+                client_hints_for_ua(&ua)
+            };
+            let mut builder =
+                SetUserAgentOverrideParams::builder().user_agent(ua).platform(nav_platform);
+            if let Some(metadata) = metadata {
+                builder = builder.user_agent_metadata(metadata);
+            }
+            let params = builder.build().map_err(VoidCrawlError::PageError)?;
+            self.inner
+                .execute(params)
+                .await
+                .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        }
+        *self.viewport_override.lock().unwrap() = Some(viewport);
+        Ok(())
+    }
+
+    /// Clear a [`Page::set_viewport`] override, returning to the session's
+    /// launch-time default viewport. Does not restore a prior UA override
+    /// — call `set_viewport` again with the desired identity if you need
+    /// one back.
+    pub async fn clear_viewport(&self) -> Result<()> {
+        self.inner
+            .execute(ClearDeviceMetricsOverrideParams {})
+            .await
+            .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        self.inner
+            .execute(SetTouchEmulationEnabledParams::new(false))
+            .await
+            .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        *self.viewport_override.lock().unwrap() = None;
+        Ok(())
+    }
+
+    /// The viewport override currently in effect via [`Page::set_viewport`],
+    /// or `None` if using the session's launch-time default.
+    pub fn current_viewport(&self) -> Option<Viewport> {
+        self.viewport_override.lock().unwrap().clone()
+    }
+
     // ── Screenshots & PDF ───────────────────────────────────────────────
 
     /// Capture a full-page PNG screenshot, returned as raw bytes.
@@ -1004,22 +1103,80 @@ impl Page {
         }
     }
 
-    /// Capture a PNG screenshot with optional cropping and/or writing
-    /// to disk.
+    /// Capture a PNG screenshot with optional cropping, viewport override,
+    /// scrolling, and/or writing to disk.
     ///
     /// * No `path` → returns bytes in memory.
     /// * `path` set → writes PNG to disk and returns that path.
-    /// * `bbox` crops to a pixel region (CSS pixels, pre-DPR).
+    /// * `bbox` crops to a pixel region (CSS pixels, pre-DPR); with `scroll`
+    ///   set, `bbox.x`/`bbox.y` are relative to wherever that scroll lands
+    ///   rather than the top of the document.
+    /// * `viewport` swaps in a device/dimension override (see
+    ///   [`Page::set_viewport`]) for just this capture and restores
+    ///   whatever was active before, even on error.
+    /// * `scroll` moves the page before capturing (see [`ScrollTarget`])
+    ///   and restores the original scroll position after, even on error.
     pub async fn screenshot(&self, opts: ScreenshotOptions) -> Result<ScreenshotOutput> {
+        // One-shot viewport override for just this capture — snapshot
+        // whatever's already in effect so it's restored exactly, even on
+        // error, so a temporary device identity never leaks to the next
+        // call on this page (important on pooled tabs shared across
+        // unrelated callers).
+        let restore_viewport = if let Some(ref viewport) = opts.viewport {
+            let prev = self.current_viewport();
+            self.set_viewport(viewport.clone()).await?;
+            Some(prev)
+        } else {
+            None
+        };
+
+        let result = self.screenshot_inner(&opts).await;
+
+        if let Some(prev) = restore_viewport {
+            let restored = match prev {
+                Some(v) => self.set_viewport(v).await,
+                None => self.clear_viewport().await,
+            };
+            if let Err(e) = restored {
+                tracing::warn!("failed to restore viewport after screenshot: {e}");
+            }
+        }
+
+        result
+    }
+
+    async fn screenshot_inner(&self, opts: &ScreenshotOptions) -> Result<ScreenshotOutput> {
+        // Scroll before cropping — lets a fixed viewport (e.g. a 4K
+        // desktop) be paged through and a specific on-screen region cropped
+        // from wherever it lands, the way a human scrolling and
+        // screenshotting would. Restored after capture for the same
+        // leak-proofing reason as the viewport override above.
+        let restore_scroll = match opts.scroll {
+            Some(_) => Some(self.scroll_position().await?),
+            None => None,
+        };
+        let bbox_shift = if let Some(target) = opts.scroll {
+            self.scroll_to(target).await?;
+            self.scroll_position().await?
+        } else {
+            (0.0, 0.0)
+        };
+
         let mut builder = ScreenshotParams::builder().format(CaptureScreenshotFormat::Png);
         if let Some(bbox) = opts.bbox {
-            builder = builder.clip(Viewport {
-                x:      f64::from(bbox.x),
-                y:      f64::from(bbox.y),
-                width:  f64::from(bbox.width),
-                height: f64::from(bbox.height),
-                scale:  1.0,
-            });
+            builder = builder
+                .clip(CdpClipViewport {
+                    x:      f64::from(bbox.x) + bbox_shift.0,
+                    y:      f64::from(bbox.y) + bbox_shift.1,
+                    width:  f64::from(bbox.width),
+                    height: f64::from(bbox.height),
+                    scale:  1.0,
+                })
+                // A region can legitimately sit outside the layout
+                // viewport (e.g. paging through a fixed viewport via
+                // `scroll`), so always allow capture beyond it rather than
+                // silently clamping to whatever's currently on screen.
+                .capture_beyond_viewport(true);
         } else {
             builder = builder.full_page(true);
         }
@@ -1031,7 +1188,7 @@ impl Page {
         // Hold the browser-wide capture lock only for the activate+capture
         // instant — navigation, JS, and extraction on other tabs stay fully
         // concurrent; they just take turns for this one step.
-        let _capture_guard = self.capture_lock.lock().await;
+        let capture_guard = self.capture_lock.lock().await;
         self.inner
             .bring_to_front()
             .await
@@ -1041,8 +1198,15 @@ impl Page {
             .screenshot(builder.build())
             .await
             .map_err(|e| VoidCrawlError::ScreenshotError(e.to_string()))?;
+        drop(capture_guard);
 
-        if let Some(path) = opts.path {
+        if let Some((x, y)) = restore_scroll {
+            if let Err(e) = self.evaluate_js(&format!("window.scrollTo({x}, {y})")).await {
+                tracing::warn!("failed to restore scroll position after screenshot: {e}");
+            }
+        }
+
+        if let Some(path) = opts.path.clone() {
             fs::write(&path, &bytes).map_err(|e| {
                 VoidCrawlError::ScreenshotError(format!("write {}: {e}", path.display()))
             })?;
@@ -1050,6 +1214,35 @@ impl Page {
         } else {
             Ok(ScreenshotOutput::Bytes(bytes))
         }
+    }
+
+    /// Current `window.scrollX`/`scrollY`, in CSS pixels.
+    async fn scroll_position(&self) -> Result<(f64, f64)> {
+        let value = self.evaluate_js("[window.scrollX, window.scrollY]").await?;
+        let arr = value.as_array().ok_or_else(|| {
+            VoidCrawlError::JsEvalError("scroll position: expected a [x, y] array".into())
+        })?;
+        let x = arr.first().and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+        let y = arr.get(1).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+        Ok((x, y))
+    }
+
+    /// Scroll to `target` (see [`ScrollTarget`]) and wait for the resulting
+    /// layout to actually paint — two animation frames — before the caller
+    /// captures, rather than a blind sleep.
+    async fn scroll_to(&self, target: ScrollTarget) -> Result<()> {
+        let y = match target {
+            ScrollTarget::Pixels(y) => y as f64,
+            ScrollTarget::Viewports(n) => {
+                let height =
+                    self.evaluate_js("window.innerHeight").await?.as_f64().unwrap_or(0.0);
+                height * n
+            }
+        };
+        self.evaluate_js(&format!("window.scrollTo(0, {y})")).await?;
+        self.evaluate_js("new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+            .await?;
+        Ok(())
     }
 
     /// Generate a PDF of the page, returned as raw bytes.
