@@ -144,7 +144,7 @@ Or via compose:
 docker compose -f docker/docker-compose.yml up -d
 ```
 
-Available tags: `headless-latest`, `headless-<version>`, `headless-<sha>`, and the same set prefixed `headful-` for GPU + VNC (linux/amd64 only). See the [Docker & VNC guide](https://cascadinglabs.com/voidcrawl/guides/docker/) and the [Docker Config reference](https://cascadinglabs.com/voidcrawl/reference/docker-config/) for every runtime knob.
+Available tags: `headless-latest`, `headless-<version>`, `headless-<sha>`, and the same set prefixed `headful-` for GPU + local on-demand noVNC (linux/amd64 only). See the [Docker guide](https://cascadinglabs.com/voidcrawl/guides/docker/) and the [Docker Config reference](https://cascadinglabs.com/voidcrawl/reference/docker-config/) for every runtime knob.
 
 ## Testing
 
@@ -160,7 +160,7 @@ uv run pytest tests/ -v
 
 - [Full API reference](docs/api-reference.md)
 - [Anti-bot / CDN detection](docs/antibot.md)
-- [Challenge escalation with VNC/noVNC](docs/challenge-escalation.md)
+- [Challenge escalation with a local noVNC lease](docs/challenge-escalation.md)
 - [Cross-origin & closed-shadow frames](docs/cross-origin-frames.md)
 - [Examples](examples/)
 

@@ -1,38 +1,32 @@
-# Challenge Escalation With VNC and noVNC
+# Challenge Escalation With a Local noVNC Lease
 
 VoidCrawl owns challenge detection and the live browser session. Resolvers act
 on the same tab through a neutral event contract. V1 is intentionally manual:
-open VNC or noVNC, clear the wall, mark the event resolved, then resume.
+obtain a short-lived local noVNC lease, clear the wall, mark the event resolved,
+then resume.
 
 ## Phases
 
 | Phase | Resolver | What ships |
 |---|---|---|
-| 1 | `manual_vnc` | Detect active challenges, expose CDP attach coordinates, expose VNC/noVNC links, wait for a human to clear the wall. |
+| 1 | `manual_vnc` | Detect active challenges, expose CDP attach coordinates and an optional noVNC lease URL, then wait for a human to clear the wall. |
 | 2 | `rotate_identity` / `fail` | If manual resolution is not allowed or fails, return structured evidence so the caller can rotate profile/proxy or stop cleanly. |
 | 3 | `yosoi_recipe`, `open_sesame_session_actor`, `agent_mcp` | Automated resolvers attach to the same VoidCrawl session through MCP using `{ websocket_url, target_id, session_id }`. They do not launch a fresh browser. |
 
 Presence-only CDN signals are telemetry. Only active challenges block.
 
-## Start a headful browser with noVNC
+## Start a headful browser and obtain a noVNC lease
 
-From a VoidCrawl checkout:
+From a VoidCrawl checkout, enable the disabled-by-default local viewer control:
 
 ```bash
-docker compose -f docker/docker-compose.headful.yml up
+VIEWER_MODE=local ./docker/run-headful.sh -d
+./docker/viewer.sh open --browser 1 --ttl 15m
 ```
 
-Open the browser view:
-
-```text
-http://127.0.0.1:6080
-```
-
-Native VNC is also available:
-
-```text
-vnc://127.0.0.1:5900
-```
+Open the returned tokenized noVNC URL. It is the only supported manual viewer;
+there is no published native-VNC endpoint. See [Docker Headful Mode](docker-headful.md)
+for expiry, close, and resource controls.
 
 If the browser looks tiny or huge, restart with a fixed resolution:
 
@@ -45,13 +39,13 @@ VNC_WIDTH=1280 VNC_HEIGHT=720 docker compose -f docker/docker-compose.headful.ym
 Set the operator URLs so `capture_challenge` includes handoff links:
 
 ```bash
-VOIDCRAWL_NOVNC_URL=http://127.0.0.1:6080 \
-VOIDCRAWL_VNC_URL=vnc://127.0.0.1:5900 \
+VOIDCRAWL_NOVNC_URL="$(./docker/viewer.sh open --browser 1 --ttl 15m | sed -n 's/^viewer URL: //p')" \
 uv run voidcrawl-mcp
 ```
 
-If your MCP client starts `voidcrawl-mcp` for you, put those two environment
-variables in that client's MCP config.
+If your MCP client starts `voidcrawl-mcp` for you, put the current lease URL in
+its MCP config. A lease expires; request a new one before handing off another
+challenge.
 
 ## Manual challenge flow
 
@@ -89,8 +83,7 @@ The result includes:
 ```json
 {
   "session_id": "SESSION_ID",
-  "novnc_url": "http://127.0.0.1:6080",
-  "vnc_url": "vnc://127.0.0.1:5900"
+  "novnc_url": "LEASE_URL_RETURNED_BY_VIEWERCTL"
 }
 ```
 
@@ -117,15 +110,15 @@ The result has the fields a resolver needs:
       "websocket_url": "ws://127.0.0.1:9222/devtools/browser/...",
       "target_id": "TARGET_ID",
       "session_id": "SESSION_ID",
-      "novnc_url": "http://127.0.0.1:6080",
-      "vnc_url": "vnc://127.0.0.1:5900"
+      "novnc_url": "LEASE_URL_RETURNED_BY_VIEWERCTL"
     }
   }
 }
 ```
 
-4. Open `http://127.0.0.1:6080`, solve the challenge in the visible browser,
-and wait until the target page continues.
+4. Obtain a current lease URL with `./docker/viewer.sh open --browser <n> --ttl
+   15m`, open it, solve the challenge in the visible browser, and wait until the
+   target page continues.
 
 5. Mark it resolved.
 

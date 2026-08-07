@@ -108,7 +108,7 @@ Note Chrome locks a profile while running — one Chrome per profile dir.
 
 ## Headful variant
 
-For a visible (VNC) browser with a real Wayland compositor + GPU, use the
-headful container instead — see [docker-headful.md](docker-headful.md). That
+For a visible browser with a real Wayland compositor + GPU, use the rootless
+headful container and open a local noVNC lease when needed — see [docker-headful.md](docker-headful.md). That
 path is the better choice for interactive bot-wall challenges that need a human
 to solve a CAPTCHA once into a persisted profile.

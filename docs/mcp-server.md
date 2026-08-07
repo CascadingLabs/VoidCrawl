@@ -105,12 +105,12 @@ All take `session_id` plus tool-specific args.
 | `wait_for_network_idle` | Event-driven wait. |
 | `network_capture` | Resource Timing entries (url, initiator type, transfer size, duration). |
 | `detect_captcha` | DOM probe → `recaptcha` / `hcaptcha` / `turnstile` / `cloudflare_challenge` / `datadome` / `null`. |
-| `capture_challenge` | Capture an active challenge event with anti-bot evidence, DOM captcha info, same-tab CDP attach coordinates, and VNC/noVNC links. |
+| `capture_challenge` | Capture an active challenge event with anti-bot evidence, DOM captcha info, same-tab CDP attach coordinates, and an optional local noVNC lease URL. |
 | `mark_challenge_resolved` | Mark a challenge cleared by `manual_vnc` or a future resolver. |
 | `mark_challenge_failed` | Mark a challenge failed so the caller can rotate identity or stop with evidence. |
 | `wait_for_challenge_resolution` | Wait for resolution/failure and optionally re-probe the DOM before resuming. |
 
-For the manual operator loop, see [Challenge Escalation With VNC and noVNC](challenge-escalation.md).
+For the manual operator loop, see [Challenge Escalation With a Local noVNC Lease](challenge-escalation.md).
 
 ## Typed errors
 
