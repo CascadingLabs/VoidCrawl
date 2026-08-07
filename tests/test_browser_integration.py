@@ -25,11 +25,13 @@ from voidcrawl import (
     BrowserConfig,
     BrowserPool,
     BrowserSession,
+    InterruptRequest,
     NavigationTimeoutError,
     Page,
     PoolConfig,
     ProfileRegistry,
     ResponseTimeoutError,
+    SessionInterrupted,
 )
 from voidcrawl.actions import CollectNetworkRequests, InstallNetworkObserver
 
@@ -137,6 +139,54 @@ class TestPageLifecycleAndResponses:
             await page.add_init_script("window.__voidcrawlInit = 'ready'")
             await page.goto(network_fixture_url)
             assert await page.evaluate_js("window.__voidcrawlInit") == "ready"
+
+    @pytest.mark.asyncio
+    async def test_explicit_interrupt_parks_same_target_and_rejects_mutation(
+        self, network_fixture_url: str
+    ) -> None:
+        async with (
+            BrowserSession(BrowserConfig()) as browser,
+            browser.page(network_fixture_url) as page,
+        ):
+            target_id = await page.target_id()
+            await page.evaluate_js("sessionStorage.setItem('interrupt-proof', 'kept')")
+            interrupt = await browser.interrupt(
+                page,
+                InterruptRequest(
+                    code="policy.operator_review", summary="fixture review"
+                ),
+            )
+
+            assert interrupt.target_id == target_id
+            assert "network fixture" in await page.content()
+            with pytest.raises(SessionInterrupted) as exc:
+                await page.evaluate_js("document.body.dataset.mutated = 'yes'")
+            assert exc.value.interrupt_id == interrupt.interrupt_id
+
+            resumed = await browser.resume(interrupt.interrupt_id)
+            assert resumed.state == "resumed"
+            assert await page.target_id() == target_id
+            assert (
+                await page.evaluate_js("sessionStorage.getItem('interrupt-proof')")
+                == "kept"
+            )
+
+    @pytest.mark.asyncio
+    async def test_interrupt_rejects_page_from_another_session(
+        self, network_fixture_url: str
+    ) -> None:
+        async with (
+            BrowserSession(BrowserConfig()) as first,
+            BrowserSession(BrowserConfig()) as second,
+        ):
+            page = await first.new_page(network_fixture_url)
+            with pytest.raises(RuntimeError, match="does not belong"):
+                await second.interrupt(
+                    page,
+                    InterruptRequest(
+                        code="policy.operator_review", summary="wrong owner"
+                    ),
+                )
 
     @pytest.mark.asyncio
     async def test_single_response_body_capture(self, network_fixture_url: str) -> None:

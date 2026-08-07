@@ -54,6 +54,7 @@ use crate::{
     ax::compact_outline,
     error::{Result, VoidCrawlError},
     input::{HumanizeOptions, Rng, humanized_path},
+    interrupt::InterruptRegistry,
     response::{ResponseCapture, ResponseCaptureLimits},
     selector::{self, RawRect, SelectorEntry, SelectorKind, SelectorResolution},
     stealth::StealthConfig,
@@ -302,9 +303,9 @@ fn flatten_headers(value: &serde_json::Value) -> Vec<(String, String)> {
 /// Rectangular crop in CSS pixels for [`ScreenshotOptions::bbox`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct Bbox {
-    pub x:      u32,
-    pub y:      u32,
-    pub width:  u32,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
     pub height: u32,
 }
 
@@ -404,9 +405,9 @@ pub enum ScreenshotOutput {
 #[derive(Debug, Clone)]
 pub struct DownloadOutcome {
     /// Absolute path to the downloaded file inside the target directory.
-    pub path:         PathBuf,
+    pub path: PathBuf,
     /// Size of the downloaded file in bytes.
-    pub bytes:        u64,
+    pub bytes: u64,
     /// The `Content-Type` the server sent for the download (parameters
     /// stripped), if any — fed to the scanner to catch disguised payloads.
     /// `None` for action-captured downloads (see [`Page::arm_download`]), where
@@ -435,8 +436,8 @@ pub struct DownloadOutcome {
 /// consumed exactly once.
 #[derive(Debug)]
 pub struct DownloadCapture {
-    dir:       PathBuf,
-    before:    HashSet<PathBuf>,
+    dir: PathBuf,
+    before: HashSet<PathBuf>,
     max_bytes: u64,
 }
 
@@ -463,42 +464,167 @@ impl DownloadCapture {
     }
 }
 
+const DOCUMENT_SNAPSHOT_JS: &str = r#"
+(() => {
+  const MAX = {
+    headings: 80,
+    textBlocks: 240,
+    links: 160,
+    controls: 160,
+    forms: 60,
+    formControls: 30,
+    textChars: 700,
+    smallChars: 220
+  };
+  const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const clip = (value, limit) => {
+    const text = clean(value);
+    return text.length > limit ? text.slice(0, Math.max(0, limit - 3)) + '...' : text;
+  };
+  const visible = (el) => {
+    if (!el || !el.isConnected) return false;
+    const style = window.getComputedStyle(el);
+    if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+  const attr = (el, name) => {
+    const value = el.getAttribute(name);
+    return value == null || value === '' ? null : clip(value, MAX.smallChars);
+  };
+  const labelText = (el) => {
+    const id = el.id ? CSS.escape(el.id) : null;
+    const label = id ? document.querySelector(`label[for="${id}"]`) : null;
+    return clip(
+      el.getAttribute('aria-label')
+        || el.getAttribute('title')
+        || el.getAttribute('placeholder')
+        || (label && label.textContent)
+        || el.value
+        || el.textContent
+        || el.name
+        || '',
+      MAX.smallChars
+    );
+  };
+  const control = (el) => ({
+    tag: el.tagName.toLowerCase(),
+    type: attr(el, 'type'),
+    role: attr(el, 'role'),
+    name: labelText(el) || null,
+    placeholder: attr(el, 'placeholder'),
+    disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true')
+  });
+  const all = (selector) => Array.from(document.querySelectorAll(selector)).filter(visible);
+  const unique = (items) => Array.from(new Set(items));
+
+  const headingNodes = all('h1,h2,h3,h4,h5,h6');
+  const headings = headingNodes.slice(0, MAX.headings).map((el) => ({
+    level: Number(el.tagName.slice(1)),
+    text: clip(el.textContent, MAX.smallChars)
+  })).filter((h) => h.text);
+
+  const textNodes = unique([
+    ...all('main p, main li, article p, article li, section p, blockquote, body > p, td, th'),
+    ...all('[role="main"] p, [role="article"] p')
+  ]).filter((el) => clean(el.textContent).length >= 20);
+  const text_blocks = textNodes.slice(0, MAX.textBlocks).map((el) => ({
+    tag: el.tagName.toLowerCase(),
+    text: clip(el.textContent, MAX.textChars)
+  })).filter((b) => b.text);
+
+  const linkNodes = all('a[href]');
+  const links = linkNodes.slice(0, MAX.links).map((el) => ({
+    text: clip(el.textContent || el.getAttribute('aria-label') || el.href, MAX.smallChars),
+    href: clip(el.href, MAX.smallChars)
+  })).filter((l) => l.href);
+
+  const controlNodes = all('button,input,select,textarea,[role="button"],[role="link"],[role="textbox"],[role="combobox"],[contenteditable="true"]');
+  const controls = controlNodes.slice(0, MAX.controls).map(control);
+
+  const formNodes = all('form');
+  const forms = formNodes.slice(0, MAX.forms).map((form) => {
+    const fields = Array.from(form.querySelectorAll('button,input,select,textarea,[role="button"],[role="textbox"],[role="combobox"]'))
+      .filter(visible)
+      .slice(0, MAX.formControls)
+      .map(control);
+    return {
+      action: attr(form, 'action') || (form.action ? clip(form.action, MAX.smallChars) : null),
+      method: clip(form.method || 'get', 20).toLowerCase(),
+      controls: fields
+    };
+  });
+
+  return {
+    url: location.href,
+    title: document.title || null,
+    headings,
+    text_blocks,
+    links,
+    controls,
+    forms,
+    total: {
+      headings: headingNodes.length,
+      text_blocks: textNodes.length,
+      links: linkNodes.length,
+      controls: controlNodes.length,
+      forms: formNodes.length
+    }
+  };
+})()
+"#;
+
 /// Thin wrapper over `chromiumoxide::Page` exposing a clean async API.
 #[derive(Debug)]
 pub struct Page {
-    inner:             CdpPage,
+    inner: CdpPage,
+    interrupts: Arc<InterruptRegistry>,
     /// `true` between [`Page::arm_download`] / a `download_to_dir` in flight
     /// and the matching reset. The pool checks this on release to reset an
     /// abandoned download behavior cheaply (no CDP call on the common path).
     download_armed:    AtomicBool,
     /// Last virtual cursor position (CSS px), so a humanized move starts from
     /// where the pointer actually is. Defaults to the top-left.
-    cursor:            Mutex<(f64, f64)>,
+    cursor: Mutex<(f64, f64)>,
     /// Shared with every other `Page` from the same `BrowserSession`.
-    /// Headless Chrome only reliably composites frames for the
-    /// foregrounded tab, so `screenshot()` holds this while it brings
-    /// itself to front and captures — serializing just that instant
-    /// across tabs on one browser, not the tabs' navigation/JS work.
-    capture_lock:      Arc<AsyncMutex<()>>,
+    /// Headless Chrome only reliably composites frames for the foregrounded
+    /// tab, so `screenshot()` holds this while it brings itself to front and
+    /// captures — serializing just that instant across tabs on one browser,
+    /// not the tabs' navigation/JS work.
+    capture_lock: Arc<AsyncMutex<()>>,
     /// The viewport/device override currently in effect via
-    /// [`Page::set_viewport`], or `None` when using the session's
-    /// launch-time default. `screenshot()`'s one-shot `viewport` option
-    /// snapshots and restores this so a temporary override never leaks to
-    /// later calls on the same page.
+    /// [`Page::set_viewport`], or `None` when using the session's launch-time
+    /// default. `screenshot()`'s one-shot `viewport` option snapshots and
+    /// restores this so a temporary override never leaks to later calls on the
+    /// same page.
     viewport_override: Mutex<Option<Viewport>>,
 }
 
 impl Page {
-    /// Wrap an existing CDP page. `capture_lock` must be the same shared
-    /// lock for every page created from the same `BrowserSession`.
-    pub(crate) fn new(inner: CdpPage, capture_lock: Arc<AsyncMutex<()>>) -> Self {
+    /// Wrap an existing CDP page. `capture_lock` and `interrupts` are shared
+    /// by every page created from the same `BrowserSession`.
+    pub(crate) fn new(
+        inner: CdpPage,
+        capture_lock: Arc<AsyncMutex<()>>,
+        interrupts: Arc<InterruptRegistry>,
+    ) -> Self {
         Self {
             inner,
+            interrupts,
             download_armed: AtomicBool::new(false),
             cursor: Mutex::new((0.0, 0.0)),
             capture_lock,
             viewport_override: Mutex::new(None),
         }
+    }
+
+    /// Reject a mutation while this target is parked by an explicit interrupt.
+    pub async fn ensure_active(&self) -> Result<()> {
+        self.interrupts.page_is_active(&self.target_id()).await
+    }
+
+    pub(crate) fn belongs_to_interrupt_registry(&self, registry: &Arc<InterruptRegistry>) -> bool {
+        Arc::ptr_eq(&self.interrupts, registry)
     }
 
     /// Whether a download is currently armed on this page (set by
@@ -605,6 +731,7 @@ impl Page {
     /// tab. The script is registered through CDP; it does not modify fetch,
     /// XHR, or request interception.
     pub async fn add_init_script(&self, script: &str) -> Result<()> {
+        self.ensure_active().await?;
         self.inner
             .execute(AddScriptToEvaluateOnNewDocumentParams::new(script.to_string()))
             .await
@@ -627,6 +754,7 @@ impl Page {
 
     /// Navigate to `url` and wait for the CDP response.
     pub async fn navigate(&self, url: &str) -> Result<()> {
+        self.ensure_active().await?;
         self.inner.goto(url).await.map_err(|e| VoidCrawlError::NavigationFailed(e.to_string()))?;
         Ok(())
     }
@@ -668,6 +796,7 @@ impl Page {
         timeout: Duration,
         capture_endpoints: bool,
     ) -> Result<PageResponse> {
+        self.ensure_active().await?;
         let started = Instant::now();
         // Subscribe to ALL event streams BEFORE navigation so no events slip
         // through the gap between goto() and the listener setup.
@@ -921,10 +1050,25 @@ impl Page {
         self.inner.url().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))
     }
 
+    /// Collect the fixed, read-only document snapshot used by MCP inspection.
+    ///
+    /// This deliberately bypasses [`Self::ensure_active`]: the script is
+    /// internal, has no caller-provided input, and only reads the current DOM.
+    /// Arbitrary JavaScript remains blocked while an interrupt is active.
+    pub async fn document_snapshot(&self) -> Result<Value> {
+        let result = self
+            .inner
+            .evaluate(DOCUMENT_SNAPSHOT_JS)
+            .await
+            .map_err(|e| VoidCrawlError::JsEvalError(e.to_string()))?;
+        Ok(result.value().cloned().unwrap_or(Value::Null))
+    }
+
     // ── JavaScript ──────────────────────────────────────────────────────
 
     /// Evaluate a JS expression and return the result as a JSON value.
     pub async fn evaluate_js(&self, expression: &str) -> Result<Value> {
+        self.ensure_active().await?;
         let result = self
             .inner
             .evaluate(expression)
@@ -969,6 +1113,7 @@ impl Page {
         frame_url_pattern: &str,
         expression: &str,
     ) -> Result<Value> {
+        self.ensure_active().await?;
         let frame_id = self.resolve_frame(frame_url_pattern).await?;
         let context_id = self
             .inner
@@ -1252,34 +1397,31 @@ impl Page {
             let (shift_x, shift_y) = if apply_shift { bbox_shift } else { (0.0, 0.0) };
             builder = builder
                 .clip(CdpClipViewport {
-                    x:      f64::from(bbox.x) + shift_x,
-                    y:      f64::from(bbox.y) + shift_y,
-                    width:  f64::from(bbox.width),
+                    x: f64::from(bbox.x) + shift_x,
+                    y: f64::from(bbox.y) + shift_y,
+                    width: f64::from(bbox.width),
                     height: f64::from(bbox.height),
-                    scale:  1.0,
+                    scale: 1.0,
                 })
-                // A region can legitimately sit outside the layout
-                // viewport (e.g. paging through a fixed viewport via
-                // `scroll`), so always allow capture beyond it rather than
-                // silently clamping to whatever's currently on screen.
+                // A region can legitimately sit outside the layout viewport
+                // (e.g. paging through a fixed viewport via `scroll`), so
+                // always allow capture beyond it rather than silently
+                // clamping to whatever's currently on screen.
                 .capture_beyond_viewport(true);
         } else if opts.full_page {
             builder = builder.full_page(true);
         } else if let Some(vp) = self.current_viewport() {
-            // Viewport-only: an explicit clip at the tracked viewport's
-            // exact size, rather than relying on Chrome's ambient "current
-            // ly visible" state. A prior full-page/capture-beyond-viewport
-            // capture on this same page can leave that ambient state
-            // stale (observed: viewport-only immediately after full-page
-            // returns the *previous* full-page height, not the viewport's),
-            // so an explicit size is the only way to make this mode
-            // order-independent.
+            // Viewport-only: an explicit clip at the tracked viewport's exact
+            // size, rather than relying on Chrome's ambient "currently
+            // visible" state. A prior full-page/capture-beyond-viewport
+            // capture on this same page can leave that ambient state stale,
+            // so an explicit size makes this mode order-independent.
             builder = builder.clip(CdpClipViewport {
-                x:      0.0,
-                y:      0.0,
-                width:  f64::from(vp.width),
+                x: 0.0,
+                y: 0.0,
+                width: f64::from(vp.width),
                 height: f64::from(vp.height),
-                scale:  1.0,
+                scale: 1.0,
             });
         }
         // else: no tracked viewport (e.g. a page adopted via attach_page
@@ -1417,6 +1559,7 @@ impl Page {
         timeout: Duration,
         max_bytes: u64,
     ) -> Result<DownloadOutcome> {
+        self.ensure_active().await?;
         let outcome = self.run_download(url, dir, timeout, max_bytes).await;
         // ALWAYS reset: setDownloadBehavior is browser-context-scoped and our
         // download_path points at a quarantine dir the caller is about to
@@ -1441,6 +1584,7 @@ impl Page {
     /// `dir` should be a fresh directory the caller treats as quarantine and
     /// scans before trusting the file.
     pub async fn arm_download(&self, dir: &Path, max_bytes: u64) -> Result<DownloadCapture> {
+        self.ensure_active().await?;
         let params = SetDownloadBehaviorParams::builder()
             .behavior(SetDownloadBehaviorBehavior::AllowAndName)
             .download_path(dir.to_string_lossy().into_owned())
@@ -1633,6 +1777,7 @@ impl Page {
         nth: usize,
         humanize: bool,
     ) -> Result<()> {
+        self.ensure_active().await?;
         let nodes = self.query_ax_nodes(Some(role), Some(name)).await?;
         let backends: Vec<_> =
             nodes.iter().filter(|n| !n.ignored).filter_map(|n| n.backend_dom_node_id).collect();
@@ -2013,6 +2158,7 @@ impl Page {
     /// **No page-world JS** is injected. The path length/duration scale with
     /// distance and stay bounded for agent workflows.
     pub async fn move_mouse(&self, x: f64, y: f64, humanize: bool) -> Result<()> {
+        self.ensure_active().await?;
         if humanize {
             let start = *self
                 .cursor
@@ -2059,6 +2205,7 @@ impl Page {
     ///
     /// [`move_mouse`]: Self::move_mouse
     pub async fn click_xy(&self, x: f64, y: f64, humanize: bool) -> Result<()> {
+        self.ensure_active().await?;
         self.move_mouse(x, y, humanize).await?;
         self.dispatch_mouse_event(
             DispatchMouseEventType::MousePressed,
@@ -2103,14 +2250,15 @@ impl Page {
         longitude: f64,
         accuracy: Option<f64>,
     ) -> Result<()> {
+        self.ensure_active().await?;
         // Grant the geolocation permission first, otherwise headless Chrome
         // auto-denies `navigator.geolocation` and the override is never read.
         // Origin omitted → applies to every origin (incl. opaque `data:`).
         let grant = SetPermissionParams {
-            permission:         PermissionDescriptor::new("geolocation"),
-            setting:            PermissionSetting::Granted,
-            origin:             None,
-            embedded_origin:    None,
+            permission: PermissionDescriptor::new("geolocation"),
+            setting: PermissionSetting::Granted,
+            origin: None,
+            embedded_origin: None,
             browser_context_id: None,
         };
         self.inner.execute(grant).await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
@@ -2129,6 +2277,7 @@ impl Page {
     /// `"fr-FR"`). This is the lever that shifts region-aware content like
     /// Google Maps results or localized pricing.
     pub async fn set_locale(&self, locale: &str) -> Result<()> {
+        self.ensure_active().await?;
         let params = SetLocaleOverrideParams { locale: Some(locale.to_string()) };
         self.inner.execute(params).await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
         Ok(())
@@ -2137,6 +2286,7 @@ impl Page {
     /// Override the timezone by IANA id (e.g. `"America/New_York"`). Affects
     /// `Date`, `Intl`, and any server probes that read the rendered clock.
     pub async fn set_timezone(&self, timezone_id: &str) -> Result<()> {
+        self.ensure_active().await?;
         let params = SetTimezoneOverrideParams::new(timezone_id.to_string());
         self.inner.execute(params).await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
         Ok(())
@@ -2209,6 +2359,7 @@ impl Page {
 
     /// Click on the first element matching `selector`.
     pub async fn click_element(&self, selector: &str) -> Result<()> {
+        self.ensure_active().await?;
         let el = self
             .inner
             .find_element(selector)
@@ -2222,6 +2373,7 @@ impl Page {
     ///
     /// Focuses the element first so that key events are directed to it.
     pub async fn type_into(&self, selector: &str, text: &str) -> Result<()> {
+        self.ensure_active().await?;
         let el = self
             .inner
             .find_element(selector)
@@ -2236,6 +2388,7 @@ impl Page {
 
     /// Set extra HTTP headers for all subsequent requests from this page.
     pub async fn set_headers(&self, headers: HashMap<String, String>) -> Result<()> {
+        self.ensure_active().await?;
         let json_val =
             serde_json::to_value(&headers).map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
         let params = SetExtraHttpHeadersParams::new(Headers::new(json_val));
@@ -2252,6 +2405,7 @@ impl Page {
 
     /// Set a single cookie on the current page.
     pub async fn set_cookie(&self, cookie: CookieParam) -> Result<()> {
+        self.ensure_active().await?;
         self.inner
             .set_cookie(cookie)
             .await
@@ -2261,6 +2415,7 @@ impl Page {
 
     /// Set multiple cookies at once.
     pub async fn set_cookies(&self, cookies: Vec<CookieParam>) -> Result<()> {
+        self.ensure_active().await?;
         self.inner
             .set_cookies(cookies)
             .await
@@ -2270,6 +2425,7 @@ impl Page {
 
     /// Delete cookies by name, optionally scoped by domain and path.
     pub async fn delete_cookies(&self, cookies: Vec<DeleteCookiesParams>) -> Result<()> {
+        self.ensure_active().await?;
         self.inner
             .delete_cookies(cookies)
             .await
@@ -2297,6 +2453,7 @@ impl Page {
         delta_y: Option<f64>,
         modifiers: Option<i64>,
     ) -> Result<()> {
+        self.ensure_active().await?;
         let mut builder = DispatchMouseEventParams::builder().r#type(event_type).x(x).y(y);
 
         if let Some(b) = button {
@@ -2332,6 +2489,7 @@ impl Page {
         text: Option<&str>,
         modifiers: Option<i64>,
     ) -> Result<()> {
+        self.ensure_active().await?;
         let mut builder = DispatchKeyEventParams::builder().r#type(event_type);
 
         if let Some(k) = key {
@@ -2455,7 +2613,7 @@ const SETTLE_SIGHTINGS: u32 = 3;
 
 /// Tracks the size-stability of the newest new download across polls.
 struct SettleTracker {
-    prev:   Option<(PathBuf, u64)>,
+    prev: Option<(PathBuf, u64)>,
     stable: u32,
 }
 

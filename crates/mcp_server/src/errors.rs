@@ -50,6 +50,25 @@ pub fn map_err(err: VoidCrawlError) -> ErrorData {
             let data = tagged("ProfileNotFound", json!({ "name": name, "searched": searched }));
             ErrorData::invalid_params(err.to_string(), Some(obj(data)))
         }
+        VoidCrawlError::SessionInterrupted { ref interrupt_id } => {
+            let data = tagged("SessionInterrupted", json!({ "interrupt_id": interrupt_id }));
+            ErrorData::internal_error(err.to_string(), Some(obj(data)))
+        }
+        VoidCrawlError::InterruptExpired { ref interrupt_id } => {
+            let data = tagged("InterruptExpired", json!({ "interrupt_id": interrupt_id }));
+            ErrorData::internal_error(err.to_string(), Some(obj(data)))
+        }
+        VoidCrawlError::InterruptTerminal { ref interrupt_id, ref state } => {
+            let data = tagged(
+                "InterruptTerminal",
+                json!({ "interrupt_id": interrupt_id, "state": state }),
+            );
+            ErrorData::internal_error(err.to_string(), Some(obj(data)))
+        }
+        VoidCrawlError::InterruptNotFound { ref interrupt_id } => {
+            let data = tagged("InterruptNotFound", json!({ "interrupt_id": interrupt_id }));
+            ErrorData::invalid_params(err.to_string(), Some(obj(data)))
+        }
         other => ErrorData::internal_error(other.to_string(), None),
     }
 }

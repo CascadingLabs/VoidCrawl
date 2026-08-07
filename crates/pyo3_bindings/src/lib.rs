@@ -25,11 +25,11 @@ use void_crawl_core::{
     AntibotEvidence, AntibotVerdict, BrowserMode, BrowserPool, BrowserSession, CapturedResponse,
     CookieParam, DEFAULT_MAX_BYTES, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_MAX_TOTAL_RESPONSE_BYTES,
     DeleteCookiesParams, DispatchKeyEventType, DispatchMouseEventType, DownloadCapture,
-    DownloadOutcome, MAX_PROFILE_SPLIT_COPIES, ManagedProfileSnapshot, MouseButton, Page,
-    PageResponse, PoolConfig, PooledTab, ProfileHandle, ProfileInfo, ProfileRegistry,
-    ResponseCapture, ResponseCaptureLimits, ScanConfig, ScanReport, ScrollTarget, SelectorEntry,
-    SelectorKind, StealthConfig, Verdict, Viewport, acquire_profile, list_profiles, scan_bytes,
-    scan_path, viewport as viewport_mod,
+    DownloadOutcome, InterruptInfo, InterruptRequest, MAX_PROFILE_SPLIT_COPIES,
+    ManagedProfileSnapshot, MouseButton, Page, PageResponse, PoolConfig, PooledTab, ProfileHandle,
+    ProfileInfo, ProfileRegistry, ResponseCapture, ResponseCaptureLimits, ScanConfig, ScanReport,
+    ScrollTarget, SelectorEntry, SelectorKind, StealthConfig, Verdict, Viewport, acquire_profile,
+    list_profiles, scan_bytes, scan_path, viewport as viewport_mod,
 };
 
 // ── Error conversion ────────────────────────────────────────────────────
@@ -45,6 +45,10 @@ pyo3::create_exception!(voidcrawl._ext, ProfileLeaseExpired, VoidCrawlError);
 pyo3::create_exception!(voidcrawl._ext, ProfileNotFound, VoidCrawlError);
 pyo3::create_exception!(voidcrawl._ext, CaptchaDetected, VoidCrawlError);
 pyo3::create_exception!(voidcrawl._ext, AntibotChallenge, VoidCrawlError);
+pyo3::create_exception!(voidcrawl._ext, SessionInterrupted, VoidCrawlError);
+pyo3::create_exception!(voidcrawl._ext, InterruptExpired, VoidCrawlError);
+pyo3::create_exception!(voidcrawl._ext, InterruptTerminal, VoidCrawlError);
+pyo3::create_exception!(voidcrawl._ext, InterruptNotFound, VoidCrawlError);
 
 /// Resolve `(preset, width, height, device_scale_factor, mobile)` kwargs —
 /// shared by `PyPage`/`PyPooledTab`'s `set_viewport` and `screenshot`
@@ -243,6 +247,22 @@ fn to_py_err(e: void_crawl_core::VoidCrawlError) -> PyErr {
         void_crawl_core::VoidCrawlError::AntibotChallenge { .. } => {
             AntibotChallenge::new_err(e.to_string())
         }
+        void_crawl_core::VoidCrawlError::SessionInterrupted { ref interrupt_id } => {
+            let err = SessionInterrupted::new_err(e.to_string());
+            Python::attach(|py| {
+                let _ = err.value(py).setattr("interrupt_id", interrupt_id);
+            });
+            err
+        }
+        void_crawl_core::VoidCrawlError::InterruptExpired { .. } => {
+            InterruptExpired::new_err(e.to_string())
+        }
+        void_crawl_core::VoidCrawlError::InterruptTerminal { .. } => {
+            InterruptTerminal::new_err(e.to_string())
+        }
+        void_crawl_core::VoidCrawlError::InterruptNotFound { .. } => {
+            InterruptNotFound::new_err(e.to_string())
+        }
         _ => PyRuntimeError::new_err(e.to_string()),
     }
 }
@@ -344,15 +364,15 @@ fn json_to_py(py: Python<'_>, val: Value) -> PyResult<Bound<'_, PyAny>> {
 #[derive(Debug, Clone)]
 pub struct PyAntibotVerdict {
     #[pyo3(get)]
-    pub vendors:          Vec<String>,
+    pub vendors: Vec<String>,
     #[pyo3(get)]
-    pub challenged:       bool,
+    pub challenged: bool,
     #[pyo3(get)]
     pub challenge_vendor: Option<String>,
     #[pyo3(get)]
-    pub corpus_version:   String,
+    pub corpus_version: String,
     #[pyo3(get)]
-    pub evidence:         String,
+    pub evidence: String,
 }
 
 #[pymethods]
@@ -373,11 +393,11 @@ impl From<AntibotVerdict> for PyAntibotVerdict {
             AntibotEvidence::Body => "body",
         };
         Self {
-            vendors:          v.vendors,
-            challenged:       v.challenged,
+            vendors: v.vendors,
+            challenged: v.challenged,
             challenge_vendor: v.challenge_vendor,
-            corpus_version:   v.corpus_version.to_string(),
-            evidence:         evidence.to_string(),
+            corpus_version: v.corpus_version.to_string(),
+            evidence: evidence.to_string(),
         }
     }
 }
@@ -582,13 +602,13 @@ fn captured_body(response: &CapturedResponse) -> PyResult<Vec<u8>> {
 /// Async expectation context returned by ``Page.expect_response(s)``.
 #[pyclass(name = "ResponseExpectation")]
 pub struct PyResponseExpectation {
-    page:     Arc<Mutex<Option<Arc<Page>>>>,
+    page: Arc<Mutex<Option<Arc<Page>>>>,
     patterns: Vec<(String, String)>,
-    timeout:  Duration,
-    limits:   ResponseCaptureLimits,
-    single:   bool,
-    capture:  Arc<Mutex<Option<ResponseCapture>>>,
-    result:   Arc<Mutex<Option<HashMap<String, CapturedResponse>>>>,
+    timeout: Duration,
+    limits: ResponseCaptureLimits,
+    single: bool,
+    capture: Arc<Mutex<Option<ResponseCapture>>>,
+    result: Arc<Mutex<Option<HashMap<String, CapturedResponse>>>>,
 }
 
 impl fmt::Debug for PyResponseExpectation {
@@ -718,9 +738,9 @@ impl PyResponseExpectation {
 #[derive(Debug)]
 pub struct PyDownloadOutcome {
     #[pyo3(get)]
-    pub path:         String,
+    pub path: String,
     #[pyo3(get)]
-    pub bytes:        u64,
+    pub bytes: u64,
     #[pyo3(get)]
     pub content_type: Option<String>,
 }
@@ -737,11 +757,7 @@ impl PyDownloadOutcome {
 
 impl From<DownloadOutcome> for PyDownloadOutcome {
     fn from(o: DownloadOutcome) -> Self {
-        Self {
-            path:         o.path.display().to_string(),
-            bytes:        o.bytes,
-            content_type: o.content_type,
-        }
+        Self { path: o.path.display().to_string(), bytes: o.bytes, content_type: o.content_type }
     }
 }
 
@@ -785,13 +801,13 @@ impl PyDownloadCapture {
 #[derive(Debug)]
 pub struct PyScanReport {
     #[pyo3(get)]
-    pub verdict:       String,
+    pub verdict: String,
     #[pyo3(get)]
-    pub reason:        Option<String>,
+    pub reason: Option<String>,
     #[pyo3(get)]
     pub detected_mime: Option<String>,
     #[pyo3(get)]
-    pub size:          u64,
+    pub size: u64,
 }
 
 #[pymethods]
@@ -1800,6 +1816,42 @@ impl PyPage {
     }
 }
 
+// ── Interrupt results ───────────────────────────────────────────────────
+
+/// Redacted state returned after a page is explicitly interrupted, resumed,
+/// or released. This contains no CDP endpoint, cookies, or credentials.
+#[pyclass(name = "InterruptInfo")]
+#[derive(Debug)]
+pub struct PyInterruptInfo {
+    #[pyo3(get)]
+    interrupt_id: String,
+    #[pyo3(get)]
+    target_id: String,
+    #[pyo3(get)]
+    code: String,
+    #[pyo3(get)]
+    summary: String,
+    #[pyo3(get)]
+    state: String,
+    #[pyo3(get)]
+    expires_in_ms: u64,
+}
+
+impl From<InterruptInfo> for PyInterruptInfo {
+    fn from(info: InterruptInfo) -> Self {
+        #[allow(clippy::cast_possible_truncation)]
+        let expires_in_ms = info.expires_in.as_millis().min(u128::from(u64::MAX)) as u64;
+        Self {
+            interrupt_id: info.interrupt_id,
+            target_id: info.target_id,
+            code: info.code,
+            summary: info.summary,
+            state: info.state.as_str().into(),
+            expires_in_ms,
+        }
+    }
+}
+
 // ── PyBrowserSession ────────────────────────────────────────────────────
 
 /// Browser session that wraps a Chromium instance via CDP.
@@ -1814,15 +1866,15 @@ impl PyPage {
 ///         html = await page.content()
 #[pyclass(name = "BrowserSession")]
 pub struct PyBrowserSession {
-    inner:             Arc<Mutex<Option<Arc<BrowserSession>>>>,
-    mode:              BrowserMode,
-    stealth_enabled:   bool,
-    no_sandbox:        bool,
-    proxy:             Option<String>,
+    inner: Arc<Mutex<Option<Arc<BrowserSession>>>>,
+    mode: BrowserMode,
+    stealth_enabled: bool,
+    no_sandbox: bool,
+    proxy: Option<String>,
     chrome_executable: Option<String>,
-    extra_args:        Vec<String>,
-    user_data_dir:     Option<String>,
-    port:              Option<u16>,
+    extra_args: Vec<String>,
+    user_data_dir: Option<String>,
+    port: Option<u16>,
 }
 
 impl fmt::Debug for PyBrowserSession {
@@ -1956,6 +2008,84 @@ impl PyBrowserSession {
         })
     }
 
+    /// Explicitly park one page for external operator review. This uses the
+    /// existing page handle; it neither re-attaches the target nor navigates.
+    #[pyo3(signature = (page, code, summary, ttl_seconds=600))]
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "PyO3 requires extracting a PyRef argument by value"
+    )]
+    fn interrupt<'py>(
+        &self,
+        py: Python<'py>,
+        page: PyRef<'py, PyPage>,
+        code: String,
+        summary: String,
+        ttl_seconds: u64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        let page_inner = Arc::clone(&page.inner);
+        future_into_py(py, async move {
+            let session = inner
+                .lock()
+                .await
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| PyRuntimeError::new_err("browser not launched"))?;
+            let page = page_inner
+                .lock()
+                .await
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
+            let info = session
+                .interrupt_page(
+                    page.as_ref(),
+                    InterruptRequest { code, summary, ttl: Duration::from_secs(ttl_seconds) },
+                )
+                .await
+                .map_err(to_py_err)?;
+            Ok(PyInterruptInfo::from(info))
+        })
+    }
+
+    /// Reactivate the page associated with an interrupt ID. This never
+    /// navigates or replays the action that caused the interruption.
+    fn resume<'py>(&self, py: Python<'py>, interrupt_id: String) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let session = inner
+                .lock()
+                .await
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| PyRuntimeError::new_err("browser not launched"))?;
+            session
+                .resume_interrupt(&interrupt_id)
+                .await
+                .map(PyInterruptInfo::from)
+                .map_err(to_py_err)
+        })
+    }
+
+    /// Mark an interrupt released without replaying any browser action.
+    fn release<'py>(&self, py: Python<'py>, interrupt_id: String) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let session = inner
+                .lock()
+                .await
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| PyRuntimeError::new_err("browser not launched"))?;
+            session
+                .release_interrupt(&interrupt_id)
+                .await
+                .map(PyInterruptInfo::from)
+                .map_err(to_py_err)
+        })
+    }
+
     /// The browser's CDP WebSocket endpoint (``ws://…``).
     ///
     /// Hand this to another process (with a tab's ``target_id``) so it can
@@ -2082,7 +2212,7 @@ impl PyBrowserSession {
 /// is handled automatically by the context manager.
 #[pyclass(name = "PooledTab")]
 pub struct PyPooledTab {
-    inner:     Arc<Mutex<Option<PooledTab>>>,
+    inner: Arc<Mutex<Option<PooledTab>>>,
     /// Snapshot of `use_count` at the moment the tab was acquired.
     #[pyo3(get)]
     use_count: u32,
@@ -2737,7 +2867,7 @@ impl PyPooledTab {
 ///         html = await tab.content()
 #[pyclass(name = "_AcquireContext")]
 pub struct PyAcquireContext {
-    pool:     Arc<BrowserPool>,
+    pool: Arc<BrowserPool>,
     tab_slot: Arc<Mutex<Option<PooledTab>>>,
 }
 
@@ -2990,21 +3120,21 @@ impl PyBrowserPool {
 #[allow(clippy::struct_excessive_bools)]
 #[pyclass(name = "_PoolParamsContext")]
 pub struct PyPoolParamsContext {
-    browsers:             usize,
-    tabs_per_browser:     usize,
-    tab_max_uses:         u32,
-    tab_max_idle_secs:    u64,
+    browsers: usize,
+    tabs_per_browser: usize,
+    tab_max_uses: u32,
+    tab_max_idle_secs: u64,
     acquire_timeout_secs: u64,
-    auto_evict:           bool,
-    headless:             bool,
-    no_sandbox:           bool,
-    stealth:              bool,
-    ws_urls:              Vec<String>,
-    proxy:                Option<String>,
-    chrome_executable:    Option<String>,
-    extra_args:           Vec<String>,
-    user_data_dir:        Option<String>,
-    pool_slot:            Arc<Mutex<Option<Arc<BrowserPool>>>>,
+    auto_evict: bool,
+    headless: bool,
+    no_sandbox: bool,
+    stealth: bool,
+    ws_urls: Vec<String>,
+    proxy: Option<String>,
+    chrome_executable: Option<String>,
+    extra_args: Vec<String>,
+    user_data_dir: Option<String>,
+    pool_slot: Arc<Mutex<Option<Arc<BrowserPool>>>>,
 }
 
 impl fmt::Debug for PyPoolParamsContext {
@@ -3303,10 +3433,10 @@ impl Drop for ProfileSplitPreparation {
 #[derive(Debug)]
 pub struct PyManagedProfileSplit {
     source_id: String,
-    root:      Option<String>,
-    copies:    usize,
-    source:    ProfileSplitSource,
-    state:     Arc<StdMutex<ProfileSplitState>>,
+    root: Option<String>,
+    copies: usize,
+    source: ProfileSplitSource,
+    state: Arc<StdMutex<ProfileSplitState>>,
 }
 
 #[pymethods]
@@ -3510,7 +3640,7 @@ fn py_profile_pool_describe(name: &str, root: Option<String>) -> PyResult<String
 pub struct PyProfileHandle {
     inner: Arc<Mutex<Option<ProfileHandle>>>,
     #[pyo3(get)]
-    name:  String,
+    name: String,
 }
 
 impl fmt::Debug for PyProfileHandle {
@@ -3647,6 +3777,7 @@ fn _ext(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDownloadOutcome>()?;
     m.add_class::<PyDownloadCapture>()?;
     m.add_class::<PyScanReport>()?;
+    m.add_class::<PyInterruptInfo>()?;
     m.add_class::<PyProfileHandle>()?;
     m.add_class::<PyManagedProfileSnapshot>()?;
     m.add_class::<PyManagedProfileSplit>()?;
@@ -3679,5 +3810,9 @@ fn _ext(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("ProfileNotFound", py.get_type::<ProfileNotFound>())?;
     m.add("CaptchaDetected", py.get_type::<CaptchaDetected>())?;
     m.add("AntibotChallenge", py.get_type::<AntibotChallenge>())?;
+    m.add("SessionInterrupted", py.get_type::<SessionInterrupted>())?;
+    m.add("InterruptExpired", py.get_type::<InterruptExpired>())?;
+    m.add("InterruptTerminal", py.get_type::<InterruptTerminal>())?;
+    m.add("InterruptNotFound", py.get_type::<InterruptNotFound>())?;
     Ok(())
 }

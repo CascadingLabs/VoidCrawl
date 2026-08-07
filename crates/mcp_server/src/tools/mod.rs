@@ -8,6 +8,7 @@ pub mod actions;
 pub mod challenge;
 pub mod download;
 pub mod fetch;
+pub mod interrupt;
 pub mod introspect;
 pub mod profile_registry;
 pub mod screenshot;

@@ -16,12 +16,7 @@ pub enum VoidCrawlError {
     NavigationFailed(String),
 
     #[error("navigation to {url:?} timed out waiting for {wait_phase} after {timeout_secs:.3}s")]
-    NavigationTimeout {
-        url:          String,
-        wait_phase:   String,
-        timeout_secs: f64,
-        elapsed_secs: f64,
-    },
+    NavigationTimeout { url: String, wait_phase: String, timeout_secs: f64, elapsed_secs: f64 },
 
     #[error("page error: {0}")]
     PageError(String),
@@ -69,6 +64,27 @@ pub enum VoidCrawlError {
 
     #[error("browser closed")]
     BrowserClosed,
+
+    #[error("invalid interrupt request: {0}")]
+    InvalidInterruptRequest(String),
+
+    #[error("page is interrupted: {interrupt_id}")]
+    SessionInterrupted { interrupt_id: String },
+
+    #[error("an interrupt is already active for page target {target_id}")]
+    InterruptAlreadyActive { target_id: String },
+
+    #[error("page does not belong to this browser session")]
+    InterruptPageNotOwned,
+
+    #[error("unknown interrupt: {interrupt_id}")]
+    InterruptNotFound { interrupt_id: String },
+
+    #[error("interrupt expired: {interrupt_id}")]
+    InterruptExpired { interrupt_id: String },
+
+    #[error("interrupt {interrupt_id} is already terminal: {state}")]
+    InterruptTerminal { interrupt_id: String, state: String },
 
     #[error("chromium fetch failed: {0}")]
     FetchChromiumError(String),

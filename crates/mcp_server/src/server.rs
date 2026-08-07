@@ -39,6 +39,7 @@ use crate::{
             DownloadArgs, DownloadArmArgs, DownloadArmResult, DownloadResult, DownloadWaitArgs,
         },
         fetch::{FetchArgs, FetchManyArgs, FetchManyResult, FetchResult},
+        interrupt::{InterruptIdArgs, InterruptResult, SessionInterruptArgs},
         introspect::PoolStatus,
         profile_registry::{
             ProfileCloneArgs, ProfileCreateArgs, ProfileDeleteArgs, ProfileDeleteResult,
@@ -58,7 +59,7 @@ use crate::{
 /// The MCP service struct. Cheap to `Arc`-share.
 #[derive(Debug)]
 pub struct VoidCrawlServer {
-    state:       Arc<AppState>,
+    state: Arc<AppState>,
     #[allow(dead_code, reason = "read by the `#[tool_handler]` macro expansion")]
     tool_router: ToolRouter<Self>,
 }
@@ -352,6 +353,50 @@ wait_for accepts 'networkidle' (default) or 'selector:<css>' (event-driven, no p
         Parameters(args): Parameters<SessionNavigateArgs>,
     ) -> Result<Json<SessionNavigateResult>, ErrorData> {
         tools::session::navigate(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "session_interrupt",
+        description = "Explicitly park this stateful session for operator review. No login or CAPTCHA inference occurs; normal mutations fail until session_interrupt_resume or session_interrupt_release."
+    )]
+    pub async fn session_interrupt(
+        &self,
+        Parameters(args): Parameters<SessionInterruptArgs>,
+    ) -> Result<Json<InterruptResult>, ErrorData> {
+        tools::interrupt::begin(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "session_interrupt_status",
+        description = "Return redacted state for an explicit session interrupt."
+    )]
+    pub async fn session_interrupt_status(
+        &self,
+        Parameters(args): Parameters<InterruptIdArgs>,
+    ) -> Result<Json<InterruptResult>, ErrorData> {
+        tools::interrupt::status(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "session_interrupt_resume",
+        description = "Reactivate a parked session without replaying the action that caused the interrupt."
+    )]
+    pub async fn session_interrupt_resume(
+        &self,
+        Parameters(args): Parameters<InterruptIdArgs>,
+    ) -> Result<Json<InterruptResult>, ErrorData> {
+        tools::interrupt::resume(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "session_interrupt_release",
+        description = "Mark a parked interrupt released without replaying a browser action."
+    )]
+    pub async fn session_interrupt_release(
+        &self,
+        Parameters(args): Parameters<InterruptIdArgs>,
+    ) -> Result<Json<InterruptResult>, ErrorData> {
+        tools::interrupt::release(self, args).await.map(Json)
     }
 
     #[tool(

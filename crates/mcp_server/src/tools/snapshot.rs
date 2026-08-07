@@ -216,7 +216,7 @@ async fn lookup(server: &VoidCrawlServer, id: &str) -> Result<Arc<DedicatedSessi
 }
 
 async fn collect_raw(page: &Page) -> Result<RawSnapshot, VoidCrawlError> {
-    let value = page.evaluate_js(SNAPSHOT_JS).await?;
+    let value = page.document_snapshot().await?;
     serde_json::from_value(value)
         .map_err(|e| VoidCrawlError::JsEvalError(format!("snapshot decode failed: {e}")))
 }
@@ -368,115 +368,6 @@ fn chars_forms(v: &[FormSnapshot]) -> usize {
     v.iter().map(form_chars).sum()
 }
 
-const SNAPSHOT_JS: &str = r#"
-(() => {
-  const MAX = {
-    headings: 80,
-    textBlocks: 240,
-    links: 160,
-    controls: 160,
-    forms: 60,
-    formControls: 30,
-    textChars: 700,
-    smallChars: 220
-  };
-  const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
-  const clip = (value, limit) => {
-    const text = clean(value);
-    return text.length > limit ? text.slice(0, Math.max(0, limit - 3)) + '...' : text;
-  };
-  const visible = (el) => {
-    if (!el || !el.isConnected) return false;
-    const style = window.getComputedStyle(el);
-    if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
-    const rect = el.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
-  };
-  const attr = (el, name) => {
-    const value = el.getAttribute(name);
-    return value == null || value === '' ? null : clip(value, MAX.smallChars);
-  };
-  const labelText = (el) => {
-    const id = el.id ? CSS.escape(el.id) : null;
-    const label = id ? document.querySelector(`label[for="${id}"]`) : null;
-    return clip(
-      el.getAttribute('aria-label')
-        || el.getAttribute('title')
-        || el.getAttribute('placeholder')
-        || (label && label.textContent)
-        || el.value
-        || el.textContent
-        || el.name
-        || '',
-      MAX.smallChars
-    );
-  };
-  const control = (el) => ({
-    tag: el.tagName.toLowerCase(),
-    type: attr(el, 'type'),
-    role: attr(el, 'role'),
-    name: labelText(el) || null,
-    placeholder: attr(el, 'placeholder'),
-    disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true')
-  });
-  const all = (selector) => Array.from(document.querySelectorAll(selector)).filter(visible);
-  const unique = (items) => Array.from(new Set(items));
-
-  const headingNodes = all('h1,h2,h3,h4,h5,h6');
-  const headings = headingNodes.slice(0, MAX.headings).map((el) => ({
-    level: Number(el.tagName.slice(1)),
-    text: clip(el.textContent, MAX.smallChars)
-  })).filter((h) => h.text);
-
-  const textNodes = unique([
-    ...all('main p, main li, article p, article li, section p, blockquote, body > p, td, th'),
-    ...all('[role="main"] p, [role="article"] p')
-  ]).filter((el) => clean(el.textContent).length >= 20);
-  const text_blocks = textNodes.slice(0, MAX.textBlocks).map((el) => ({
-    tag: el.tagName.toLowerCase(),
-    text: clip(el.textContent, MAX.textChars)
-  })).filter((b) => b.text);
-
-  const linkNodes = all('a[href]');
-  const links = linkNodes.slice(0, MAX.links).map((el) => ({
-    text: clip(el.textContent || el.getAttribute('aria-label') || el.href, MAX.smallChars),
-    href: clip(el.href, MAX.smallChars)
-  })).filter((l) => l.href);
-
-  const controlNodes = all('button,input,select,textarea,[role="button"],[role="link"],[role="textbox"],[role="combobox"],[contenteditable="true"]');
-  const controls = controlNodes.slice(0, MAX.controls).map(control);
-
-  const formNodes = all('form');
-  const forms = formNodes.slice(0, MAX.forms).map((form) => {
-    const fields = Array.from(form.querySelectorAll('button,input,select,textarea,[role="button"],[role="textbox"],[role="combobox"]'))
-      .filter(visible)
-      .slice(0, MAX.formControls)
-      .map(control);
-    return {
-      action: attr(form, 'action') || (form.action ? clip(form.action, MAX.smallChars) : null),
-      method: clip(form.method || 'get', 20).toLowerCase(),
-      controls: fields
-    };
-  });
-
-  return {
-    url: location.href,
-    title: document.title || null,
-    headings,
-    text_blocks,
-    links,
-    controls,
-    forms,
-    total: {
-      headings: headingNodes.length,
-      text_blocks: textNodes.length,
-      links: linkNodes.length,
-      controls: controlNodes.length,
-      forms: formNodes.length
-    }
-  };
-})()
-"#;
 
 #[cfg(test)]
 mod tests {

@@ -37,6 +37,9 @@ from voidcrawl._ext import (
     ChromeProfileBusy,
     DownloadCapture,
     DownloadOutcome,
+    InterruptExpired,
+    InterruptNotFound,
+    InterruptTerminal,
     NavigationError,
     NavigationTimeoutError,
     Page,
@@ -49,6 +52,7 @@ from voidcrawl._ext import (
     ResponseExpectation,
     ResponseTimeoutError,
     ScanReport,
+    SessionInterrupted,
     VoidCrawlError,
     _AcquireContext,
     _PoolParamsContext,
@@ -62,6 +66,7 @@ from voidcrawl._ext import (
     BrowserSession as _BrowserSession,
 )
 from voidcrawl.actions._protocol import JsTab, Tab
+from voidcrawl.interrupts import InterruptRef, InterruptRequest
 from voidcrawl.profiles import (
     ManagedProfileSnapshot,
     ManagedProfileSplit,
@@ -89,6 +94,11 @@ __all__ = [
     "ChromeProfileBusy",
     "DownloadCapture",
     "DownloadOutcome",
+    "InterruptExpired",
+    "InterruptNotFound",
+    "InterruptRef",
+    "InterruptRequest",
+    "InterruptTerminal",
     "JsTab",
     "ManagedProfileSnapshot",
     "ManagedProfileSplit",
@@ -110,6 +120,7 @@ __all__ = [
     "ScanReport",
     "Schema",
     "Selector",
+    "SessionInterrupted",
     "Tab",
     "Text",
     "Viewport",
@@ -620,6 +631,63 @@ class BrowserSession:
         if self._inner is None:
             raise RuntimeError("BrowserSession not started — use async with")
         return await self._inner.attach_page(target_id)
+
+    async def interrupt(self, page: Page, request: InterruptRequest) -> InterruptRef:
+        """Park *page* for explicit operator review.
+
+        This is an AI-free state transition. It does not infer a login or
+        challenge, expose CDP credentials, or replay work when resumed.
+        """
+        if self._inner is None:
+            raise RuntimeError("BrowserSession not started — use async with")
+        raw = await self._inner.interrupt(
+            page,
+            request.code,
+            request.summary,
+            request.ttl_seconds,
+        )
+        return InterruptRef.model_validate(
+            {
+                "interrupt_id": raw.interrupt_id,
+                "target_id": raw.target_id,
+                "code": raw.code,
+                "summary": raw.summary,
+                "state": raw.state,
+                "expires_in_ms": raw.expires_in_ms,
+            }
+        )
+
+    async def resume(self, interrupt_id: str) -> InterruptRef:
+        """Reactivate an interrupted page without replaying an action."""
+        if self._inner is None:
+            raise RuntimeError("BrowserSession not started — use async with")
+        raw = await self._inner.resume(interrupt_id)
+        return InterruptRef.model_validate(
+            {
+                "interrupt_id": raw.interrupt_id,
+                "target_id": raw.target_id,
+                "code": raw.code,
+                "summary": raw.summary,
+                "state": raw.state,
+                "expires_in_ms": raw.expires_in_ms,
+            }
+        )
+
+    async def release(self, interrupt_id: str) -> InterruptRef:
+        """Release an interrupted page without replaying an action."""
+        if self._inner is None:
+            raise RuntimeError("BrowserSession not started — use async with")
+        raw = await self._inner.release(interrupt_id)
+        return InterruptRef.model_validate(
+            {
+                "interrupt_id": raw.interrupt_id,
+                "target_id": raw.target_id,
+                "code": raw.code,
+                "summary": raw.summary,
+                "state": raw.state,
+                "expires_in_ms": raw.expires_in_ms,
+            }
+        )
 
     async def websocket_url(self) -> str:
         """The browser's CDP WebSocket endpoint (``ws://…``).

@@ -8,6 +8,7 @@ pub mod captcha;
 pub mod challenge;
 pub mod error;
 pub mod input;
+pub mod interrupt;
 mod lease;
 pub mod managed_profile;
 pub mod page;
@@ -34,6 +35,7 @@ pub use chromiumoxide::cdp::browser_protocol::{
     network::{Cookie, CookieParam, DeleteCookiesParams},
 };
 pub use error::{Result, VoidCrawlError};
+pub use interrupt::{InterruptInfo, InterruptRegistry, InterruptRequest, InterruptState};
 pub use managed_profile::{
     MAX_PROFILE_SPLIT_COPIES, ManagedProfile, ManagedProfileDescription, ManagedProfileLease,
     ManagedProfileSnapshot, ProfilePool, ProfileRegistry, ProfileStatus, ResolvedProfilePool,

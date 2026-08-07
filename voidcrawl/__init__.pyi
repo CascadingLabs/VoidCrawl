@@ -8,6 +8,18 @@ from voidcrawl._ext import (
     AntibotChallenge as AntibotChallenge,
 )
 from voidcrawl._ext import (
+    InterruptExpired as InterruptExpired,
+)
+from voidcrawl._ext import (
+    InterruptNotFound as InterruptNotFound,
+)
+from voidcrawl._ext import (
+    InterruptTerminal as InterruptTerminal,
+)
+from voidcrawl._ext import (
+    SessionInterrupted as SessionInterrupted,
+)
+from voidcrawl._ext import (
     AntibotVerdict as AntibotVerdict,
 )
 from voidcrawl._ext import (
@@ -67,6 +79,12 @@ from voidcrawl.actions._protocol import (
 from voidcrawl.actions._protocol import (
     Tab as Tab,
 )
+from voidcrawl.interrupts import (
+    InterruptRef as InterruptRef,
+)
+from voidcrawl.interrupts import (
+    InterruptRequest as InterruptRequest,
+)
 from voidcrawl.profiles import (
     ManagedProfileSnapshot as ManagedProfileSnapshot,
 )
@@ -119,6 +137,11 @@ __all__ = [
     "BrowserSession",
     "CaptchaDetected",
     "CapturedResponse",
+    "InterruptExpired",
+    "InterruptNotFound",
+    "InterruptRef",
+    "InterruptRequest",
+    "InterruptTerminal",
     "ChromeProfileBusy",
     "JsTab",
     "ManagedProfileSnapshot",
@@ -139,6 +162,7 @@ __all__ = [
     "ScaleProfile",
     "ScaleReport",
     "Schema",
+    "SessionInterrupted",
     "Selector",
     "Tab",
     "Text",
@@ -243,6 +267,9 @@ class BrowserSession:
     async def new_page(self, url: str | None = None) -> Page: ...
     def page(self, url: str | None = None) -> _PageContext: ...
     async def attach_page(self, target_id: str) -> Page: ...
+    async def interrupt(self, page: Page, request: InterruptRequest) -> InterruptRef: ...
+    async def resume(self, interrupt_id: str) -> InterruptRef: ...
+    async def release(self, interrupt_id: str) -> InterruptRef: ...
     async def websocket_url(self) -> str: ...
     async def version(self) -> str: ...
     async def close(self) -> None: ...
