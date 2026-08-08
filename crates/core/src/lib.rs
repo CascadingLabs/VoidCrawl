@@ -56,7 +56,8 @@ pub use profile::{
     list_profiles, release_profile, resolve_profile,
 };
 pub use recording::{
-    Encoding, Frame, FrameFormat, RecordedRegion, Recording, RecordingHandle, RecordingOptions,
+    Encoding, Frame, FrameFormat, MaskRegion, MaskReport, MaskSpec, RecordedRegion, Recording,
+    RecordingHandle, RecordingOptions,
 };
 pub use response::{
     CapturedResponse, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_MAX_TOTAL_RESPONSE_BYTES,

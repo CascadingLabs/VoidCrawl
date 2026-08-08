@@ -72,6 +72,124 @@ rec = await handle.stop()
 point even if `stop()` is never called, so an abandoned recording cannot hold
 the browser open.
 
+### OpenSesame/noVNC interaction evidence
+
+For an authorized human or OpenSesame login in a headful browser, use
+`examples/opensesame_recorded_novnc_login.py`. It starts one tab, records the
+same tab while the operator works through noVNC, masks password selectors, and
+writes an MP4 plus an append-only `audit.jsonl` containing attach coordinates,
+response provenance, mask reports, frame counts, and output paths. Credentials,
+HTML, cookies, and actor command arguments are deliberately excluded.
+
+```bash
+./docker/run-headful.sh -d
+ffmpeg -version
+export AUTHORIZED_LOGIN_URL='https://your-authorized-login.example/path'
+uv run python examples/opensesame_recorded_novnc_login.py \
+  --docker-headful \
+  --url "$AUTHORIZED_LOGIN_URL"
+```
+
+Replace the example URL with a real authorized target; `example.test` is a
+non-routable documentation placeholder. Pass `--opensesame-command "python
+/path/to/actor.py"` to run an external
+actor. It receives
+`VOIDCRAWL_OPENSESAME_ATTACH_JSON`, containing the same-tab
+`websocket_url`/`target_id` and the noVNC/VNC links. Without that option, the
+example waits for a human to complete the flow in noVNC.
+
+## Masking
+
+`masks` paints rectangles solid black in every frame, **before** anything is
+cropped, written, or encoded. It exists because there is no other seam: between
+Chrome compositing a frame and that frame hitting disk, nothing downstream can
+intervene, so whatever is on screen is already in the artifact by the time
+anyone else gets a say.
+
+```python
+rec = await page.start_recording(
+    masks=[{"type": "css", "value": "#password"}],
+    dir="./out",
+    encode=["mp4"],
+)
+```
+
+### What this is and is not
+
+VoidCrawl supplies the mechanism, not the judgment. A mask is a rectangle.
+There are no classifiers, no presets, no `input[type=password]` special-casing,
+and nothing here decides what counts as sensitive or whether a finished
+recording is safe to share. You name the regions; the obfuscation harness that
+decides which regions to name lives above this library.
+
+So masking a recording is **not** a claim that the recording is clean — only
+that the named rectangles were covered, which the `masks` report says exactly.
+`examples/record_masked_login.py` demonstrates the boundary by accident: it
+masks the password *field*, and the page's own instruction text — which prints
+the same password — stays perfectly legible, because nobody named it.
+
+### Fixed rectangles and selectors
+
+A mask is either a literal rectangle or a selector to resolve into one:
+
+```python
+masks=[
+    {"bbox": (100, 240, 320, 32)},                         # no DOM work at all
+    {"selector": {"type": "css", "value": "#token"}},      # resolved for you
+    {"selector": {...}, "track": False, "label": "token"}, # pinned, named
+]
+```
+
+A bare selector dict is accepted as shorthand for the second form. Selector
+masks resolve through the same path as crop selectors, so all 8 Yosoi selector
+kinds work — and a mask that matches nothing, is ambiguous, or is non-visual
+fails the call before any frame is captured. An unresolvable mask is a hole in
+an artifact you believe is covered, so it is never silently skipped.
+
+### Masks track; crops do not
+
+Crop regions are resolved once and held fixed. A crop that drifts is cosmetic;
+a mask that drifts uncovers the thing it was asked to cover. So selector masks
+are re-resolved on a timer (at most 5 Hz) and each frame is masked with the
+rectangles current when it was captured, under two conservative rules:
+
+- a frame is masked with the **union** of the current and previous tick's
+  rectangles, so an element caught mid-scroll is covered in both places;
+- a mask whose selector stops resolving **keeps its last known rectangle**
+  rather than uncovering.
+
+Neither rule is a risk assessment — both are just "cover more, not less". What
+happened is reported per mask, and what it means is yours to decide:
+
+| Field | Meaning |
+| --- | --- |
+| `label` | Name, from `label` or derived from the selector. |
+| `bbox` | The rectangle as first resolved. |
+| `tracked` | Whether it was re-resolved during the recording. |
+| `unresolved_ticks` | Ticks where re-resolution failed (element gone, hidden, ambiguous). |
+| `stale_frames` | Frames captured while the most recent re-resolution had failed. |
+
+A navigation mid-recording is the common source of `unresolved_ticks`: the old
+document's element is gone, so the mask holds its last rectangle over a page it
+no longer belongs to. Non-zero `stale_frames` is a signal to look at the
+artifact before sharing it.
+
+### Cost and caveats
+
+- Masking costs one decode + re-encode per frame — once per frame, not once per
+  frame per region. An unmasked recording pays nothing.
+- The pixels are covered in-process, after Chrome composited them and after the
+  frame was decoded. They never reach disk, an encoder, or a caller — but they
+  do exist in memory first.
+- JPEG is lossy, so a black fill re-encoded at quality 80 is *near*-black rather
+  than exactly `#000`. No original pixel survives either way; use
+  `frame_format="png"` when you want to assert on exact values.
+- `mask_pad` (default 2 CSS px) grows each rectangle outward to swallow
+  antialiasing at the edges. Set `0` for the exact rectangle.
+- Masks are orthogonal to crops. Cropping to a form and masking a field inside
+  it is the normal case, and the crop is always cut from an already-masked
+  frame.
+
 ## Concurrency: the window rule
 
 This is the one piece of Chrome behavior worth understanding before recording
@@ -168,6 +286,7 @@ Recording length is capped at 120s, and `session_record_start` defaults to a
 | Field | Meaning |
 | --- | --- |
 | `regions` | One per requested region; a single `"viewport"` region by default. |
+| `masks` | One per requested mask; empty means nothing was asked to be covered. |
 | `frames_captured` | Frames kept, per region. |
 | `frames_dropped` | Frames discarded by the `fps` ceiling or frame cap. |
 | `effective_fps()` | Rate actually achieved. Report this, not the requested `fps`. |

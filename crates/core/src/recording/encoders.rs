@@ -20,11 +20,11 @@ use std::{fs, path::Path, time::Duration};
 #[cfg(feature = "encode-ffmpeg")]
 use tokio::process::Command;
 
-#[cfg(feature = "encode-ffmpeg")]
-use super::{Encoding, RecordedRegion, RecordingOptions};
+use super::Frame;
 #[cfg(feature = "encode-gif")]
 use super::FrameFormat;
-use super::Frame;
+#[cfg(feature = "encode-ffmpeg")]
+use super::{Encoding, RecordedRegion, RecordingOptions};
 use crate::error::{Result, VoidCrawlError};
 
 /// Per-frame display duration, derived from the gap to the following frame.

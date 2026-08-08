@@ -626,6 +626,19 @@ impl Page {
         &self.inner
     }
 
+    /// A second handle on the same tab, sharing the browser's capture lock and
+    /// interrupt registry.
+    ///
+    /// For background tasks that need to *query* a page the caller still owns —
+    /// [`crate::recording`]'s mask tracker re-resolves selectors on a timer
+    /// while the original `Page` stays behind its own lock. Deliberately not
+    /// `Clone`: the per-page state that isn't shared (virtual cursor position,
+    /// one-shot viewport override) resets on the new handle, so this is only
+    /// safe for read-only work like [`Page::resolve_selector`].
+    pub(crate) fn clone_handle(&self) -> Self {
+        Self::new(self.inner.clone(), Arc::clone(&self.capture_lock), Arc::clone(&self.interrupts))
+    }
+
     /// The browser-wide capture lock this page shares with its siblings.
     /// Cloned rather than borrowed so a caller can hold it across an await
     /// without borrowing the page for that whole span.

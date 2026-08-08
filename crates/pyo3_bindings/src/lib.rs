@@ -23,8 +23,8 @@ use pyo3_async_runtimes::tokio::future_into_py;
 mod recording;
 
 use recording::{
-    PyFrame, PyRecordedRegion, PyRecording, PyRecordingHandle, build_recording_options,
-    into_py_recording,
+    PyFrame, PyMaskReport, PyRecordedRegion, PyRecording, PyRecordingHandle,
+    build_recording_options, into_py_recording,
 };
 use serde_json::Value;
 use tokio::{sync::Mutex, task::spawn_blocking};
@@ -1356,6 +1356,25 @@ impl PyPage {
     ///     bbox: ``(x, y, width, height)`` in CSS pixels, **viewport
     ///         relative** (unlike :meth:`screenshot`'s page-relative bbox,
     ///         since a screencast frame only contains the viewport).
+    ///     masks: Rectangles to paint solid black in every frame, before
+    ///         anything is cropped, written, or encoded. Each entry is
+    ///         either a selector dict (``{"type": "css", "value":
+    ///         "#password"}``) or ``{"bbox": (x, y, w, h)}`` /
+    ///         ``{"selector": {...}, "track": False, "label": "pw"}``.
+    ///         Orthogonal to ``bbox``/``selectors``: crop to the form and
+    ///         mask a field inside it. Unlike a crop region, a selector mask
+    ///         is re-resolved while recording, so it keeps covering an
+    ///         element that moves; a selector that resolves to nothing fails
+    ///         the call rather than leaving a hole. What each mask actually
+    ///         did is reported in ``recording.masks``.
+    ///
+    ///         This is a geometric primitive, not a redaction policy: it
+    ///         covers exactly what you name and reports what it covered. It
+    ///         does not decide what is sensitive, so a masked recording is
+    ///         not thereby a safe-to-share one.
+    ///     mask_pad: Outward padding in CSS pixels on every mask, to swallow
+    ///         antialiasing at the edges (default 2). Set 0 for the exact
+    ///         rectangle.
     ///     fps: Frame-rate ceiling (default 10).
     ///     frame_format: ``"jpeg"`` (default) or ``"png"``.
     ///     quality: JPEG quality 1-100 (default 80).
@@ -1371,7 +1390,8 @@ impl PyPage {
     ///         all, while a tab alone in its window records at full rate
     ///         concurrently with everything else.
     ///     max_frames: In-memory frame cap (default 900).
-    #[pyo3(signature = (duration_secs=None, selectors=None, bbox=None, viewport_preset=None,
+    #[pyo3(signature = (duration_secs=None, selectors=None, bbox=None, masks=None,
+        mask_pad=None, viewport_preset=None,
         viewport_width=None, viewport_height=None, viewport_device_scale_factor=None,
         viewport_mobile=None, scroll_viewports=None, scroll_pixels=None, fps=None,
         max_frames=None, frame_format=None, quality=None, output_dir=None, write_frames=None,
@@ -1383,6 +1403,8 @@ impl PyPage {
         duration_secs: Option<f64>,
         selectors: Option<Vec<Py<PyAny>>>,
         bbox: Option<(u32, u32, u32, u32)>,
+        masks: Option<Vec<Py<PyAny>>>,
+        mask_pad: Option<u32>,
         viewport_preset: Option<String>,
         viewport_width: Option<u32>,
         viewport_height: Option<u32>,
@@ -1403,6 +1425,8 @@ impl PyPage {
             output_dir,
             bbox,
             selectors,
+            masks,
+            mask_pad,
             viewport_preset.as_deref(),
             viewport_width,
             viewport_height,
@@ -1440,7 +1464,8 @@ impl PyPage {
     /// handle.stop()``. Takes the same kwargs as :meth:`record`, where
     /// ``duration_secs`` becomes a hard upper bound rather than the exact
     /// length.
-    #[pyo3(signature = (duration_secs=None, selectors=None, bbox=None, viewport_preset=None,
+    #[pyo3(signature = (duration_secs=None, selectors=None, bbox=None, masks=None,
+        mask_pad=None, viewport_preset=None,
         viewport_width=None, viewport_height=None, viewport_device_scale_factor=None,
         viewport_mobile=None, scroll_viewports=None, scroll_pixels=None, fps=None,
         max_frames=None, frame_format=None, quality=None, output_dir=None, write_frames=None,
@@ -1452,6 +1477,8 @@ impl PyPage {
         duration_secs: Option<f64>,
         selectors: Option<Vec<Py<PyAny>>>,
         bbox: Option<(u32, u32, u32, u32)>,
+        masks: Option<Vec<Py<PyAny>>>,
+        mask_pad: Option<u32>,
         viewport_preset: Option<String>,
         viewport_width: Option<u32>,
         viewport_height: Option<u32>,
@@ -1472,6 +1499,8 @@ impl PyPage {
             output_dir,
             bbox,
             selectors,
+            masks,
+            mask_pad,
             viewport_preset.as_deref(),
             viewport_width,
             viewport_height,
@@ -4057,6 +4086,7 @@ fn _ext(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyManagedProfileSplit>()?;
     m.add_class::<PyRecording>()?;
     m.add_class::<PyRecordedRegion>()?;
+    m.add_class::<PyMaskReport>()?;
     m.add_class::<PyFrame>()?;
     m.add_class::<PyRecordingHandle>()?;
     m.add_function(wrap_pyfunction!(py_list_profiles, m)?)?;

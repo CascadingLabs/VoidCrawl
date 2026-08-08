@@ -181,43 +181,43 @@ pub enum BrowserMode {
 #[derive(Debug, Clone)]
 #[must_use]
 pub struct BrowserSessionBuilder {
-    mode: BrowserMode,
-    stealth: StealthConfig,
-    extra_args: Vec<String>,
+    mode:              BrowserMode,
+    stealth:           StealthConfig,
+    extra_args:        Vec<String>,
     chrome_executable: Option<String>,
-    proxy: Option<String>,
-    no_sandbox: bool,
-    window_size: Option<(u32, u32)>,
+    proxy:             Option<String>,
+    no_sandbox:        bool,
+    window_size:       Option<(u32, u32)>,
     /// Pinned `--remote-debugging-port` for launched Chrome. `None` (default)
     /// lets the OS pick a free ephemeral port on loopback — never blocks on
     /// a busy or firewalled address. `Some(n)` forces Chrome to bind that
     /// port; useful when only specific ports are reachable through a
     /// firewall or when mapping through Docker.
-    port: Option<u16>,
+    port:              Option<u16>,
     /// Persistent Chrome profile directory. `None` (default) = ephemeral
     /// `TempDir` that is deleted on session drop. `Some(path)` = mount an
     /// existing profile (e.g. one you've logged into `LinkedIn` in) and
     /// leave the directory on disk after the session ends.
-    user_data_dir: Option<PathBuf>,
+    user_data_dir:     Option<PathBuf>,
     /// How many CDP domains to eagerly enable. Defaults to
     /// [`CdpMode::Normal`], which every capture-dependent feature needs.
     /// See [`BrowserSessionBuilder::cdp_mode`].
-    cdp_mode: CdpMode,
+    cdp_mode:          CdpMode,
 }
 
 impl Default for BrowserSessionBuilder {
     fn default() -> Self {
         Self {
-            mode: BrowserMode::Headless,
-            stealth: StealthConfig::chrome_like(),
-            extra_args: Vec::new(),
+            mode:              BrowserMode::Headless,
+            stealth:           StealthConfig::chrome_like(),
+            extra_args:        Vec::new(),
             chrome_executable: None,
-            proxy: None,
-            no_sandbox: false,
-            window_size: None,
-            port: None,
-            user_data_dir: None,
-            cdp_mode: CdpMode::from_env_default(),
+            proxy:             None,
+            no_sandbox:        false,
+            window_size:       None,
+            port:              None,
+            user_data_dir:     None,
+            cdp_mode:          CdpMode::from_env_default(),
         }
     }
 }
@@ -368,16 +368,16 @@ impl BrowserSessionBuilder {
 ///
 /// Use [`BrowserSessionBuilder`] or the convenience constructors to create one.
 pub struct BrowserSession {
-    browser: Arc<Mutex<Browser>>,
-    interrupts: Arc<InterruptRegistry>,
-    _handler_task: JoinHandle<()>,
-    handler_alive: Arc<AtomicBool>,
-    stealth: StealthConfig,
+    browser:        Arc<Mutex<Browser>>,
+    interrupts:     Arc<InterruptRegistry>,
+    _handler_task:  JoinHandle<()>,
+    handler_alive:  Arc<AtomicBool>,
+    stealth:        StealthConfig,
     /// True when this session attached to an already-running Chrome via
     /// `BrowserMode::RemoteDebug`. In that case `close()` must NOT send
     /// `Browser.close` over CDP — doing so terminates the user's Chromium
     /// process, which we didn't spawn and have no business shutting down.
-    attached: bool,
+    attached:       bool,
     /// Owns the temporary user data directory for launched browsers.
     /// `None` for remote-debug sessions (no local user data dir).
     /// Dropped after `browser` and `_handler_task`, so Chrome has already
@@ -385,7 +385,7 @@ pub struct BrowserSession {
     _user_data_dir: Option<tempfile::TempDir>,
     /// Shared with every `Page` this session creates, so screenshot capture
     /// is serialized per-browser rather than per-tab. See [`Page::screenshot`].
-    capture_lock: Arc<Mutex<()>>,
+    capture_lock:   Arc<Mutex<()>>,
 }
 
 impl fmt::Debug for BrowserSession {

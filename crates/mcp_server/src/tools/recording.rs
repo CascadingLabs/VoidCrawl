@@ -19,7 +19,8 @@ use rmcp::ErrorData;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use void_crawl_core::{
-    Encoding, FrameFormat, Page, Recording, RecordingOptions, SelectorEntry, VoidCrawlError,
+    Encoding, FrameFormat, MaskSpec, Page, Recording, RecordingOptions, SelectorEntry,
+    VoidCrawlError,
 };
 
 use crate::{
@@ -36,6 +37,85 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// Default recording length. Short on purpose: a recording on a pooled tab
 /// holds that browser's capture lock, and an agent that wants more can ask.
 pub const DEFAULT_DURATION_SECS: f64 = 5.0;
+
+/// One rectangle to black out in every frame.
+///
+/// Give exactly one of `bbox` (a rectangle you already know) or `selector`
+/// (one to resolve). A selector mask is re-resolved while recording, so it
+/// keeps covering an element that moves or scrolls; set `track: false` to pin
+/// it where it started.
+///
+/// This is a geometric primitive, not a redaction policy: the server covers
+/// the rectangles it is given and reports what it covered. It does not decide
+/// what is sensitive, and a masked recording is not thereby a clean one.
+#[derive(Debug, Clone, Deserialize, JsonSchema, Default)]
+pub struct MaskArg {
+    /// A viewport-relative rectangle in CSS pixels. Mutually exclusive with
+    /// `selector`.
+    #[serde(default)]
+    pub bbox:     Option<BboxArg>,
+    /// A Yosoi selector to resolve into a rectangle. One that matches
+    /// nothing, is ambiguous, or is non-visual (jsonld/regex) fails the call
+    /// before recording begins — an unresolvable mask is never skipped.
+    /// Mutually exclusive with `bbox`.
+    #[serde(default)]
+    pub selector: Option<SelectorArg>,
+    /// Re-resolve this mask while recording (default true; ignored for
+    /// `bbox`).
+    #[serde(default)]
+    pub track:    Option<bool>,
+    /// Name for this mask in the result. Defaults to one derived from the
+    /// selector.
+    #[serde(default)]
+    pub label:    Option<String>,
+}
+
+impl MaskArg {
+    fn resolve(self) -> Result<MaskSpec, ErrorData> {
+        let spec = match (self.bbox, self.selector) {
+            (Some(_), Some(_)) => {
+                return Err(ErrorData::invalid_params(
+                    "a mask takes either `bbox` or `selector`, not both",
+                    None,
+                ));
+            }
+            (None, None) => {
+                return Err(ErrorData::invalid_params(
+                    "a mask needs either `bbox` or `selector`",
+                    None,
+                ));
+            }
+            (Some(bbox), None) => MaskSpec::bbox(bbox.into()),
+            (None, Some(selector)) => {
+                let spec = MaskSpec::selector(selector.into());
+                match self.track {
+                    Some(track) => spec.with_track(track),
+                    None => spec,
+                }
+            }
+        };
+        Ok(match self.label {
+            Some(label) => spec.with_label(label),
+            None => spec,
+        })
+    }
+}
+
+/// What one mask covered, so the caller can judge the artifact.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MaskResult {
+    pub label:            String,
+    /// [x, y, width, height] in CSS pixels, as first resolved.
+    pub bbox:             [u32; 4],
+    pub tracked:          bool,
+    /// Ticks where re-resolution failed. The mask kept its last known
+    /// rectangle for those, so something was covered — whether it was the
+    /// right thing is not knowable from here.
+    pub unresolved_ticks: usize,
+    /// Frames captured while the most recent re-resolution had failed. Above
+    /// zero means those frames deserve a look before the recording is shared.
+    pub stale_frames:     usize,
+}
 
 #[derive(Debug, Deserialize, JsonSchema, Default)]
 pub struct RecordArgs {
@@ -72,6 +152,16 @@ pub struct RecordArgs {
     /// Mutually exclusive with `bbox`.
     #[serde(default)]
     pub selectors:     Vec<SelectorArg>,
+    /// Rectangles to paint solid black in every frame, before anything is
+    /// cropped, written, or encoded. Orthogonal to `bbox`/`selectors` —
+    /// combining them is normal: crop to the form, mask the password field
+    /// inside it.
+    #[serde(default)]
+    pub masks:         Vec<MaskArg>,
+    /// Outward padding in CSS pixels on every mask, to swallow antialiasing
+    /// at the edges (default 2). Set 0 for the exact rectangle.
+    #[serde(default)]
+    pub mask_pad:      Option<u32>,
     /// Scroll before recording. Since a recording only captures the viewport,
     /// this is how you choose which part of a long page gets recorded.
     #[serde(default)]
@@ -114,6 +204,12 @@ pub struct SessionRecordStartArgs {
     pub bbox:              Option<BboxArg>,
     #[serde(default)]
     pub selectors:         Vec<SelectorArg>,
+    /// Rectangles to paint solid black in every frame. See `record`'s
+    /// `masks`.
+    #[serde(default)]
+    pub masks:             Vec<MaskArg>,
+    #[serde(default)]
+    pub mask_pad:          Option<u32>,
     #[serde(default)]
     pub scroll:            Option<ScrollArg>,
     #[serde(default)]
@@ -151,6 +247,9 @@ pub struct RegionResult {
 pub struct RecordResult {
     pub output_dir:         String,
     pub regions:            Vec<RegionResult>,
+    /// One entry per requested mask. An empty list means nothing was asked to
+    /// be covered — not that there was nothing worth covering.
+    pub masks:              Vec<MaskResult>,
     pub format:             String,
     pub duration_ms:        f64,
     pub frames_captured:    usize,
@@ -230,6 +329,8 @@ fn build_options(
     viewport: Option<&ViewportArg>,
     bbox: Option<&BboxArg>,
     selectors: Vec<SelectorArg>,
+    masks: Vec<MaskArg>,
+    mask_pad: Option<u32>,
     scroll: Option<&ScrollArg>,
     fps: Option<u8>,
     duration: Duration,
@@ -259,6 +360,12 @@ fn build_options(
     for selector in selectors {
         let entry: SelectorEntry = selector.into();
         opts = opts.with_selector(entry);
+    }
+    for mask in masks {
+        opts = opts.with_mask(mask.resolve()?);
+    }
+    if let Some(pad) = mask_pad {
+        opts = opts.with_mask_pad(pad);
     }
     if let Some(s) = scroll {
         opts = opts.with_scroll(s.resolve()?);
@@ -291,6 +398,8 @@ pub async fn run(
         args.viewport.as_ref(),
         args.bbox.as_ref(),
         args.selectors,
+        args.masks,
+        args.mask_pad,
         args.scroll.as_ref(),
         args.fps,
         duration,
@@ -329,6 +438,8 @@ pub async fn session_start(
         args.viewport.as_ref(),
         args.bbox.as_ref(),
         args.selectors,
+        args.masks,
+        args.mask_pad,
         args.scroll.as_ref(),
         args.fps,
         duration,
@@ -429,9 +540,22 @@ fn to_result(rec: &Recording, output_dir: &Path, encode_error: Option<String>) -
         })
         .collect();
 
+    let masks = rec
+        .masks
+        .iter()
+        .map(|m| MaskResult {
+            label:            m.label.clone(),
+            bbox:             [m.bbox.x, m.bbox.y, m.bbox.width, m.bbox.height],
+            tracked:          m.tracked,
+            unresolved_ticks: m.unresolved_ticks,
+            stale_frames:     m.stale_frames,
+        })
+        .collect();
+
     RecordResult {
         output_dir: output_dir.display().to_string(),
         regions,
+        masks,
         format: match rec.format {
             FrameFormat::Jpeg => "jpeg".into(),
             FrameFormat::Png => "png".into(),

@@ -610,12 +610,35 @@ class RecordedRegion:
     outputs: list[str]
     """Paths of encoded artifacts written for this region."""
 
+class MaskReport:
+    """What one mask of a :class:`Recording` covered.
+
+    The library covers the rectangles it is given and reports the result. It
+    does not decide what is sensitive, so a recording with masks is not
+    thereby a safe-to-share one — ``unresolved_ticks`` and ``stale_frames``
+    are here so you can make that call.
+    """
+
+    label: str
+    bbox: tuple[int, int, int, int]
+    """``(x, y, width, height)`` in CSS pixels, as first resolved."""
+    tracked: bool
+    """Whether the mask was re-resolved while recording."""
+    unresolved_ticks: int
+    """Ticks where re-resolution failed. The mask kept its last known
+    rectangle for those, so something stayed covered."""
+    stale_frames: int
+    """Frames captured while the most recent re-resolution had failed."""
+
 class Recording:
     """The result of :meth:`Page.record` / :meth:`RecordingHandle.stop`."""
 
     regions: list[RecordedRegion]
     """One per requested region; a single ``"viewport"`` region when neither
     ``bbox`` nor ``selectors`` was given."""
+    masks: list[MaskReport]
+    """One per requested mask. Empty means nothing was asked to be covered —
+    not that there was nothing worth covering."""
     format: str
     """``"jpeg"`` or ``"png"``."""
     duration_ms: float
@@ -743,6 +766,8 @@ class Page:
         duration_secs: float | None = None,
         selectors: list[dict[str, object]] | None = None,
         bbox: tuple[int, int, int, int] | None = None,
+        masks: list[dict[str, object]] | None = None,
+        mask_pad: int | None = None,
         viewport_preset: str | None = None,
         viewport_width: int | None = None,
         viewport_height: int | None = None,
@@ -776,6 +801,20 @@ class Page:
         contains the viewport), unlike :meth:`screenshot`'s page-relative
         one.
 
+        ``masks`` blacks out rectangles in every frame before anything is
+        cropped, written, or encoded. Each entry is a selector dict
+        (``{"type": "css", "value": "#password"}``) or a mask dict
+        (``{"bbox": (x, y, w, h)}`` / ``{"selector": {...}, "track": False,
+        "label": "pw"}``). Orthogonal to ``bbox``/``selectors``: crop to the
+        form and mask a field inside it. Unlike a crop region, a selector
+        mask is re-resolved while recording so it keeps covering an element
+        that moves, and one that resolves to nothing fails the call rather
+        than leaving a hole. See ``recording.masks`` for what each one did.
+
+        This is a geometric primitive, not a redaction policy: it covers
+        exactly what you name and reports what it covered. It does not
+        decide what is sensitive.
+
         ``encode`` (``"gif"`` / ``"mp4"`` / ``"webm"``) requires ``output_dir``
         and
         the matching cargo feature; without it this raises rather than
@@ -792,6 +831,8 @@ class Page:
         duration_secs: float | None = None,
         selectors: list[dict[str, object]] | None = None,
         bbox: tuple[int, int, int, int] | None = None,
+        masks: list[dict[str, object]] | None = None,
+        mask_pad: int | None = None,
         viewport_preset: str | None = None,
         viewport_width: int | None = None,
         viewport_height: int | None = None,

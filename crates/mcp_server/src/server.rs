@@ -224,7 +224,14 @@ of a long page), `bbox` is viewport-relative, and `selectors` is a LIST — each
 own cropped region cut from one recording, resolved to a rectangle once at start and then held \
 fixed (an element that moves drifts out of its crop). Chrome emits frames when it paints, so `fps` \
 is a ceiling, not a floor: a static page yields very few frames and that is expected — check \
-`effective_fps`. Optional `encode` (gif/mp4/webm) needs the matching build feature."
+`effective_fps`. Optional `encode` (gif/mp4/webm) needs the matching build feature. \
+`masks` blacks out rectangles in every frame BEFORE anything is cropped, written, or encoded — \
+each entry is a `bbox` you already know or a `selector` to resolve, and unlike crop regions a \
+selector mask is re-resolved while recording so it keeps covering an element that moves. This is \
+a geometric primitive, not a redaction policy: it covers exactly the rectangles you name and \
+reports what it covered in `masks[].stale_frames` / `unresolved_ticks`. It does not decide what \
+is sensitive, and a masked recording is not thereby a safe-to-share one — that judgment is \
+yours."
     )]
     pub async fn record(
         &self,
@@ -238,7 +245,9 @@ is a ceiling, not a floor: a static page yields very few frames and that is expe
         description = "Begin recording an open session's page, then drive it normally — clicks, \
 typing, and navigation all keep recording — and call session_record_stop to finish. Use this \
 instead of `record` whenever the thing worth recording is an interaction rather than a page load. \
-Takes the same crop/viewport/scroll/fps options as `record`; `max_duration_secs` (default 30, max \
+Takes the same crop/viewport/scroll/fps/masks options as `record` — masking matters more here, \
+since an interaction is where a password gets typed, and a selector mask tracks its element as \
+the page moves. `max_duration_secs` (default 30, max \
 120) is a hard bound after which the recording stops itself, so a forgotten recording can't hold \
 the browser. Only one recording per session at a time. Note that a session's tab shares a browser \
 window, so recording holds that browser's capture lock: screenshots on other tabs of the same \

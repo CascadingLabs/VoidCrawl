@@ -21,8 +21,8 @@ use pyo3::{
 use pyo3_async_runtimes::tokio::future_into_py;
 use tokio::sync::Mutex;
 use void_crawl_core::{
-    Encoding, FrameFormat, Page, Recording, RecordingHandle, RecordingOptions, ScrollTarget,
-    SelectorEntry,
+    Encoding, FrameFormat, MaskSpec, Page, Recording, RecordingHandle, RecordingOptions,
+    ScrollTarget, SelectorEntry,
 };
 
 use crate::{resolve_selector_args, resolve_viewport_args, to_py_err};
@@ -90,6 +90,42 @@ impl PyRecordedRegion {
     }
 }
 
+/// What one mask covered.
+///
+/// The library covers the rectangles it is given and reports the result; it
+/// does not decide what is sensitive, and a recording with masks is not
+/// thereby a safe-to-share one. ``unresolved_ticks`` and ``stale_frames`` are
+/// there so the caller can make that call themselves.
+#[pyclass(name = "MaskReport", module = "voidcrawl._ext", frozen)]
+#[derive(Debug)]
+pub struct PyMaskReport {
+    #[pyo3(get)]
+    pub label:            String,
+    /// ``(x, y, width, height)`` in CSS pixels, as first resolved.
+    #[pyo3(get)]
+    pub bbox:             (u32, u32, u32, u32),
+    /// Whether the mask was re-resolved while recording.
+    #[pyo3(get)]
+    pub tracked:          bool,
+    /// Ticks where re-resolution failed. The mask kept its last known
+    /// rectangle for those, so something stayed covered.
+    #[pyo3(get)]
+    pub unresolved_ticks: usize,
+    /// Frames captured while the most recent re-resolution had failed.
+    #[pyo3(get)]
+    pub stale_frames:     usize,
+}
+
+#[pymethods]
+impl PyMaskReport {
+    fn __repr__(&self) -> String {
+        format!(
+            "MaskReport(label={:?}, bbox={:?}, tracked={}, stale_frames={})",
+            self.label, self.bbox, self.tracked, self.stale_frames
+        )
+    }
+}
+
 /// The result of a recording.
 #[pyclass(name = "Recording", module = "voidcrawl._ext", frozen)]
 #[derive(Debug)]
@@ -98,6 +134,10 @@ pub struct PyRecording {
     /// neither ``bbox`` nor ``selectors`` was given.
     #[pyo3(get)]
     pub regions:            Vec<Py<PyRecordedRegion>>,
+    /// One entry per requested mask. Empty means nothing was asked to be
+    /// covered — not that there was nothing worth covering.
+    #[pyo3(get)]
+    pub masks:              Vec<Py<PyMaskReport>>,
     /// ``"jpeg"`` or ``"png"``.
     #[pyo3(get)]
     pub format:             String,
@@ -214,10 +254,24 @@ pub(crate) fn into_py_recording(py: Python<'_>, rec: Recording) -> PyResult<Py<P
             },
         )?);
     }
+    let mut masks = Vec::with_capacity(rec.masks.len());
+    for mask in rec.masks {
+        masks.push(Py::new(
+            py,
+            PyMaskReport {
+                label:            mask.label,
+                bbox:             (mask.bbox.x, mask.bbox.y, mask.bbox.width, mask.bbox.height),
+                tracked:          mask.tracked,
+                unresolved_ticks: mask.unresolved_ticks,
+                stale_frames:     mask.stale_frames,
+            },
+        )?);
+    }
     Py::new(
         py,
         PyRecording {
             regions,
+            masks,
             format: match rec.format {
                 FrameFormat::Jpeg => "jpeg".to_string(),
                 FrameFormat::Png => "png".to_string(),
@@ -276,6 +330,55 @@ fn selector_from_dict(item: &Bound<'_, PyAny>) -> PyResult<SelectorEntry> {
     )
 }
 
+/// Parse one `masks=[...]` entry.
+///
+/// Two accepted shapes, because both read naturally at a call site:
+///
+/// * a bare selector dict — `{"type": "css", "value": "#password"}` — the
+///   common case, tracked by default;
+/// * a mask dict — `{"bbox": (x, y, w, h)}` or `{"selector": {...}, "track":
+///   False, "label": "pw"}`.
+fn mask_from_dict(item: &Bound<'_, PyAny>) -> PyResult<MaskSpec> {
+    let dict = item.cast::<PyDict>().map_err(|_| {
+        PyValueError::new_err(
+            "each entry in `masks` must be a dict: a selector dict, or {'bbox': (x, y, w, h)} / \
+             {'selector': {...}}",
+        )
+    })?;
+
+    // A bare selector dump is identifiable by its `type` field, which a mask
+    // dict never has.
+    if dict.contains("type")? || dict.contains("selector_type")? {
+        return Ok(MaskSpec::selector(selector_from_dict(item)?));
+    }
+
+    let bbox = dict.get_item("bbox")?.filter(|v| !v.is_none());
+    let selector = dict.get_item("selector")?.filter(|v| !v.is_none());
+    let mut spec = match (bbox, selector) {
+        (Some(_), Some(_)) => {
+            return Err(PyValueError::new_err(
+                "a mask takes either `bbox` or `selector`, not both",
+            ));
+        }
+        (None, None) => {
+            return Err(PyValueError::new_err("a mask needs either `bbox` or `selector`"));
+        }
+        (Some(bbox), None) => {
+            let (x, y, width, height) = bbox.extract::<(u32, u32, u32, u32)>()?;
+            MaskSpec::bbox(void_crawl_core::Bbox { x, y, width, height })
+        }
+        (None, Some(selector)) => MaskSpec::selector(selector_from_dict(&selector)?),
+    };
+
+    if let Some(track) = dict.get_item("track")?.filter(|v| !v.is_none()) {
+        spec = spec.with_track(track.extract::<bool>()?);
+    }
+    if let Some(label) = dict.get_item("label")?.filter(|v| !v.is_none()) {
+        spec = spec.with_label(label.extract::<String>()?);
+    }
+    Ok(spec)
+}
+
 fn encoding_from_str(name: &str) -> PyResult<Encoding> {
     match name {
         "gif" => Ok(Encoding::Gif),
@@ -293,6 +396,8 @@ pub(crate) fn build_recording_options(
     dir: Option<String>,
     bbox: Option<(u32, u32, u32, u32)>,
     selectors: Option<Vec<Py<PyAny>>>,
+    masks: Option<Vec<Py<PyAny>>>,
+    mask_pad: Option<u32>,
     viewport_preset: Option<&str>,
     viewport_width: Option<u32>,
     viewport_height: Option<u32>,
@@ -326,6 +431,14 @@ pub(crate) fn build_recording_options(
         for entry in entries {
             opts = opts.with_selector(selector_from_dict(entry.bind(py))?);
         }
+    }
+    if let Some(entries) = masks {
+        for entry in entries {
+            opts = opts.with_mask(mask_from_dict(entry.bind(py))?);
+        }
+    }
+    if let Some(pad) = mask_pad {
+        opts = opts.with_mask_pad(pad);
     }
     if viewport_preset.is_some() || viewport_width.is_some() || viewport_height.is_some() {
         opts = opts.with_viewport(resolve_viewport_args(

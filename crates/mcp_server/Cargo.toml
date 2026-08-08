@@ -45,3 +45,6 @@ hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "server"] }
 http-body-util = "0.1"
 bytes = "1"
+# Reads back written frames pixel-by-pixel, so the mask tests assert on the
+# artifact rather than on the arguments that produced it.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
