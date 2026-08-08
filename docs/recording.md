@@ -127,8 +127,12 @@ the substrate and the container is a policy choice:
 | `mp4` | `encode-ffmpeg` | H.264 via an `ffmpeg` binary on PATH. |
 | `webm` | `encode-ffmpeg` | VP9 via an `ffmpeg` binary on PATH. |
 
+`./build.sh` enables MP4/WebM encoding for the Python extension. It requires
+an `ffmpeg` binary on `PATH` at recording time:
+
 ```bash
-cargo build --features encode-gif,encode-ffmpeg
+ffmpeg -version
+./build.sh
 ```
 
 ```python
