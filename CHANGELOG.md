@@ -1,5 +1,9 @@
 ## 0.4.2 (2026-07-25)
 
+### Feat
+
+- expose bounded passive response expectations on borrowed `PooledTab` instances without creating another browser or weakening pool lease isolation.
+
 ### Fix
 
 - include the vendored Chromiumoxide fork in source distributions and verify that an sdist can build a wheel before release.

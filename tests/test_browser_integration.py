@@ -68,6 +68,16 @@ class _NetworkFixtureHandler(http.server.BaseHTTPRequestHandler):
                 "text/html",
                 b"<script>setInterval(() => fetch('/api/data'), 25)</script>",
             )
+        elif self.path == "/action":
+            self._send(
+                "text/html",
+                b"""<!doctype html>
+<button type="button">Load data</button>
+<script>
+document.querySelector('button').addEventListener('click', () => fetch('/api/one'));
+</script>
+""",
+            )
         elif self.path == "/style.css":
             self._send("text/css", b"main { color: rgb(10 20 30); }\n")
         elif self.path == "/app.js":
@@ -283,6 +293,113 @@ class TestPageLifecycleAndResponses:
             assert raised.value.wait_phase == "networkidle"
             assert raised.value.timeout == 0.2
             assert raised.value.elapsed >= 0.2
+
+    @pytest.mark.asyncio
+    async def test_pooled_tab_captures_action_response(
+        self, network_fixture_url: str
+    ) -> None:
+        async with BrowserPool(PoolConfig()) as pool, pool.acquire() as tab:
+            await tab.goto(f"{network_fixture_url}action")
+            async with tab.expect_response("**/api/one") as pending:
+                await tab.click_by_role("button", "Load data")
+
+            response = await pending.value
+            assert response.status == 200
+            assert await response.json() == {"endpoint": "one"}
+
+    @pytest.mark.asyncio
+    async def test_pooled_tab_response_options_fail_closed(self) -> None:
+        async with BrowserPool(PoolConfig()) as pool, pool.acquire() as tab:
+            with pytest.raises(ValueError, match="timeout"):
+                tab.expect_response("**/api/one", timeout=0)
+            with pytest.raises(ValueError, match="byte limits"):
+                tab.expect_response("**/api/one", max_response_bytes=0)
+            with pytest.raises(ValueError, match="must not be empty"):
+                tab.expect_responses({})
+
+    @pytest.mark.asyncio
+    async def test_pooled_tab_response_expectation_rejects_released_tab(self) -> None:
+        async with BrowserPool(PoolConfig()) as pool:
+            async with pool.acquire() as tab:
+                pending = tab.expect_response("**/api/one", timeout=0.1)
+
+            with pytest.raises(RuntimeError, match="tab has been released"):
+                async with pending:
+                    pass
+
+    @pytest.mark.asyncio
+    async def test_pooled_tab_cannot_release_while_expectation_is_active(
+        self, network_fixture_url: str
+    ) -> None:
+        async with BrowserPool(PoolConfig()) as pool:
+            checkout = pool.acquire()
+            tab = await checkout.__aenter__()
+            await tab.goto(f"{network_fixture_url}action")
+            pending = tab.expect_response("**/api/one")
+            await pending.__aenter__()
+
+            with pytest.raises(RuntimeError, match="active response expectation"):
+                await checkout.__aexit__(None, None, None)
+
+            await tab.click_by_role("button", "Load data")
+            await pending.__aexit__(None, None, None)
+            response = await pending.value
+            assert response.status == 200
+
+            await checkout.__aexit__(None, None, None)
+
+    @pytest.mark.asyncio
+    async def test_repeated_error_exit_does_not_poison_pooled_tab_release(self) -> None:
+        async with BrowserPool(PoolConfig()) as pool:
+            checkout = pool.acquire()
+            tab = await checkout.__aenter__()
+            pending = tab.expect_response("**/api/missing", timeout=0.1)
+            await pending.__aenter__()
+
+            await pending.__aexit__(RuntimeError, None, None)
+            await pending.__aexit__(RuntimeError, None, None)
+            await checkout.__aexit__(None, None, None)
+
+    @pytest.mark.asyncio
+    async def test_concurrent_duplicate_enter_and_exit_cannot_deadlock_or_leak(
+        self,
+    ) -> None:
+        async with BrowserPool(PoolConfig()) as pool:
+            checkout = pool.acquire()
+            tab = await checkout.__aenter__()
+            pending = tab.expect_response("**/api/missing", timeout=0.1)
+            await pending.__aenter__()
+
+            duplicate, _ = await asyncio.wait_for(
+                asyncio.gather(
+                    pending.__aenter__(),
+                    pending.__aexit__(RuntimeError, None, None),
+                    return_exceptions=True,
+                ),
+                timeout=2,
+            )
+            if not isinstance(duplicate, BaseException):
+                await pending.__aexit__(RuntimeError, None, None)
+
+            await checkout.__aexit__(None, None, None)
+
+    @pytest.mark.asyncio
+    async def test_cancelled_response_exit_does_not_poison_pooled_tab_release(
+        self,
+    ) -> None:
+        async with BrowserPool(PoolConfig()) as pool:
+            checkout = pool.acquire()
+            tab = await checkout.__aenter__()
+            pending = tab.expect_response("**/api/missing", timeout=30)
+            await pending.__aenter__()
+
+            exit_task = asyncio.ensure_future(pending.__aexit__(None, None, None))
+            await asyncio.sleep(0.05)
+            exit_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await exit_task
+
+            await checkout.__aexit__(None, None, None)
 
     @pytest.mark.asyncio
     async def test_page_context_closes_tab_when_owning_task_is_cancelled(self) -> None:

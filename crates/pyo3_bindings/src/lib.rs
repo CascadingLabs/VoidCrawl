@@ -8,7 +8,10 @@ use std::{
     convert::Infallible,
     fmt, mem,
     path::Path,
-    sync::{Arc, Mutex as StdMutex},
+    sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -620,16 +623,38 @@ fn captured_body(response: &CapturedResponse) -> PyResult<Vec<u8>> {
     Ok(response.body().to_vec())
 }
 
-/// Async expectation context returned by ``Page.expect_response(s)``.
+/// Owner of a response expectation.
+///
+/// Pooled expectations retain the checkout slot so ``__aexit__`` can hold the
+/// lease while waiting and fail closed after release instead of observing a
+/// recycled tab.
+#[derive(Clone)]
+enum ResponseExpectationOwner {
+    Page(Arc<Mutex<Option<Arc<Page>>>>),
+    PooledTab { tab: Arc<Mutex<Option<PooledTab>>>, active: Arc<AtomicUsize> },
+}
+
+/// Releases a pooled expectation count even when Python cancels ``__aexit__``.
+struct ActiveResponseExpectationGuard(Arc<AtomicUsize>);
+
+impl Drop for ActiveResponseExpectationGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Async expectation context returned by ``Page.expect_response(s)`` or
+/// ``PooledTab.expect_response(s)``.
 #[pyclass(name = "ResponseExpectation")]
 pub struct PyResponseExpectation {
-    page:     Arc<Mutex<Option<Arc<Page>>>>,
-    patterns: Vec<(String, String)>,
-    timeout:  Duration,
-    limits:   ResponseCaptureLimits,
-    single:   bool,
-    capture:  Arc<Mutex<Option<ResponseCapture>>>,
-    result:   Arc<Mutex<Option<HashMap<String, CapturedResponse>>>>,
+    owner:     ResponseExpectationOwner,
+    patterns:  Vec<(String, String)>,
+    timeout:   Duration,
+    limits:    ResponseCaptureLimits,
+    single:    bool,
+    lifecycle: Arc<Mutex<()>>,
+    capture:   Arc<Mutex<Option<ResponseCapture>>>,
+    result:    Arc<Mutex<Option<HashMap<String, CapturedResponse>>>>,
 }
 
 impl fmt::Debug for PyResponseExpectation {
@@ -649,12 +674,50 @@ impl PyResponseExpectation {
         max_total_bytes: usize,
         single: bool,
     ) -> Self {
+        Self::new_for_owner(
+            ResponseExpectationOwner::Page(page),
+            patterns,
+            timeout,
+            max_response_bytes,
+            max_total_bytes,
+            single,
+        )
+    }
+
+    fn new_pooled(
+        tab: Arc<Mutex<Option<PooledTab>>>,
+        active: Arc<AtomicUsize>,
+        patterns: Vec<(String, String)>,
+        timeout: f64,
+        max_response_bytes: usize,
+        max_total_bytes: usize,
+        single: bool,
+    ) -> Self {
+        Self::new_for_owner(
+            ResponseExpectationOwner::PooledTab { tab, active },
+            patterns,
+            timeout,
+            max_response_bytes,
+            max_total_bytes,
+            single,
+        )
+    }
+
+    fn new_for_owner(
+        owner: ResponseExpectationOwner,
+        patterns: Vec<(String, String)>,
+        timeout: f64,
+        max_response_bytes: usize,
+        max_total_bytes: usize,
+        single: bool,
+    ) -> Self {
         Self {
-            page,
+            owner,
             patterns,
             timeout: Duration::from_secs_f64(timeout),
             limits: ResponseCaptureLimits { max_response_bytes, max_total_bytes },
             single,
+            lifecycle: Arc::new(Mutex::new(())),
             capture: Arc::new(Mutex::new(None)),
             result: Arc::new(Mutex::new(None)),
         }
@@ -664,27 +727,54 @@ impl PyResponseExpectation {
 #[pymethods]
 impl PyResponseExpectation {
     fn __aenter__<'py>(slf: Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let (page_slot, patterns, timeout, limits, capture_slot) = {
+        let (owner, patterns, timeout, limits, lifecycle, capture_slot) = {
             let this = slf.borrow();
             (
-                Arc::clone(&this.page),
+                this.owner.clone(),
                 this.patterns.clone(),
                 this.timeout,
                 this.limits,
+                Arc::clone(&this.lifecycle),
                 Arc::clone(&this.capture),
             )
         };
         let slf_ref = slf.into_any().unbind();
         future_into_py(py, async move {
-            let page = page_slot
-                .lock()
-                .await
-                .as_ref()
-                .cloned()
-                .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
-            let capture =
-                page.expect_responses(patterns, timeout, limits).await.map_err(to_py_err)?;
-            *capture_slot.lock().await = Some(capture);
+            // Serialize enter/exit on this expectation so its tab and capture
+            // locks can never be acquired in opposite order by concurrent misuse.
+            let _lifecycle = lifecycle.lock().await;
+            let capture = match &owner {
+                ResponseExpectationOwner::Page(page_slot) => {
+                    let page = page_slot
+                        .lock()
+                        .await
+                        .as_ref()
+                        .cloned()
+                        .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
+                    page.expect_responses(patterns, timeout, limits).await.map_err(to_py_err)?
+                }
+                ResponseExpectationOwner::PooledTab { tab: tab_slot, active } => {
+                    let tab = tab_slot.lock().await;
+                    let tab = tab
+                        .as_ref()
+                        .ok_or_else(|| PyRuntimeError::new_err("tab has been released"))?;
+                    let capture = tab
+                        .page
+                        .expect_responses(patterns, timeout, limits)
+                        .await
+                        .map_err(to_py_err)?;
+                    active.fetch_add(1, Ordering::AcqRel);
+                    capture
+                }
+            };
+            let mut slot = capture_slot.lock().await;
+            if slot.is_some() {
+                if let ResponseExpectationOwner::PooledTab { active, .. } = &owner {
+                    active.fetch_sub(1, Ordering::AcqRel);
+                }
+                return Err(PyRuntimeError::new_err("response expectation was already entered"));
+            }
+            *slot = Some(capture);
             Ok(slf_ref)
         })
     }
@@ -699,17 +789,46 @@ impl PyResponseExpectation {
         _exc_tb: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let failed = exc_type.is_some();
+        let owner = self.owner.clone();
+        let lifecycle = Arc::clone(&self.lifecycle);
         let capture_slot = Arc::clone(&self.capture);
         let result_slot = Arc::clone(&self.result);
         future_into_py(py, async move {
+            let _lifecycle = lifecycle.lock().await;
             let capture = capture_slot.lock().await.take();
             if failed {
+                let was_entered = capture.is_some();
                 drop(capture);
+                if let (true, ResponseExpectationOwner::PooledTab { active, .. }) =
+                    (was_entered, owner)
+                {
+                    active.fetch_sub(1, Ordering::AcqRel);
+                }
                 return Ok(false);
             }
             let capture = capture
                 .ok_or_else(|| PyRuntimeError::new_err("response expectation was not entered"))?;
-            let responses = capture.wait().await.map_err(to_py_err)?;
+            // Once the capture leaves its slot, cancellation drops the Rust future.
+            // Keep decrement ownership in an RAII guard so a cancelled Python task
+            // cannot permanently poison release of the borrowed tab.
+            let _active_guard = match &owner {
+                ResponseExpectationOwner::PooledTab { active, .. } => {
+                    Some(ActiveResponseExpectationGuard(Arc::clone(active)))
+                }
+                ResponseExpectationOwner::Page(_) => None,
+            };
+            let responses = match owner {
+                ResponseExpectationOwner::Page(_) => capture.wait().await.map_err(to_py_err)?,
+                ResponseExpectationOwner::PooledTab { tab: tab_slot, .. } => {
+                    // Hold the checkout slot while waiting so the pool cannot release,
+                    // reset, or lend this tab to another caller mid-expectation.
+                    let tab = tab_slot.lock().await;
+                    if tab.is_none() {
+                        return Err(PyRuntimeError::new_err("tab has been released"));
+                    }
+                    capture.wait().await.map_err(to_py_err)?
+                }
+            };
             *result_slot.lock().await = Some(responses);
             Ok(false)
         })
@@ -2505,7 +2624,8 @@ impl PyBrowserSession {
 /// is handled automatically by the context manager.
 #[pyclass(name = "PooledTab")]
 pub struct PyPooledTab {
-    inner:     Arc<Mutex<Option<PooledTab>>>,
+    inner: Arc<Mutex<Option<PooledTab>>>,
+    active_response_expectations: Arc<AtomicUsize>,
     /// Snapshot of `use_count` at the moment the tab was acquired.
     #[pyo3(get)]
     use_count: u32,
@@ -2564,6 +2684,51 @@ macro_rules! with_pooled_page_map {
 impl PyPooledTab {
     fn navigate<'py>(&self, py: Python<'py>, url: String) -> PyResult<Bound<'py, PyAny>> {
         with_pooled_page!(self, py, |page| page.navigate(&url))
+    }
+
+    /// Arm one passive response expectation before a triggering action.
+    #[pyo3(signature = (pattern, timeout=30.0, max_response_bytes=DEFAULT_MAX_RESPONSE_BYTES, max_total_bytes=DEFAULT_MAX_TOTAL_RESPONSE_BYTES))]
+    fn expect_response(
+        &self,
+        pattern: String,
+        timeout: f64,
+        max_response_bytes: usize,
+        max_total_bytes: usize,
+    ) -> PyResult<PyResponseExpectation> {
+        validate_response_options(timeout, max_response_bytes, max_total_bytes)?;
+        Ok(PyResponseExpectation::new_pooled(
+            Arc::clone(&self.inner),
+            Arc::clone(&self.active_response_expectations),
+            vec![("response".into(), pattern)],
+            timeout,
+            max_response_bytes,
+            max_total_bytes,
+            true,
+        ))
+    }
+
+    /// Arm named passive response expectations before a triggering action.
+    #[pyo3(signature = (patterns, timeout=30.0, max_response_bytes=DEFAULT_MAX_RESPONSE_BYTES, max_total_bytes=DEFAULT_MAX_TOTAL_RESPONSE_BYTES))]
+    fn expect_responses(
+        &self,
+        patterns: HashMap<String, String>,
+        timeout: f64,
+        max_response_bytes: usize,
+        max_total_bytes: usize,
+    ) -> PyResult<PyResponseExpectation> {
+        validate_response_options(timeout, max_response_bytes, max_total_bytes)?;
+        if patterns.is_empty() {
+            return Err(PyValueError::new_err("patterns must not be empty"));
+        }
+        Ok(PyResponseExpectation::new_pooled(
+            Arc::clone(&self.inner),
+            Arc::clone(&self.active_response_expectations),
+            patterns.into_iter().collect(),
+            timeout,
+            max_response_bytes,
+            max_total_bytes,
+            false,
+        ))
     }
 
     /// Navigate and wait for network idle in one shot.
@@ -3160,8 +3325,9 @@ impl PyPooledTab {
 ///         html = await tab.content()
 #[pyclass(name = "_AcquireContext")]
 pub struct PyAcquireContext {
-    pool:     Arc<BrowserPool>,
+    pool: Arc<BrowserPool>,
     tab_slot: Arc<Mutex<Option<PooledTab>>>,
+    active_response_expectations: Arc<AtomicUsize>,
 }
 
 impl fmt::Debug for PyAcquireContext {
@@ -3173,15 +3339,19 @@ impl fmt::Debug for PyAcquireContext {
 #[pymethods]
 impl PyAcquireContext {
     fn __aenter__<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let (pool, tab_slot) = {
+        let (pool, tab_slot, active_response_expectations) = {
             let this = slf.borrow();
-            (Arc::clone(&this.pool), Arc::clone(&this.tab_slot))
+            (
+                Arc::clone(&this.pool),
+                Arc::clone(&this.tab_slot),
+                Arc::clone(&this.active_response_expectations),
+            )
         };
         future_into_py(py, async move {
             let tab = pool.acquire().await.map_err(to_py_err)?;
             let use_count = tab.use_count;
             *tab_slot.lock().await = Some(tab);
-            Ok(PyPooledTab { inner: tab_slot, use_count })
+            Ok(PyPooledTab { inner: tab_slot, active_response_expectations, use_count })
         })
     }
 
@@ -3195,8 +3365,17 @@ impl PyAcquireContext {
     ) -> PyResult<Bound<'py, PyAny>> {
         let pool = Arc::clone(&self.pool);
         let tab_slot = Arc::clone(&self.tab_slot);
+        let active_response_expectations = Arc::clone(&self.active_response_expectations);
         future_into_py(py, async move {
-            if let Some(tab) = tab_slot.lock().await.take() {
+            let mut tab_slot = tab_slot.lock().await;
+            if active_response_expectations.load(Ordering::Acquire) != 0 {
+                return Err(PyRuntimeError::new_err(
+                    "cannot release tab with an active response expectation",
+                ));
+            }
+            let tab = tab_slot.take();
+            drop(tab_slot);
+            if let Some(tab) = tab {
                 pool.release(tab).await;
             }
             Ok(false)
@@ -3306,7 +3485,11 @@ impl PyBrowserPool {
     ///     async with pool.acquire() as tab:
     ///         ...
     fn acquire(&self) -> PyAcquireContext {
-        PyAcquireContext { pool: Arc::clone(&self.inner), tab_slot: Arc::new(Mutex::new(None)) }
+        PyAcquireContext {
+            pool: Arc::clone(&self.inner),
+            tab_slot: Arc::new(Mutex::new(None)),
+            active_response_expectations: Arc::new(AtomicUsize::new(0)),
+        }
     }
 
     /// Return a context manager that builds a pool from explicit parameters.
@@ -3367,10 +3550,20 @@ impl PyBrowserPool {
         tab: &Bound<'py, PyPooledTab>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let pool = Arc::clone(&self.inner);
-        let tab_inner = Arc::clone(&tab.borrow().inner);
+        let borrowed = tab.borrow();
+        let tab_inner = Arc::clone(&borrowed.inner);
+        let active_response_expectations = Arc::clone(&borrowed.active_response_expectations);
+        drop(borrowed);
         future_into_py(py, async move {
             let mut guard = tab_inner.lock().await;
-            if let Some(pooled_tab) = guard.take() {
+            if active_response_expectations.load(Ordering::Acquire) != 0 {
+                return Err(PyRuntimeError::new_err(
+                    "cannot release tab with an active response expectation",
+                ));
+            }
+            let pooled_tab = guard.take();
+            drop(guard);
+            if let Some(pooled_tab) = pooled_tab {
                 pool.release(pooled_tab).await;
             }
             Ok(())

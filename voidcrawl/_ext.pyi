@@ -82,7 +82,7 @@ class CapturedResponse:
     async def json(self) -> Any: ...
 
 class ResponseExpectation:
-    """Async context returned by ``Page.expect_response(s)``."""
+    """Async context returned by ``Page`` or ``PooledTab.expect_response(s)``."""
 
     async def __aenter__(self) -> ResponseExpectation: ...
     async def __aexit__(
@@ -167,6 +167,24 @@ class PooledTab:
         Args:
             url: The URL to load.
         """
+        ...
+    def expect_response(
+        self,
+        pattern: str,
+        timeout: float = 30.0,
+        max_response_bytes: int = 2097152,
+        max_total_bytes: int = 8388608,
+    ) -> ResponseExpectation:
+        """Arm one bounded passive response expectation before an action."""
+        ...
+    def expect_responses(
+        self,
+        patterns: dict[str, str],
+        timeout: float = 30.0,
+        max_response_bytes: int = 2097152,
+        max_total_bytes: int = 8388608,
+    ) -> ResponseExpectation:
+        """Arm named bounded passive response expectations before an action."""
         ...
     async def wait_for_navigation(self) -> None:
         """Block until the current navigation completes."""
