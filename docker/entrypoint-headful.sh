@@ -1,111 +1,167 @@
 #!/usr/bin/env bash
-# Entrypoint for headful Sway+wayvnc+Chrome container.
-#
-# Handles:
-#   1. GPU detection and renderer selection
-#   2. NVIDIA --unsupported-gpu flag
-#   3. Render group GID matching for /dev/dri access
-#   4. VNC resolution configuration
-#   5. Starts supervisord
+# Rootless headful runtime. All mutable state is generated under RUNTIME_DIR.
 set -euo pipefail
 
-# ── 1. Match host render group GID for /dev/dri access ──────────────────
-if [ -e /dev/dri/renderD128 ]; then
-    HOST_RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
-    echo "[gpu] /dev/dri/renderD128 detected (GID=$HOST_RENDER_GID)"
+RUNTIME_DIR="${RUNTIME_DIR:-/tmp/voidcrawl}"
+XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$RUNTIME_DIR/xdg}"
+CONFIG_DIR="$RUNTIME_DIR/config"
+LOG_DIR="$RUNTIME_DIR/logs"
+PROFILE_ROOT="${CHROME_PROFILES_DIR:-$RUNTIME_DIR/profiles}"
+DBUS_SOCKET="$RUNTIME_DIR/dbus/session_bus_socket"
 
-    # Create or update a group with the host's render GID
-    if getent group "$HOST_RENDER_GID" > /dev/null 2>&1; then
-        RENDER_GROUP=$(getent group "$HOST_RENDER_GID" | cut -d: -f1)
-    else
-        groupadd -g "$HOST_RENDER_GID" docker-render
-        RENDER_GROUP="docker-render"
-    fi
-    # Ensure root (or whoever runs Chrome) is in the render group
-    usermod -aG "$RENDER_GROUP" root 2>/dev/null || true
-    echo "[gpu] Added root to group $RENDER_GROUP (GID=$HOST_RENDER_GID)"
-else
-    echo "[gpu] No /dev/dri/renderD128 — falling back to software rendering"
-fi
+require_uint() {
+   [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || {
+       echo "[config] $1 must be a positive integer (got '${2:-}')" >&2
+       exit 64
+   }
+}
 
-# ── 2. Detect GPU vendor and set renderer ────────────────────────────────
-export SWAY_EXTRA_ARGS=""
+require_uint BROWSER_COUNT "${BROWSER_COUNT:-2}"
+require_uint CDP_PORT_BASE "${CDP_PORT_BASE:-19222}"
+require_uint VNC_PORT_BASE "${VNC_PORT_BASE:-5900}"
+require_uint VNC_WIDTH "${VNC_WIDTH:-1920}"
+require_uint VNC_HEIGHT "${VNC_HEIGHT:-1080}"
 
+case "${CHROME_NO_SANDBOX:-0}" in
+   0|false|no) CHROME_SANDBOX_ARG="" ;;
+   1|true|yes)
+       CHROME_SANDBOX_ARG="--no-sandbox"
+       echo "[security] WARNING: Chrome sandbox disabled by CHROME_NO_SANDBOX" >&2
+       ;;
+   *)
+       echo "[config] CHROME_NO_SANDBOX must be 0 or 1 (got '${CHROME_NO_SANDBOX}')" >&2
+       exit 64
+       ;;
+esac
+
+BROWSER_COUNT="${BROWSER_COUNT:-2}"
+CDP_PORT_BASE="${CDP_PORT_BASE:-19222}"
+VNC_PORT_BASE="${VNC_PORT_BASE:-5900}"
+VNC_WIDTH="${VNC_WIDTH:-1920}"
+VNC_HEIGHT="${VNC_HEIGHT:-1080}"
+export RUNTIME_DIR XDG_RUNTIME_DIR BROWSER_COUNT CDP_PORT_BASE VNC_PORT_BASE VNC_WIDTH VNC_HEIGHT
+
+# Runtime paths are deliberately user-owned: the image can run with cap-drop=ALL
+# and no-new-privileges, and never mutates /etc, /run, or /var at startup.
+umask 077
+mkdir -p "$XDG_RUNTIME_DIR" "$CONFIG_DIR" "$LOG_DIR" "$RUNTIME_DIR/dbus" \
+   "$RUNTIME_DIR/viewer" "$PROFILE_ROOT"
+chmod 0700 "$RUNTIME_DIR" "$XDG_RUNTIME_DIR" "$CONFIG_DIR" "$RUNTIME_DIR/dbus" \
+   "$RUNTIME_DIR/viewer" "$PROFILE_ROOT"
+
+# GPU selection only reads host device metadata. The host must grant UID 10001
+# access to /dev/dri (normally via HOST_RENDER_GID in Compose); this entrypoint
+# never edits groups.
 detect_gpu() {
     if [ -e /dev/dri/renderD128 ]; then
-        local driver
-        driver=$(basename "$(readlink -f /sys/class/drm/renderD128/device/driver)" 2>/dev/null || echo "unknown")
-        echo "$driver"
+        basename "$(readlink -f /sys/class/drm/renderD128/device/driver 2>/dev/null || echo unknown)"
     elif [ -e /dev/nvidia0 ]; then
-        echo "nvidia"
+        echo nvidia
     else
-        echo "none"
+        echo none
     fi
 }
 
 GPU_DRIVER=$(detect_gpu)
-echo "[gpu] Detected driver: $GPU_DRIVER"
-
 case "$GPU_DRIVER" in
-    amdgpu)
-        # AMD iGPU / discrete — Mesa RADV works great with gles2
+    amdgpu|i915|xe)
         export WLR_RENDERER="${WLR_RENDERER:-gles2}"
-        echo "[gpu] AMD GPU — using WLR_RENDERER=$WLR_RENDERER"
-        ;;
-    i915|xe)
-        # Intel iGPU (i915 = legacy, xe = new Xe driver)
-        export WLR_RENDERER="${WLR_RENDERER:-gles2}"
-        echo "[gpu] Intel GPU — using WLR_RENDERER=$WLR_RENDERER"
         ;;
     nvidia)
-        # NVIDIA — needs --unsupported-gpu for Sway
         export WLR_RENDERER="${WLR_RENDERER:-gles2}"
-        export SWAY_EXTRA_ARGS="--unsupported-gpu"
-        echo "[gpu] NVIDIA GPU — using WLR_RENDERER=$WLR_RENDERER (--unsupported-gpu)"
+        export SWAY_EXTRA_ARGS="${SWAY_EXTRA_ARGS:---unsupported-gpu}"
         ;;
     *)
-        # No GPU or unknown — CPU software rendering
-        export WLR_RENDERER="pixman"
-        export WLR_RENDERER_ALLOW_SOFTWARE=1
-        echo "[gpu] No GPU detected — using software renderer (pixman)"
+        export WLR_RENDERER="${WLR_RENDERER:-pixman}"
+        export WLR_RENDERER_ALLOW_SOFTWARE="${WLR_RENDERER_ALLOW_SOFTWARE:-1}"
         ;;
 esac
+export SWAY_EXTRA_ARGS="${SWAY_EXTRA_ARGS:-}"
+echo "[gpu] driver=$GPU_DRIVER renderer=$WLR_RENDERER"
 
-# ── 3. Configure VNC resolution ──────────────────────────────────────────
-VNC_WIDTH="${VNC_WIDTH:-1920}"
-VNC_HEIGHT="${VNC_HEIGHT:-1080}"
-export VNC_PORT_2="${VNC_PORT_2:-5901}"
-export NOVNC_PORT_2="${NOVNC_PORT_2:-6081}"
-echo "[vnc] Resolution: ${VNC_WIDTH}x${VNC_HEIGHT} on ports ${VNC_PORT:-5900} (chrome-1) / ${VNC_PORT_2} (chrome-2)"
+write_sway_config() {
+    local config="$CONFIG_DIR/sway.conf" i x=0
+    {
+        echo '# Generated by entrypoint-headful.sh; do not edit.'
+        for ((i = 1; i <= BROWSER_COUNT; i++)); do
+            printf 'output HEADLESS-%s resolution %sx%s position %s 0\n' "$i" "$VNC_WIDTH" "$VNC_HEIGHT" "$x"
+            printf 'workspace %s output HEADLESS-%s\n' "$i" "$i"
+            x=$((x + VNC_WIDTH))
+        done
+        cat <<'EOF'
+default_border none
+default_floating_border none
+titlebar_border_thickness 0
+titlebar_padding 0 0
+output * bg #1a1a2e solid_color
+EOF
+        for ((i = 1; i <= BROWSER_COUNT; i++)); do
+            printf 'for_window [app_id="^chrome-%s$"] move workspace number %s, fullscreen enable\n' "$i" "$i"
+            printf 'exec_always swaymsg output HEADLESS-%s dpms on\n' "$i"
+        done
+        echo 'for_window [app_id=".*"] fullscreen enable'
+    } > "$config"
+}
 
-# Update Sway output resolution (both headless outputs); keep HEADLESS-2
-# positioned exactly one screen-width to the right of HEADLESS-1 so the
-# outputs abut without overlapping (an overlap re-creates the occlusion).
-# The position rewrite anchors on the HEADLESS-2 line, not on a literal
-# width, so it stays correct if the config's default resolution changes.
-sed -i "s/resolution [0-9]*x[0-9]*/resolution ${VNC_WIDTH}x${VNC_HEIGHT}/" /etc/sway/config
-sed -i -E "s/(output HEADLESS-2 .* position )[0-9]+ 0/\1${VNC_WIDTH} 0/" /etc/sway/config
+write_supervisor_config() {
+    local config="$CONFIG_DIR/supervisord.conf" i cdp_port profile_dir
+    cat > "$config" <<EOF
+[supervisord]
+nodaemon=true
+logfile=$LOG_DIR/supervisord.log
+pidfile=$RUNTIME_DIR/supervisord.pid
+childlogdir=$LOG_DIR
 
-# ── 4. Ensure runtime dirs exist ─────────────────────────────────────────
-mkdir -p /tmp/xdg-runtime
-chmod 0700 /tmp/xdg-runtime
+[unix_http_server]
+file=$RUNTIME_DIR/supervisor.sock
+chmod=0600
 
-# Chrome profiles. Each Chrome gets its own user-data-dir under
-# CHROME_PROFILES_DIR. Default /tmp (ephemeral — wiped with the container).
-# Set CHROME_PROFILES_DIR=/profiles (a mounted volume) to PERSIST logins,
-# cookies, and Cloudflare clearance across restarts. supervisord substitutes
-# the exported CHROME_PROFILE_DIR_1/2 into each Chrome's --user-data-dir.
-CHROME_PROFILES_DIR="${CHROME_PROFILES_DIR:-/tmp}"
-export CHROME_PROFILE_DIR_1="${CHROME_PROFILE_DIR_1:-${CHROME_PROFILES_DIR}/chrome-profile-1}"
-export CHROME_PROFILE_DIR_2="${CHROME_PROFILE_DIR_2:-${CHROME_PROFILES_DIR}/chrome-profile-2}"
-mkdir -p "$CHROME_PROFILE_DIR_1" "$CHROME_PROFILE_DIR_2"
-echo "[profiles] base=$CHROME_PROFILES_DIR  chrome-1=$CHROME_PROFILE_DIR_1  chrome-2=$CHROME_PROFILE_DIR_2"
+[rpcinterface:supervisor]
+supervisor.rpcinterface_factory = supervisor.rpcinterface:make_main_rpcinterface
 
-# System dbus for Chrome — without a reachable bus every Chrome process
-# burns time on dbus autolaunch attempts.
-mkdir -p /run/dbus
-dbus-uuidgen --ensure
+[supervisorctl]
+serverurl=unix://$RUNTIME_DIR/supervisor.sock
 
-# ── 5. Start supervisord ─────────────────────────────────────────────────
-echo "[start] Launching dbus → sway → wayvnc x2 → chrome x2"
-exec supervisord -c /etc/supervisor/conf.d/supervisord.conf
+[program:dbus]
+command=dbus-daemon --session --nofork --nopidfile --address=unix:path=$DBUS_SOCKET
+autostart=true
+autorestart=true
+priority=5
+stdout_logfile=$LOG_DIR/dbus.log
+redirect_stderr=true
+
+[program:sway]
+command=sway $SWAY_EXTRA_ARGS -c $CONFIG_DIR/sway.conf
+environment=XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR",WLR_BACKENDS="headless",WLR_HEADLESS_OUTPUTS="$BROWSER_COUNT",WLR_LIBINPUT_NO_DEVICES="1",WLR_NO_HARDWARE_CURSORS="1",WLR_RENDERER="$WLR_RENDERER",LIBSEAT_BACKEND="noop"
+autostart=true
+autorestart=true
+priority=10
+stdout_logfile=$LOG_DIR/sway.log
+redirect_stderr=true
+EOF
+
+    for ((i = 1; i <= BROWSER_COUNT; i++)); do
+        cdp_port=$((CDP_PORT_BASE + i - 1))
+        profile_dir="$PROFILE_ROOT/chrome-profile-$i"
+        mkdir -p "$profile_dir"
+        cat >> "$config" <<EOF
+
+[program:chrome-$i]
+command=google-chrome-stable${CHROME_SANDBOX_ARG:+ $CHROME_SANDBOX_ARG} --class=chrome-$i --ozone-platform=wayland --enable-features=UseOzonePlatform --ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy --disable-dev-shm-usage --disable-background-networking --disable-component-update --disable-blink-features=AutomationControlled --disable-infobars --disable-session-crashed-bubble --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-ipc-flooding-protection --disable-hang-monitor --disable-features=PaintHolding,DeferRendererTasksAfterInput --no-first-run --no-default-browser-check --remote-debugging-port=$cdp_port --user-data-dir=$profile_dir
+environment=XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR",WAYLAND_DISPLAY="wayland-1",DBUS_SESSION_BUS_ADDRESS="unix:path=$DBUS_SOCKET",DISPLAY=""
+autostart=true
+autorestart=true
+startsecs=5
+priority=30
+stdout_logfile=$LOG_DIR/chrome-$i.log
+redirect_stderr=true
+EOF
+    done
+}
+
+write_sway_config
+write_supervisor_config
+
+echo "[start] uid=$(id -u) browsers=$BROWSER_COUNT cdp_base=$CDP_PORT_BASE viewer_mode=${VIEWER_MODE:-disabled}"
+echo "[start] runtime=$RUNTIME_DIR profiles=$PROFILE_ROOT"
+exec supervisord -c "$CONFIG_DIR/supervisord.conf"

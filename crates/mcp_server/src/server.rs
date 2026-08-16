@@ -39,18 +39,27 @@ use crate::{
             DownloadArgs, DownloadArmArgs, DownloadArmResult, DownloadResult, DownloadWaitArgs,
         },
         fetch::{FetchArgs, FetchManyArgs, FetchManyResult, FetchResult},
+        interrupt::{InterruptIdArgs, InterruptResult, SessionInterruptArgs},
         introspect::PoolStatus,
+        network::{
+            CookieLeaseOpenArgs, CookieLeaseOpenResult, CookieLeaseRevokeArgs,
+            CookieLeaseRevokeResult, NetworkCaptureArmArgs, NetworkCaptureArmResult,
+            NetworkCaptureWaitArgs, NetworkCaptureWaitResult, SessionCookiesArgs,
+            SessionCookiesResult,
+        },
         profile_registry::{
             ProfileCloneArgs, ProfileCreateArgs, ProfileDeleteArgs, ProfileDeleteResult,
             ProfileDescribeArgs, ProfileListArgs, ProfileListResult, ProfilePoolCreateArgs,
             ProfilePoolDescribeArgs, ProfilePoolListArgs, ProfilePoolListResult,
         },
-        screenshot::ScreenshotArgs,
+        recording::{RecordArgs, SessionRecordStartArgs, SessionRecordStopArgs},
+        screenshot::{ScreenshotArgs, SessionScreenshotArgs},
         session::{
             SessionCloseResult, SessionContentResult, SessionIdArgs, SessionNavigateArgs,
             SessionNavigateResult, SessionOpenArgs, SessionOpenResult,
         },
         snapshot::{FetchSnapshotArgs, PageSnapshot, SessionSnapshotArgs},
+        viewport::{DevicePresetsResult, SessionSetViewportArgs},
     },
 };
 
@@ -164,13 +173,146 @@ on action downloads (no Content-Type is observed), so `clean` is not a malware-f
 
     #[tool(
         name = "screenshot",
-        description = "Load a URL in stealth headless Chrome and return a full-page PNG."
+        description = "Load a URL in stealth headless Chrome and return a PNG. Full page by \
+default; pass `full_page: false` to capture only the visible viewport (cheaper — no off-screen \
+content), `bbox` to crop an exact CSS-pixel region, `selector` to crop a Yosoi selector's resolved \
+rectangle instead (any of css/xpath/regex/jsonld/attr/global_id/role/visual — mutually exclusive \
+with `bbox`; a selector that matches nothing, is ambiguous, or is inherently non-visual \
+(jsonld/regex) fails with invalid_params rather than silently cropping an arbitrary target), \
+`viewport` for a one-shot device/size override (preset name from list_device_presets, or custom \
+width+height), and `scroll` to page down before cropping. `viewport`/`scroll` never persist past \
+this one call."
     )]
     pub async fn screenshot(
         &self,
         Parameters(args): Parameters<ScreenshotArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         tools::screenshot::run(self, args).await
+    }
+
+    #[tool(
+        name = "session_screenshot",
+        description = "Capture a PNG of the given session's page exactly as it stands right now \
+— no navigation, no URL change. The visual counterpart to session_content / session_snapshot for \
+authenticated, post-click, paginated, or challenge state that only an open session holds. Response \
+includes devicePixelRatio guidance compatible with click_visual_coords. Optional one-shot `viewport` \
+(preset or custom size), `full_page: false` (visible viewport only, not the whole scroll), `bbox` \
+crop, `selector` (crop a Yosoi selector's resolved rectangle — css/xpath/regex/jsonld/attr/ \
+global_id/role/visual — mutually exclusive with `bbox`; fails with invalid_params rather than \
+guessing when nothing/ambiguous/non-visual resolves), and `scroll` (page down before cropping) — \
+none of these persist past this call; use session_set_viewport for a persistent device/size. \
+Unknown or closed \
+session_ids fail with invalid_params. Prefer session_ax_tree / session_snapshot for structured \
+perception; reach for this when you need to see pixels — layout, visual state, or a thin AX tree."
+    )]
+    pub async fn session_screenshot(
+        &self,
+        Parameters(args): Parameters<SessionScreenshotArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        tools::screenshot::session(self, args).await
+    }
+
+    #[tool(
+        name = "record",
+        description = "Load a URL in stealth headless Chrome and record it as a sequence of \
+timestamped frames written to disk. The moving-picture counterpart to `screenshot`, with the same \
+`viewport` / `scroll` / crop options. Frames are NOT returned inline — a recording is hundreds of \
+images — so the response carries the output directory, per-region paths and counts; read a single \
+frame from disk if you need to see one. Differences from `screenshot`: no `full_page` (a recording \
+only ever contains the viewport — use `viewport` for a bigger area or `scroll` to pick which part \
+of a long page), `bbox` is viewport-relative, and `selectors` is a LIST — each entry becomes its \
+own cropped region cut from one recording, resolved to a rectangle once at start and then held \
+fixed (an element that moves drifts out of its crop). Chrome emits frames when it paints, so `fps` \
+is a ceiling, not a floor: a static page yields very few frames and that is expected — check \
+`effective_fps`. Optional `encode` (gif/mp4/webm) needs the matching build feature. \
+`masks` blacks out rectangles in every frame BEFORE anything is cropped, written, or encoded — \
+each entry is a `bbox` you already know or a `selector` to resolve, and unlike crop regions a \
+selector mask is re-resolved while recording so it keeps covering an element that moves. This is \
+a geometric primitive, not a redaction policy: it covers exactly the rectangles you name and \
+reports what it covered in `masks[].stale_frames` / `unresolved_ticks`. It does not decide what \
+is sensitive, and a masked recording is not thereby a safe-to-share one — that judgment is \
+yours."
+    )]
+    pub async fn record(
+        &self,
+        Parameters(args): Parameters<RecordArgs>,
+    ) -> Result<Json<tools::recording::RecordResult>, ErrorData> {
+        tools::recording::run(self, args).await.map(Json).map_err(map_err)
+    }
+
+    #[tool(
+        name = "session_record_start",
+        description = "Begin recording an open session's page, then drive it normally — clicks, \
+typing, and navigation all keep recording — and call session_record_stop to finish. Use this \
+instead of `record` whenever the thing worth recording is an interaction rather than a page load. \
+Takes the same crop/viewport/scroll/fps/masks options as `record` — masking matters more here, \
+since an interaction is where a password gets typed, and a selector mask tracks its element as \
+the page moves. `max_duration_secs` (default 30, max \
+120) is a hard bound after which the recording stops itself, so a forgotten recording can't hold \
+the browser. Only one recording per session at a time. Note that a session's tab shares a browser \
+window, so recording holds that browser's capture lock: screenshots on other tabs of the same \
+browser wait until it stops."
+    )]
+    pub async fn session_record_start(
+        &self,
+        Parameters(args): Parameters<SessionRecordStartArgs>,
+    ) -> Result<Json<tools::recording::SessionRecordStartResult>, ErrorData> {
+        tools::recording::session_start(self, args).await.map(Json).map_err(map_err)
+    }
+
+    #[tool(
+        name = "session_record_stop",
+        description = "Stop the recording started by session_record_start, write the frames and \
+any encoded artifact to disk, and return the output paths plus frame counts. Restores the \
+session's viewport and scroll position. Fails with invalid_params when no recording is running on \
+that session."
+    )]
+    pub async fn session_record_stop(
+        &self,
+        Parameters(args): Parameters<SessionRecordStopArgs>,
+    ) -> Result<Json<tools::recording::RecordResult>, ErrorData> {
+        tools::recording::session_stop(self, args).await.map(Json).map_err(map_err)
+    }
+
+    #[tool(
+        name = "session_set_viewport",
+        description = "Persistently override a session's CDP viewport: dimensions, device pixel \
+ratio, mobile/touch identity, and (for a preset) a matching UA — Chrome DevTools' device toolbar as \
+a tool call. Stays in effect across subsequent session_navigate/click/screenshot calls until \
+session_clear_viewport or another session_set_viewport. Pass `preset` (see list_device_presets, \
+e.g. \"iPhone 16 Pro Max\", \"iPad Pro 11\", \"Desktop 1080p\") or custom `width`+`height` \
+(+ optional `device_scale_factor`, `mobile`). For a one-off change scoped to a single capture, use \
+the `viewport` option on screenshot/session_screenshot instead — it doesn't persist. NOT available \
+on stateless fetch/screenshot: pooled tabs are reused across unrelated callers, so a persistent \
+device identity there would leak to the next caller."
+    )]
+    pub async fn session_set_viewport(
+        &self,
+        Parameters(args): Parameters<SessionSetViewportArgs>,
+    ) -> Result<Json<OkResult>, ErrorData> {
+        tools::viewport::session_set(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "session_clear_viewport",
+        description = "Clear a session_set_viewport override, returning to the session's \
+launch-time default viewport."
+    )]
+    pub async fn session_clear_viewport(
+        &self,
+        Parameters(args): Parameters<SessionIdArgs>,
+    ) -> Result<Json<OkResult>, ErrorData> {
+        tools::viewport::session_clear(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "list_device_presets",
+        description = "List named device presets available to `viewport` (on screenshot / \
+session_screenshot) and session_set_viewport — phones, tablets, and desktop sizes with their CSS \
+pixel dimensions, device pixel ratio, and mobile flag. The DevTools device-toolbar dropdown, as data."
+    )]
+    pub async fn list_device_presets(&self) -> Result<Json<DevicePresetsResult>, ErrorData> {
+        Ok(Json(tools::viewport::list_presets()))
     }
 
     #[tool(
@@ -280,6 +422,50 @@ wait_for accepts 'networkidle' (default) or 'selector:<css>' (event-driven, no p
         Parameters(args): Parameters<SessionNavigateArgs>,
     ) -> Result<Json<SessionNavigateResult>, ErrorData> {
         tools::session::navigate(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "session_interrupt",
+        description = "Explicitly park this stateful session for operator review. No login or CAPTCHA inference occurs; normal mutations fail until session_interrupt_resume or session_interrupt_release."
+    )]
+    pub async fn session_interrupt(
+        &self,
+        Parameters(args): Parameters<SessionInterruptArgs>,
+    ) -> Result<Json<InterruptResult>, ErrorData> {
+        tools::interrupt::begin(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "session_interrupt_status",
+        description = "Return redacted state for an explicit session interrupt."
+    )]
+    pub async fn session_interrupt_status(
+        &self,
+        Parameters(args): Parameters<InterruptIdArgs>,
+    ) -> Result<Json<InterruptResult>, ErrorData> {
+        tools::interrupt::status(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "session_interrupt_resume",
+        description = "Reactivate a parked session without replaying the action that caused the interrupt."
+    )]
+    pub async fn session_interrupt_resume(
+        &self,
+        Parameters(args): Parameters<InterruptIdArgs>,
+    ) -> Result<Json<InterruptResult>, ErrorData> {
+        tools::interrupt::resume(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "session_interrupt_release",
+        description = "Mark a parked interrupt released without replaying a browser action."
+    )]
+    pub async fn session_interrupt_release(
+        &self,
+        Parameters(args): Parameters<InterruptIdArgs>,
+    ) -> Result<Json<InterruptResult>, ErrorData> {
+        tools::interrupt::release(self, args).await.map(Json)
     }
 
     #[tool(
@@ -478,6 +664,93 @@ observed since the session's most recent navigation. Backed by performance.getEn
     }
 
     #[tool(
+        name = "network_capture_arm",
+        description = "Arm an open session to capture request headers, response headers, status, \
+and (opt-in) body of the NEXT requests matching one or more named URL globs — real CDP Network.* \
+events, unlike `network_capture` which reads the Resource Timing API and has no headers/body. \
+Flow: session_open → session_navigate → network_capture_arm(patterns=[{name,url_glob}]) → the \
+click/navigation that triggers the requests → network_capture_wait. `request_headers` is where \
+an Authorization bearer set by page code appears. Credential-bearing header values come back as \
+`<redacted>`; raw values need BOTH include_sensitive_headers:true AND the operator setting \
+VOIDCRAWL_ALLOW_CREDENTIAL_CAPTURE=1, else the call is refused. CAVEATS: `url` is returned raw \
+and may itself embed a token (presigned URL, ?access_token=); bodies are not credential-scanned; \
+cookies are NOT captured from the wire in either direction (Chrome reports them only via \
+*ExtraInfo events, which the vendored CDP client does not deliver) — use session_cookies."
+    )]
+    pub async fn network_capture_arm(
+        &self,
+        Parameters(args): Parameters<NetworkCaptureArmArgs>,
+    ) -> Result<Json<NetworkCaptureArmResult>, ErrorData> {
+        tools::network::arm(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "network_capture_wait",
+        description = "Wait for the capture armed by `network_capture_arm` to observe every named \
+pattern, and return each match's status, request/response headers, and (if `capture_body` was \
+set) base64 body. Call after the action(s) that trigger the requests. `timeout_secs` (default 30) \
+is measured from THIS call, so time spent typing/clicking between arm and wait does not consume \
+it. A timeout means the armed globs never matched a real request — re-check the pattern against \
+the URL the page actually requested."
+    )]
+    pub async fn network_capture_wait(
+        &self,
+        Parameters(args): Parameters<NetworkCaptureWaitArgs>,
+    ) -> Result<Json<NetworkCaptureWaitResult>, ErrorData> {
+        tools::network::wait(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "session_cookies",
+        description = "Return every cookie CDP can see for the session's current page — including \
+HttpOnly and Secure cookies invisible to document.cookie. OPT-IN: returns raw cookie VALUES, so \
+it is refused unless the operator sets VOIDCRAWL_ALLOW_CREDENTIAL_CAPTURE=1. INTERIM/RAW: a \
+direct wrapper over the core cookie-read API, not the CAS-251 leased cookie-jar design — no \
+scoping, no TTL/revoke, no value-free provenance, no eligibility classification. Use for local \
+debugging/demos, not as a safe handoff surface."
+    )]
+    pub async fn session_cookies(
+        &self,
+        Parameters(args): Parameters<SessionCookiesArgs>,
+    ) -> Result<Json<SessionCookiesResult>, ErrorData> {
+        tools::network::cookies(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "cookie_lease_open",
+        description = "Fork the cookies reachable by one replay origin out of a live session into \
+an in-memory, revocable lease, and return the lease id plus a VALUE-FREE provenance record per \
+cookie: name, domain, path, issuing origin, top-level site (the CHIPS partition key — the site \
+the browser was on when the cookie was set), expiry/session state, HttpOnly/Secure/SameSite, \
+source scheme/port, and whether a value is present. Cookie VALUES never cross this boundary, so \
+the result is safe to persist in a trace or artifact. The lease is scope-bound (you cannot ask \
+for all cookies) and dies with its browser session. This tool reports facts only — it does NOT \
+classify replay eligibility (expired / HTTPS-only / scope mismatch / partitioned-context), which \
+is the caller's policy decision. Use `session_cookies` only for local debugging with raw values."
+    )]
+    pub async fn cookie_lease_open(
+        &self,
+        Parameters(args): Parameters<CookieLeaseOpenArgs>,
+    ) -> Result<Json<CookieLeaseOpenResult>, ErrorData> {
+        tools::network::cookie_lease_open(self, args).await.map(Json)
+    }
+
+    #[tool(
+        name = "cookie_lease_revoke",
+        description = "Revoke a cookie lease, scrubbing its held values and failing any later use \
+closed with a recorded reason. Pass a machine-readable `reason` (e.g. \"auth_failed\") so a \
+downstream failure can be explained. Idempotent: revoking an unknown or already-revoked lease \
+returns revoked=false rather than erroring. Leases are also revoked automatically when their \
+session closes."
+    )]
+    pub async fn cookie_lease_revoke(
+        &self,
+        Parameters(args): Parameters<CookieLeaseRevokeArgs>,
+    ) -> Result<Json<CookieLeaseRevokeResult>, ErrorData> {
+        tools::network::cookie_lease_revoke(self, args).await.map(Json)
+    }
+
+    #[tool(
         name = "solve_captcha",
         description = "Click the Turnstile / reCAPTCHA-v2 / hCaptcha checkbox in an open session \
 using real CDP mouse events (not JS click — widgets detect that) and wait for the response \
@@ -617,8 +890,10 @@ session_close; sessions are cookie-isolated.\n\n\
 PERCEIVE → ACT → EXTRACT. To inspect a large rendered page, prefer `fetch_snapshot` first, or \
 `session_snapshot` after clicking/pagination/login flows. For role/name interaction targeting, \
 call `session_ax_tree` — a compact outline of the accessibility tree. If `named_count` is low vs \
-`node_count` the accessibility tree is thin; fall back to `session_snapshot` or `screenshot`. Use \
-raw `fetch` / `session_content` only when you truly need markup. To click: `click` (CSS selector) \
+`node_count` the accessibility tree is thin; fall back to `session_snapshot` or `session_screenshot`. \
+`session_screenshot` captures the current session's page as-is (no navigation) — reach for it before \
+`click_visual_coords` to see authenticated, post-click, paginated, or challenge state that `fetch`-based \
+`screenshot` can't reach. Use raw `fetch` / `session_content` only when you truly need markup. To click: `click` (CSS selector) \
 or `click_by_role` (accessibility role + accessible name — durable across redesigns); last resort \
 `click_visual_coords` for React forms that ignore synthetic clicks. To extract data, run `extract` \
 / `eval_js` with a JS expression and return data, not markup.\n\n\

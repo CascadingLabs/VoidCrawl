@@ -25,6 +25,50 @@ pub enum HeadlessMode {
     New,
 }
 
+/// How aggressively chromiumoxide initializes CDP domains for each target.
+///
+/// VoidCrawl fork (CAS-217). Chromiumoxide hardwires a set of eager CDP domain
+/// enables into its per-target init chain — `Runtime.enable`, `Network.enable`,
+/// `Performance.enable`, `Log.enable`, `Target.setAutoAttach`, and an
+/// isolated-world `addScriptToEvaluateOnNewDocument`. Each is an automation tell
+/// a clean browser never sends, and together they are what keeps a CDP-driven
+/// Chrome from clearing a Cloudflare Managed Challenge that a human passes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CdpMode {
+    /// Full chromiumoxide behavior: eager Runtime, Network, Performance, Log,
+    /// Target auto-attach, and isolated utility world initialization.
+    #[default]
+    Normal,
+    /// Anti-bot-safe mode: skip high-signal eager CDP domain initialization.
+    ///
+    /// Main-world `Runtime.evaluate`, navigation, screenshots, accessibility,
+    /// and input still work. Reduced or unavailable in this mode: network
+    /// capture and response metadata (no `Network.enable`), network-idle
+    /// navigation, cross-origin `evaluate_js_in_frame`, `evaluate_function`,
+    /// and OOPIF/child-target auto-attach.
+    Minimal,
+}
+
+impl CdpMode {
+    /// The default mode, honoring `VOIDCRAWL_STEALTH_NO_RUNTIME`.
+    ///
+    /// Back-compat with the original env-gated rollout: that variable predates this
+    /// enum and is still read so existing deployments keep working. Prefer
+    /// [`BrowserConfigBuilder::cdp_mode`], which is per-session rather than
+    /// process-global. Callers that build a config explicitly should seed it from
+    /// here rather than from `CdpMode::default()`, which ignores the environment.
+    pub fn from_env_default() -> Self {
+        if std::env::var_os("VOIDCRAWL_STEALTH_NO_RUNTIME").is_some() {
+            Self::Minimal
+        } else {
+            Self::Normal
+        }
+    }
+
+    pub(crate) const fn is_minimal(self) -> bool {
+        matches!(self, Self::Minimal)
+    }
+}
 #[derive(Debug, Clone)]
 pub struct BrowserConfig {
     /// Determines whether to run headless version of the browser. Defaults to
@@ -97,6 +141,9 @@ pub struct BrowserConfig {
 
     /// Avoid easy bot detection by setting `navigator.webdriver` to false
     pub(crate) hidden: bool,
+
+    /// VoidCrawl fork: select normal vs anti-bot-safe minimal CDP initialization.
+    pub(crate) cdp_mode: CdpMode,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +169,7 @@ pub struct BrowserConfigBuilder {
     request_intercept: bool,
     cache_enabled: bool,
     hidden: bool,
+    cdp_mode: CdpMode,
 }
 
 impl BrowserConfig {
@@ -158,6 +206,7 @@ impl Default for BrowserConfigBuilder {
             request_intercept: false,
             cache_enabled: true,
             hidden: false,
+            cdp_mode: CdpMode::from_env_default(),
         }
     }
 }
@@ -334,6 +383,12 @@ impl BrowserConfigBuilder {
         self
     }
 
+    /// Select normal vs anti-bot-safe minimal CDP initialization for this
+    /// browser. See [`CdpMode`] for what Minimal gives up.
+    pub fn cdp_mode(mut self, mode: CdpMode) -> Self {
+        self.cdp_mode = mode;
+        self
+    }
     pub fn build(self) -> std::result::Result<BrowserConfig, String> {
         let executable = if let Some(e) = self.executable {
             e
@@ -362,6 +417,7 @@ impl BrowserConfigBuilder {
             request_intercept: self.request_intercept,
             cache_enabled: self.cache_enabled,
             hidden: self.hidden,
+            cdp_mode: self.cdp_mode,
         })
     }
 }

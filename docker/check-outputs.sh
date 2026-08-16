@@ -1,47 +1,49 @@
 #!/usr/bin/env bash
-# Smoke detector for the CAS-210 occlusion regression.
-#
-# The latency fix rests on a routing chain that nothing else enforces:
-#   --class=chrome-N  →  Chrome maps it to the Wayland app_id
-#                     →  sway's `for_window [app_id="^chrome-N$"]` rule
-#                     →  each window pinned to its own headless output.
-# If any link breaks (a Chrome or sway upgrade changing how --class maps to
-# app_id, the regex no longer matching, …) both Chromes fall through to the
-# catch-all `[app_id=".*"] fullscreen` rule and pile onto ONE output. The
-# occluded one's renderer then starves of frame callbacks and CDP ops stall —
-# the exact >280s hang this work fixed. Crucially that failure is silent:
-# CDP `/json/version` keeps answering. So this check is wired into the
-# container HEALTHCHECK (not just startup) to make the regression fail loud.
-#
-# Exit 0 = each Chrome on its own output; non-zero = regression / not ready.
+# Healthcheck for headful output routing and CDP readiness.
 set -uo pipefail
 
-export SWAYSOCK="${SWAYSOCK:-$(ls /tmp/xdg-runtime/sway-ipc.*.sock 2>/dev/null | head -1)}"
+BROWSER_COUNT="${BROWSER_COUNT:-2}"
+CDP_PORT_BASE="${CDP_PORT_BASE:-19222}"
+[[ "$BROWSER_COUNT" =~ ^[1-9][0-9]*$ ]] || { echo "[guard] invalid BROWSER_COUNT"; exit 1; }
+[[ "$CDP_PORT_BASE" =~ ^[1-9][0-9]*$ ]] || { echo "[guard] invalid CDP_PORT_BASE"; exit 1; }
+
+export SWAYSOCK="${SWAYSOCK:-$(find "${XDG_RUNTIME_DIR:-/tmp/voidcrawl/xdg}" -maxdepth 1 -name 'sway-ipc.*.sock' -type s -print -quit 2>/dev/null)}"
 [ -S "${SWAYSOCK:-}" ] || { echo "[guard] no sway IPC socket yet"; exit 1; }
 
 tree=$(swaymsg -t get_tree 2>/dev/null) || { echo "[guard] swaymsg failed"; exit 1; }
 
-# Resolve which output each Chrome window currently sits under.
-read -r out1 out2 < <(printf '%s' "$tree" | python3 -c '
-import json, sys
-loc = {}
-def walk(node, out=None):
-    if node.get("type") == "output":
-        out = node.get("name")
-    if node.get("app_id") in ("chrome-1", "chrome-2"):
-        loc[node["app_id"]] = out
-    for child in node.get("nodes", []) + node.get("floating_nodes", []):
-        walk(child, out)
-walk(json.load(sys.stdin))
-print(loc.get("chrome-1", "?"), loc.get("chrome-2", "?"))
-')
+SWAY_TREE="$tree" python3 - "$BROWSER_COUNT" "$CDP_PORT_BASE" <<'PY'
+import json
+import os
+import sys
+import urllib.request
 
-if [ "$out1" = "?" ] || [ "$out2" = "?" ]; then
-    echo "[guard] not ready: chrome-1=$out1 chrome-2=$out2 (window not mapped yet)"
-    exit 1
-fi
-if [ "$out1" = "$out2" ]; then
-    echo "[guard] FAIL: both Chromes share output '$out1' — CAS-210 occlusion regressed"
-    exit 1
-fi
-echo "[guard] OK: chrome-1=$out1 chrome-2=$out2"
+count, port_base = map(int, sys.argv[1:])
+locations = {}
+
+def walk(node, output=None):
+    if node.get("type") == "output":
+        output = node.get("name")
+    app_id = node.get("app_id", "")
+    if app_id.startswith("chrome-"):
+        locations[app_id] = output
+    for child in node.get("nodes", []) + node.get("floating_nodes", []):
+        walk(child, output)
+
+walk(json.loads(os.environ["SWAY_TREE"]))
+expected = [f"chrome-{index}" for index in range(1, count + 1)]
+missing = [name for name in expected if not locations.get(name)]
+outputs = [locations[name] for name in expected if locations.get(name)]
+if missing:
+    raise SystemExit(f"[guard] not ready: missing windows {', '.join(missing)}")
+if len(set(outputs)) != count:
+    raise SystemExit(f"[guard] FAIL: browsers share outputs: {locations}")
+for index in range(count):
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port_base + index}/json/version", timeout=2) as response:
+            if response.status != 200:
+                raise OSError(f"HTTP {response.status}")
+    except OSError as exc:
+        raise SystemExit(f"[guard] CDP chrome-{index + 1} unavailable: {exc}") from exc
+print("[guard] OK: " + ", ".join(f"{name}={locations[name]}" for name in expected))
+PY

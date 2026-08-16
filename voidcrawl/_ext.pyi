@@ -5,7 +5,7 @@ Internal — import from ``voidcrawl`` instead.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 class AntibotVerdict:
     """Signature-based anti-bot / CDN vendor fingerprint of a response.
@@ -69,6 +69,7 @@ class CapturedResponse:
     url: str
     status: int
     headers: dict[str, str]
+    request_headers: dict[str, str]
     mime_type: str
     resource_type: str
     from_cache: bool
@@ -81,7 +82,7 @@ class CapturedResponse:
     async def json(self) -> Any: ...
 
 class ResponseExpectation:
-    """Async context returned by ``Page.expect_response(s)``."""
+    """Async context returned by ``Page`` or ``PooledTab.expect_response(s)``."""
 
     async def __aenter__(self) -> ResponseExpectation: ...
     async def __aexit__(
@@ -89,6 +90,25 @@ class ResponseExpectation:
     ) -> bool: ...
     @property
     def value(self) -> Any: ...
+
+class TabInstrumentationState:
+    """Per-tab CDP instrumentation state for routing sensitive work.
+
+    Attributes:
+        low_cdp: ``True`` while the tab has not enabled higher-signal CDP domains.
+        network_enabled: ``True`` after ``Network.enable`` has been sent.
+        runtime_enabled: ``True`` after ``Runtime.enable`` has been sent for
+            frame-scoped JavaScript.
+        utility_world_enabled: Reserved for future isolated-world tracking.
+        pre_navigation_stealth: ``True`` if VoidCrawl applied UA/viewport
+            pre-navigation stealth to this tab.
+    """
+
+    low_cdp: bool
+    network_enabled: bool
+    runtime_enabled: bool
+    utility_world_enabled: bool
+    pre_navigation_stealth: bool
 
 class DownloadOutcome:
     """Result of :meth:`Page.download` / :meth:`PooledTab.download`.
@@ -167,6 +187,24 @@ class PooledTab:
             url: The URL to load.
         """
         ...
+    def expect_response(
+        self,
+        pattern: str,
+        timeout: float = 30.0,
+        max_response_bytes: int = 2097152,
+        max_total_bytes: int = 8388608,
+    ) -> ResponseExpectation:
+        """Arm one bounded passive response expectation before an action."""
+        ...
+    def expect_responses(
+        self,
+        patterns: dict[str, str],
+        timeout: float = 30.0,
+        max_response_bytes: int = 2097152,
+        max_total_bytes: int = 8388608,
+    ) -> ResponseExpectation:
+        """Arm named bounded passive response expectations before an action."""
+        ...
     async def wait_for_navigation(self) -> None:
         """Block until the current navigation completes."""
         ...
@@ -178,6 +216,9 @@ class PooledTab:
         ...
     async def url(self) -> str | None:
         """Return the current page URL, or ``None``."""
+        ...
+    async def instrumentation_state(self) -> TabInstrumentationState:
+        """Return this tab's CDP instrumentation state."""
         ...
     async def evaluate_js(self, expression: str) -> object:
         """Evaluate a JavaScript *expression* and return the result.
@@ -221,6 +262,34 @@ class PooledTab:
         ...
     async def screenshot_png(self) -> bytes:
         """Capture a full-page screenshot as PNG bytes."""
+        ...
+    async def screenshot(
+        self,
+        path: str | None = None,
+        bbox: tuple[int, int, int, int] | None = None,
+        selector_type: str | None = None,
+        selector_value: str | None = None,
+        selector_regex: str | None = None,
+        selector_name: str | None = None,
+        selector_nth: int | None = None,
+        selector_x: float | None = None,
+        selector_y: float | None = None,
+        viewport_preset: str | None = None,
+        viewport_width: int | None = None,
+        viewport_height: int | None = None,
+        viewport_device_scale_factor: float | None = None,
+        viewport_mobile: bool | None = None,
+        scroll_viewports: float | None = None,
+        scroll_pixels: int | None = None,
+        full_page: bool | None = None,
+    ) -> bytes | str:
+        """Capture a PNG screenshot; see :meth:`Page.screenshot` for the
+        full argument reference (including the ``selector_*`` kwargs — a
+        one-shot selector-backed crop is safe on a pooled tab). No
+        persistent ``set_viewport`` exists on a pooled tab — the pool
+        doesn't reset viewport on release, so a persistent override would
+        leak to the next unrelated caller that acquires this tab. Use the
+        one-shot ``viewport_*`` kwargs here instead."""
         ...
     async def download(
         self,
@@ -547,6 +616,7 @@ class BrowserPool:
         chrome_executable: str | None,
         extra_args: list[str],
         user_data_dir: str | None,
+        cdp_mode: Literal["normal", "minimal"] | None = None,
     ) -> _PoolParamsContext: ...
     async def warmup(self) -> None: ...
     def acquire(self) -> _AcquireContext: ...
@@ -555,6 +625,84 @@ class BrowserPool:
     async def __aexit__(
         self, exc_type: object = None, exc_val: object = None, exc_tb: object = None
     ) -> bool: ...
+
+class Frame:
+    """One captured frame of a :class:`Recording`."""
+
+    index: int
+    """Position in the sequence, 0-based."""
+    offset_ms: float
+    """Real elapsed milliseconds since the recording started. Frames are
+    **not** evenly spaced — encode against this, not ``index / fps``."""
+    data: bytes
+    """Encoded image bytes, in the recording's ``format``."""
+
+    def __len__(self) -> int: ...
+
+class RecordedRegion:
+    """One recorded region: the viewport, a ``bbox``, or one selector."""
+
+    label: str
+    """``"viewport"``, ``"bbox"``, or a name derived from the selector."""
+    bbox: tuple[int, int, int, int] | None
+    """``(x, y, width, height)`` in CSS pixels, resolved once at start."""
+    frames: list[Frame]
+    outputs: list[str]
+    """Paths of encoded artifacts written for this region."""
+
+class MaskReport:
+    """What one mask of a :class:`Recording` covered.
+
+    The library covers the rectangles it is given and reports the result. It
+    does not decide what is sensitive, so a recording with masks is not
+    thereby a safe-to-share one — ``unresolved_ticks`` and ``stale_frames``
+    are here so you can make that call.
+    """
+
+    label: str
+    bbox: tuple[int, int, int, int]
+    """``(x, y, width, height)`` in CSS pixels, as first resolved."""
+    tracked: bool
+    """Whether the mask was re-resolved while recording."""
+    unresolved_ticks: int
+    """Ticks where re-resolution failed. The mask kept its last known
+    rectangle for those, so something stayed covered."""
+    stale_frames: int
+    """Frames captured while the most recent re-resolution had failed."""
+
+class Recording:
+    """The result of :meth:`Page.record` / :meth:`RecordingHandle.stop`."""
+
+    regions: list[RecordedRegion]
+    """One per requested region; a single ``"viewport"`` region when neither
+    ``bbox`` nor ``selectors`` was given."""
+    masks: list[MaskReport]
+    """One per requested mask. Empty means nothing was asked to be covered —
+    not that there was nothing worth covering."""
+    format: str
+    """``"jpeg"`` or ``"png"``."""
+    duration_ms: float
+    frames_captured: int
+    frames_dropped: int
+    """Frames discarded by the ``fps`` ceiling or the frame cap."""
+    device_pixel_ratio: float
+    foregrounded: bool
+    """Whether the recording pinned its tab to the foreground and held the
+    browser's capture lock. ``False`` means it ran concurrently."""
+
+    def effective_fps(self) -> float:
+        """Frames per second actually achieved — at most the requested
+        ``fps``, and usually below it on a mostly-static page."""
+        ...
+
+class RecordingHandle:
+    """A recording in flight, from :meth:`Page.start_recording`."""
+
+    async def stop(self) -> Recording:
+        """Stop the recording and return the :class:`Recording`. Restores
+        viewport and scroll position, releases the capture lock if one was
+        taken, then crops and encodes. Raises on a second call."""
+        ...
 
 class Page:
     """A single browser tab created via :meth:`BrowserSession.new_page`."""
@@ -614,6 +762,9 @@ class Page:
     async def url(self) -> str | None:
         """Return the current page URL, or ``None``."""
         ...
+    async def instrumentation_state(self) -> TabInstrumentationState:
+        """Return this tab's CDP instrumentation state."""
+        ...
     async def evaluate_js(self, expression: str) -> object:
         """Evaluate a JavaScript *expression* and return the result."""
         ...
@@ -653,18 +804,203 @@ class Page:
     async def screenshot_png(self) -> bytes:
         """Capture a full-page screenshot as PNG bytes."""
         ...
+    async def record(
+        self,
+        duration_secs: float | None = None,
+        selectors: list[dict[str, object]] | None = None,
+        bbox: tuple[int, int, int, int] | None = None,
+        masks: list[dict[str, object]] | None = None,
+        mask_pad: int | None = None,
+        viewport_preset: str | None = None,
+        viewport_width: int | None = None,
+        viewport_height: int | None = None,
+        viewport_device_scale_factor: float | None = None,
+        viewport_mobile: bool | None = None,
+        scroll_viewports: float | None = None,
+        scroll_pixels: int | None = None,
+        fps: int | None = None,
+        max_frames: int | None = None,
+        frame_format: str | None = None,
+        quality: int | None = None,
+        output_dir: str | None = None,
+        write_frames: bool | None = None,
+        foreground: bool | None = None,
+        encode: list[str] | None = None,
+    ) -> Recording:
+        """Record this page for ``duration_secs`` seconds.
+
+        The moving-picture counterpart to :meth:`screenshot`, with the same
+        ``viewport_*`` / ``scroll_*`` / ``bbox`` kwargs. Two differences,
+        both forced by CDP's screencast:
+
+        * No ``full_page`` — a screencast only ever contains the viewport.
+        * ``selectors`` is a **list**: each entry becomes its own cropped
+          region in ``recording.regions``, all cut from one screencast, each
+          resolved to a rectangle once at start and then held fixed.
+
+        Frames arrive when Chrome paints rather than on a clock, so ``fps``
+        is a ceiling, not a guarantee, and a static page yields very few
+        frames. ``bbox`` here is viewport-relative (a screencast frame only
+        contains the viewport), unlike :meth:`screenshot`'s page-relative
+        one.
+
+        ``masks`` blacks out rectangles in every frame before anything is
+        cropped, written, or encoded. Each entry is a selector dict
+        (``{"type": "css", "value": "#password"}``) or a mask dict
+        (``{"bbox": (x, y, w, h)}`` / ``{"selector": {...}, "track": False,
+        "label": "pw"}``). Orthogonal to ``bbox``/``selectors``: crop to the
+        form and mask a field inside it. Unlike a crop region, a selector
+        mask is re-resolved while recording so it keeps covering an element
+        that moves, and one that resolves to nothing fails the call rather
+        than leaving a hole. See ``recording.masks`` for what each one did.
+
+        This is a geometric primitive, not a redaction policy: it covers
+        exactly what you name and reports what it covered. It does not
+        decide what is sensitive.
+
+        ``encode`` (``"gif"`` / ``"mp4"`` / ``"webm"``) requires ``output_dir``
+        and
+        the matching cargo feature; without it this raises rather than
+        silently producing nothing, and the frames remain available.
+
+        Leave ``foreground`` unset to detect it: a tab sharing its window
+        must be foregrounded (holding the browser's capture lock) to paint
+        at all, while a tab alone in its window records at full rate
+        concurrently.
+        """
+        ...
+    async def start_recording(
+        self,
+        duration_secs: float | None = None,
+        selectors: list[dict[str, object]] | None = None,
+        bbox: tuple[int, int, int, int] | None = None,
+        masks: list[dict[str, object]] | None = None,
+        mask_pad: int | None = None,
+        viewport_preset: str | None = None,
+        viewport_width: int | None = None,
+        viewport_height: int | None = None,
+        viewport_device_scale_factor: float | None = None,
+        viewport_mobile: bool | None = None,
+        scroll_viewports: float | None = None,
+        scroll_pixels: int | None = None,
+        fps: int | None = None,
+        max_frames: int | None = None,
+        frame_format: str | None = None,
+        quality: int | None = None,
+        output_dir: str | None = None,
+        write_frames: bool | None = None,
+        foreground: bool | None = None,
+        encode: list[str] | None = None,
+    ) -> RecordingHandle:
+        """Begin recording and return a handle to stop it.
+
+        Use instead of :meth:`record` when you need to drive the page while
+        it records. Same kwargs, except ``duration_secs`` becomes a hard
+        upper bound rather than the exact length.
+        """
+        ...
+    async def alone_in_window(self) -> bool:
+        """Whether this tab is the only one in its browser window.
+
+        Chrome composites only a window's frontmost tab, so a page sharing
+        its window can't paint while a sibling is active. A page alone in
+        its window keeps painting — which is what lets :meth:`record` run
+        without holding the browser's capture lock.
+        """
+        ...
     async def screenshot(
         self,
         path: str | None = None,
         bbox: tuple[int, int, int, int] | None = None,
+        selector_type: str | None = None,
+        selector_value: str | None = None,
+        selector_regex: str | None = None,
+        selector_name: str | None = None,
+        selector_nth: int | None = None,
+        selector_x: float | None = None,
+        selector_y: float | None = None,
+        viewport_preset: str | None = None,
+        viewport_width: int | None = None,
+        viewport_height: int | None = None,
+        viewport_device_scale_factor: float | None = None,
+        viewport_mobile: bool | None = None,
+        scroll_viewports: float | None = None,
+        scroll_pixels: int | None = None,
+        full_page: bool | None = None,
     ) -> bytes | str:
-        """Capture a PNG screenshot with optional disk output and/or crop.
+        """Capture a PNG screenshot with optional disk output, cropping, a
+        one-shot device/viewport override, scrolling, and/or viewport-only
+        capture. Prefer building a validated
+        :class:`voidcrawl.viewport.Viewport` and unpacking it with
+        ``**vp.as_kwargs(prefix="viewport_")`` over passing these directly.
 
         Args:
             path: If set, writes PNG to this path and returns the path.
                 If omitted, returns raw bytes.
-            bbox: Optional ``(x, y, width, height)`` in CSS pixels.
+            bbox: Optional ``(x, y, width, height)`` in CSS pixels. With
+                ``scroll_viewports``/``scroll_pixels`` set, coordinates are
+                relative to wherever that scroll lands. Mutually exclusive
+                with ``selector_type``.
+            selector_type: Crop to a Yosoi selector's resolved rectangle
+                instead of an explicit ``bbox`` — one of ``"css"``,
+                ``"xpath"``, ``"regex"``, ``"jsonld"``, ``"attr"``,
+                ``"global_id"``, ``"role"``, ``"visual"``. Mutually
+                exclusive with ``bbox``. A selector that matches nothing,
+                is ambiguous, or is inherently non-visual (``jsonld``/
+                ``regex``) raises rather than silently cropping an
+                arbitrary target.
+            selector_value: CSS selector / XPath expression, depending on
+                ``selector_type`` (unused for ``role``/``visual``/
+                ``jsonld``/``regex``).
+            selector_regex: Regex pattern (``selector_type="regex"`` only —
+                currently always resolves to "empty"; not cropped).
+            selector_name: Accessible name (``role``), attribute name
+                (``attr`` — metadata only, not part of the DOM query), or
+                id-prefix filter (``global_id``).
+            selector_nth: 0-based index to disambiguate when a selector
+                matches more than one visible target.
+            selector_x: CSS-pixel x (``selector_type="visual"`` only).
+            selector_y: CSS-pixel y (``selector_type="visual"`` only) —
+                together with ``selector_x``, resolves to an exact 1x1 box.
+            viewport_preset: Named device (see
+                :func:`voidcrawl.viewport.list_device_presets`). Mutually
+                exclusive with ``viewport_width``/``viewport_height``.
+                One-shot: restores whatever viewport was active before,
+                even on error.
+            viewport_width: Custom one-shot viewport width in CSS pixels.
+                Requires ``viewport_height``.
+            viewport_height: Custom one-shot viewport height in CSS pixels.
+                Requires ``viewport_width``.
+            viewport_device_scale_factor: DPR for a custom viewport
+                (default ``1.0``). Ignored with ``viewport_preset``.
+            viewport_mobile: Emulate a mobile viewport for a custom size —
+                also enables touch (default ``False``). Ignored with
+                ``viewport_preset``.
+            scroll_viewports: Scroll to N viewport-heights from the top
+                before capturing (``2.0`` = "scrolled down twice"). Mutually
+                exclusive with ``scroll_pixels``. Restored after capture.
+            scroll_pixels: Scroll to an absolute pixel Y before capturing.
+            full_page: Capture the full scrollable page (default ``True``).
+                ``False`` captures only the visible viewport. Ignored when
+                ``bbox``/``selector_type`` is set.
         """
+        ...
+    async def set_viewport(
+        self,
+        preset: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        device_scale_factor: float | None = None,
+        mobile: bool | None = None,
+    ) -> None:
+        """Persistently override this page's CDP viewport — dimensions, DPR,
+        mobile/touch identity, and (for a preset) a matching UA. Stays in
+        effect until :meth:`clear_viewport` or another `set_viewport` call.
+        Pass either ``preset`` or ``width``+``height``."""
+        ...
+    async def clear_viewport(self) -> None:
+        """Clear a :meth:`set_viewport` override, returning to the
+        session's launch-time default viewport."""
         ...
     async def detect_captcha(self) -> str | None:
         """Probe DOM for captcha / bot-wall markers.
@@ -912,6 +1248,14 @@ class Page:
         """Close this tab and release its resources."""
         ...
 
+class InterruptInfo:
+    interrupt_id: str
+    target_id: str
+    code: str
+    summary: str
+    state: str
+    expires_in_ms: int
+
 class BrowserSession:
     """Rust-side browser session (internal).
 
@@ -930,10 +1274,17 @@ class BrowserSession:
         extra_args: list[str] | None = None,
         user_data_dir: str | None = None,
         port: int | None = None,
+        cdp_mode: Literal["normal", "minimal"] | None = None,
     ) -> None: ...
     async def launch(self) -> None: ...
     async def new_page(self, url: str | None = None) -> Page: ...
+    async def new_page_in_window(self, url: str) -> Page: ...
     async def attach_page(self, target_id: str) -> Page: ...
+    async def interrupt(
+        self, page: Page, code: str, summary: str, ttl_seconds: int = 600
+    ) -> InterruptInfo: ...
+    async def resume(self, interrupt_id: str) -> InterruptInfo: ...
+    async def release(self, interrupt_id: str) -> InterruptInfo: ...
     async def websocket_url(self) -> str: ...
     async def version(self) -> str: ...
     async def close(self) -> None: ...
@@ -1033,6 +1384,13 @@ def scan_bytes(
     :func:`scan_file`."""
     ...
 
+def list_device_presets() -> list[tuple[str, int, int, float, bool]]:
+    """List named device presets as ``(name, width, height,
+    device_scale_factor, mobile)`` tuples. See
+    :func:`voidcrawl.viewport.list_device_presets` for the validated
+    Python-facing wrapper."""
+    ...
+
 # ── Exceptions ──────────────────────────────────────────────────────────
 # ruff: noqa: N818  — these are the public exception names, preserved for API compat
 
@@ -1067,6 +1425,13 @@ class NavigationTimeoutError(NavigationError):
 
 class BrowserClosedError(NavigationError): ...
 class ResponseTimeoutError(VoidCrawlError): ...
+
+class SessionInterrupted(VoidCrawlError):
+    interrupt_id: str
+
+class InterruptExpired(VoidCrawlError): ...
+class InterruptTerminal(VoidCrawlError): ...
+class InterruptNotFound(VoidCrawlError): ...
 
 class ChromeProfileBusy(VoidCrawlError):
     """Chrome's own SingletonLock prevented profile launch."""

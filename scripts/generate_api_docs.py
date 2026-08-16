@@ -9,11 +9,11 @@ Each symbol heading includes a linked GitHub source icon pointing to the
 exact line in the repository.
 
 Usage:
-    # Single combined file:
-    uv run python scripts/generate_api_docs.py --output api-reference.md
+    # Write the canonical reference in the sibling VoidCrawlDocs repository:
+    uv run python scripts/generate_api_docs.py
 
-    # Split into per-category files:
-    uv run python scripts/generate_api_docs.py --output-dir docs/reference
+    # Generate an explicitly requested local artifact when needed:
+    uv run python scripts/generate_api_docs.py --output-dir /tmp/voidcrawl-reference
 """
 
 from __future__ import annotations
@@ -92,6 +92,17 @@ def _source_text_at_ref(ref: str, rel_path: str) -> str:
         text=True,
     )
     return result.stdout
+
+
+def _existing_output_ref(path: Path, repo_url: str) -> str | None:
+    """Return the source-link ref already committed in a generated doc file."""
+    if not path.exists():
+        return None
+    pattern = re.compile(
+        rf'href="{re.escape(repo_url)}/blob/(.+?)/(?:voidcrawl|scripts)/'
+    )
+    match = pattern.search(path.read_text())
+    return match.group(1) if match else None
 
 
 def _validate_source_links(content: str, repo_url: str, ref: str) -> None:
@@ -674,7 +685,8 @@ def main() -> None:
         default="",
         help=(
             "Git ref (tag/branch/commit) for source links; defaults to the "
-            "current commit SHA"
+            "current commit SHA; --check reuses the existing output file ref "
+            "when omitted so committed docs do not chase their own commit SHA"
         ),
     )
     args = parser.parse_args()
@@ -715,9 +727,11 @@ def main() -> None:
         out_path = (
             args.output or "../VoidCrawlDocs/voidcrawl/reference/api-reference.md"
         )
+        out = Path(out_path)
+        if args.check and not args.ref:
+            ref = _existing_output_ref(out, args.github_repo) or ref
         content = generate(version, exclude, args.github_repo, ref)
         _validate_source_links(content, args.github_repo, ref)
-        out = Path(out_path)
         if args.check:
             _check_file(out, content)
             return

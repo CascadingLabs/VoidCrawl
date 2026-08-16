@@ -1,4 +1,32 @@
+## 0.5.0 (2026-08-16)
+
+### Feat
+
+- add a typed `CdpMode` per session (`Normal` / `Minimal`) controlling how aggressively chromiumoxide initializes CDP domains. `Minimal` skips the eager `Runtime.enable`, `Network.enable`, `Performance.enable`, `Log.enable`, `Target.setAutoAttach`, and isolated-world init that a clean browser never sends — the difference between clearing a Cloudflare Managed Challenge and not. Replaces the process-global `VOIDCRAWL_STEALTH_NO_RUNTIME` env gate, which is still honored for back-compat.
+- lazily escalate CDP domains instead of enabling them up front: frame-scoped evaluation turns on `Runtime` only when it needs it, and `Page::instrumentation_state()` (Python: `TabInstrumentationState`) reports `low_cdp`, `network_enabled`, `runtime_enabled`, `utility_world_enabled`, and `pre_navigation_stealth` so callers can route sensitive work to a quiet tab.
+- align launch flags with nodriver: `remote-allow-origins=*`, `disable-features=IsolateOrigins,site-per-process`, `no-pings`, `password-store=basic`, `no-service-autorun`, `disable-infobars`, and friends. Attached remote/headful sessions now skip pre-navigation stealth mutations entirely rather than re-writing UA and viewport state a real browser already has.
+- add screen recording with per-selector regions, including black-cover masks for credential fields and MP4 output in Python builds (`session_record_start` / `session_record_stop`).
+- add explicit policy interrupts — a durable interrupt-and-resume substrate letting an operator take over a live session and hand it back (`session_interrupt`, `session_interrupt_status`, `session_interrupt_resume`, `session_interrupt_release`).
+- add variable CDP viewports and device presets (`session_set_viewport`, `session_clear_viewport`, `list_device_presets`), with one-shot per-screenshot overrides that restore the prior override instead of clearing it.
+- add stateful session screenshots (`session_screenshot`) and resolve a screenshot bounding box from every Yosoi selector kind.
+- add bounded passive response expectations on borrowed `PooledTab` instances, plus CDP request-header capture with gated credential redaction and scoped cookie leases.
+- add a rootless, on-demand headful noVNC viewer, started per browser with a TTL rather than running always-on.
+
+### Fix
+
+- sandbox rootless headful Chrome by default via a shipped `seccomp-chrome.json` profile; `CHROME_NO_SANDBOX=1` remains as an explicit compatibility fallback.
+- harden attached-session discovery and launch timeouts, and refresh targets before listing pages so `pages()` honors its all-open-pages contract for tabs that predate the CDP connection.
+- pass the caller's `cdp_mode` through to launched Headless/Headful browsers instead of forcing `Minimal`, which would have silently disabled network capture and network-idle navigation for every launched session.
+
+### Refactor
+
+- reorganize examples by task (`basics/`, `pooling/`, `configuration/`, `deployment/`, `advanced/`, `recording/`) and move prose documentation out of the repository into VoidCrawlDocs, leaving a single canonical published location.
+
 ## 0.4.2 (2026-07-25)
+
+### Feat
+
+- expose bounded passive response expectations on borrowed `PooledTab` instances without creating another browser or weakening pool lease isolation.
 
 ### Fix
 
@@ -26,7 +54,6 @@
 ### Fix
 
 - preserve browser and page handles across concurrent or cancelled Python operations and report profile lease ownership diagnostics.
-
 ## 0.3.7 (2026-06-21)
 
 ### Fix

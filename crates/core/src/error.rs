@@ -35,6 +35,18 @@ pub enum VoidCrawlError {
     #[error("pdf generation failed: {0}")]
     PdfError(String),
 
+    /// A screencast recording failed to start, collect, or post-process.
+    /// Distinct from [`VoidCrawlError::ScreenshotError`] because a recording
+    /// spans time: it can fail after frames have already been collected.
+    #[error("recording failed: {0}")]
+    RecordingError(String),
+
+    /// Frames were collected but encoding them to a video/animation failed —
+    /// e.g. the `encode-ffmpeg` feature is on but no `ffmpeg` binary is on
+    /// PATH. The frames themselves survive on the returned [`Recording`].
+    #[error("recording encode failed: {0}")]
+    RecordingEncodeError(String),
+
     #[error("element not found: {0}")]
     ElementNotFound(String),
 
@@ -43,6 +55,20 @@ pub enum VoidCrawlError {
 
     #[error("ambiguous frame pattern: {0}")]
     AmbiguousFrame(String),
+
+    /// A `screenshot(selector: ...)` resolution came back
+    /// [`SelectorResolution::Empty`](crate::selector::SelectorResolution::Empty)
+    /// — nothing usable to crop. Distinct from `ElementNotFound`: the
+    /// selector may have matched, but hidden/zero-area/detached, or be a
+    /// kind (`jsonld`, `regex`) that never resolves to a rectangle.
+    #[error("selector resolved to no visible target: {0}")]
+    ElementNotVisible(String),
+
+    /// A `screenshot(selector: ...)` resolution came back
+    /// [`SelectorResolution::Ambiguous`](crate::selector::SelectorResolution::Ambiguous)
+    /// — multiple visible candidates, no `nth` to disambiguate.
+    #[error("ambiguous selector: {0}")]
+    AmbiguousSelector(String),
 
     #[error("timeout: {0}")]
     Timeout(String),
@@ -55,6 +81,27 @@ pub enum VoidCrawlError {
 
     #[error("browser closed")]
     BrowserClosed,
+
+    #[error("invalid interrupt request: {0}")]
+    InvalidInterruptRequest(String),
+
+    #[error("page is interrupted: {interrupt_id}")]
+    SessionInterrupted { interrupt_id: String },
+
+    #[error("an interrupt is already active for page target {target_id}")]
+    InterruptAlreadyActive { target_id: String },
+
+    #[error("page does not belong to this browser session")]
+    InterruptPageNotOwned,
+
+    #[error("unknown interrupt: {interrupt_id}")]
+    InterruptNotFound { interrupt_id: String },
+
+    #[error("interrupt expired: {interrupt_id}")]
+    InterruptExpired { interrupt_id: String },
+
+    #[error("interrupt {interrupt_id} is already terminal: {state}")]
+    InterruptTerminal { interrupt_id: String, state: String },
 
     #[error("chromium fetch failed: {0}")]
     FetchChromiumError(String),

@@ -25,7 +25,7 @@
 > [!WARNING]
 > VoidCrawl is research tooling for API design and web reverse engineering. **You assume all legal risk for how you use it.** Respect `robots.txt`, rate limits, and IP bans; and please don't bypass them with Tor or a VPN. Read [DISCLAIMER.md](DISCLAIMER.md) before pointing it at anything.
 
-`void_crawl` replaces Playwright/Selenium with a permissively-licensed (Apache-2.0) stack for rendering JavaScript-heavy pages. Built on [chromiumoxide](https://github.com/mattsse/chromiumoxide) with a shared Tokio runtime.
+`voidcrawl` replaces Playwright/Selenium with a permissively-licensed (Apache-2.0) stack for rendering JavaScript-heavy pages. Built on [chromiumoxide](https://github.com/mattsse/chromiumoxide) with a shared Tokio runtime.
 
 > **Used by [Yosoi](https://github.com/CascadingLabs/Yosoi)** — an AI-powered selector discovery tool for resilient web scraping.
 
@@ -54,10 +54,10 @@ Tabs are recycled, not closed — near-instant reuse across requests.
 
 ```python
 import asyncio
-from void_crawl import BrowserPool
+from voidcrawl import BrowserPool, PoolConfig
 
 async def main():
-    async with BrowserPool.from_env() as pool:
+    async with BrowserPool(PoolConfig.from_env()) as pool:
         async with pool.acquire() as tab:
             await tab.navigate("https://example.com")
             print(await tab.title())
@@ -70,10 +70,10 @@ asyncio.run(main())
 
 ```python
 import asyncio
-from void_crawl import BrowserSession
+from voidcrawl import BrowserConfig, BrowserSession
 
 async def main():
-    async with BrowserSession(headless=True) as browser:
+    async with BrowserSession(BrowserConfig(headless=True)) as browser:
         page = await browser.new_page("https://example.com")
         print(await page.title())
         await page.close()
@@ -124,7 +124,7 @@ voidcrawl-mcp --profile "Default"
 
 A ready-made Claude Code skill at `.claude/skills/voidcrawl/SKILL.md` teaches the agent when to pick voidcrawl over manual browsing, the `click_visual_coords` recipe for React forms, and how to react to typed `CaptchaDetected` errors. Claude Code picks it up automatically.
 
-See [`docs/mcp-server.md`](docs/mcp-server.md) for the full tool list and [`docs/profiles.md`](docs/profiles.md) for profile leasing.
+Run `voidcrawl-mcp --help` for the current tool list and server options.
 
 ## Docker
 
@@ -135,7 +135,7 @@ docker run -d --network host --shm-size=2g \
   ghcr.io/cascadinglabs/voidcrawl:headless-latest
 
 export CHROME_WS_URLS="http://localhost:9222,http://localhost:9223"
-python examples/basic_navigation.py
+uv run python examples/basics/basic_navigation.py
 ```
 
 Or via compose:
@@ -144,7 +144,7 @@ Or via compose:
 docker compose -f docker/docker-compose.yml up -d
 ```
 
-Available tags: `headless-latest`, `headless-<version>`, `headless-<sha>`, and the same set prefixed `headful-` for GPU + VNC (linux/amd64 only). See the [Docker & VNC guide](https://cascadinglabs.com/voidcrawl/guides/docker/) and the [Docker Config reference](https://cascadinglabs.com/voidcrawl/reference/docker-config/) for every runtime knob.
+Available tags: `headless-latest`, `headless-<version>`, `headless-<sha>`, and the same set prefixed `headful-` for GPU + local on-demand noVNC (linux/amd64 only). See the [Docker guide](https://cascadinglabs.com/voidcrawl/guides/docker/) and the [Docker Config reference](https://cascadinglabs.com/voidcrawl/reference/docker-config/) for every runtime knob.
 
 ## Testing
 
@@ -158,10 +158,7 @@ uv run pytest tests/ -v
 
 ## Documentation
 
-- [Full API reference](docs/api-reference.md)
-- [Anti-bot / CDN detection](docs/antibot.md)
-- [Challenge escalation with VNC/noVNC](docs/challenge-escalation.md)
-- [Cross-origin & closed-shadow frames](docs/cross-origin-frames.md)
+
 - [Examples](examples/)
 
 ## Community

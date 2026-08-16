@@ -59,6 +59,18 @@ fn profile_not_found_carries_searched_list() {
 }
 
 #[test]
+fn interrupt_errors_carry_redacted_lifecycle_ids() {
+    let interrupted =
+        data(VoidCrawlError::SessionInterrupted { interrupt_id: "interrupt-1".into() });
+    assert_eq!(interrupted["exception"], "SessionInterrupted");
+    assert_eq!(interrupted["interrupt_id"], "interrupt-1");
+
+    let expired = data(VoidCrawlError::InterruptExpired { interrupt_id: "interrupt-1".into() });
+    assert_eq!(expired["exception"], "InterruptExpired");
+    assert_eq!(expired["interrupt_id"], "interrupt-1");
+}
+
+#[test]
 fn plain_errors_have_no_data_payload() {
     let d = data(VoidCrawlError::BrowserClosed);
     assert_eq!(d, Value::Null);

@@ -11,9 +11,9 @@ use std::{
 };
 
 use chromiumoxide::{
-    browser::{Browser, BrowserConfig},
-    cdp::browser_protocol::target::TargetId,
-    handler::Handler,
+    browser::{Browser, BrowserConfig, CdpMode},
+    cdp::browser_protocol::target::{CreateTargetParams, TargetId},
+    handler::{Handler, HandlerConfig},
 };
 use rustls::crypto::ring::default_provider as ring_crypto_provider;
 use serde_json::Value;
@@ -21,6 +21,7 @@ use tokio::{sync::Mutex, task::JoinHandle, time};
 
 use crate::{
     error::{Result, VoidCrawlError},
+    interrupt::{InterruptInfo, InterruptRegistry, InterruptRequest},
     page::Page,
     stealth::StealthConfig,
 };
@@ -29,11 +30,11 @@ use crate::{
 /// (non-remote) session.
 ///
 /// Two groups:
-/// 1. **Anti-automation hygiene** — re-adds the safe flags we want after
-///    `disable_default_args()` (which strips chromiumoxide's
+/// 1. **Nodriver-like launch hygiene** — re-adds only the low-noise flags we
+///    want after `disable_default_args()` (which strips chromiumoxide's
 ///    `--enable-automation` / `--disable-extensions`, both instant WAF
-///    giveaways), plus the zendriver/nodriver flags known to pass real bot
-///    walls.
+///    giveaways). Avoid broad background/network/render throttling suppression:
+///    it improves crawler throughput but is less human-shaped.
 /// 2. **Hardware GPU / WebGL** — new headless disables the GPU and falls back
 ///    to SwiftShader software WebGL, which `WEBGL_debug_renderer_info` reports
 ///    as "SwiftShader" — a strong bot signal Cloudflare Turnstile weighs. These
@@ -51,10 +52,9 @@ use crate::{
 /// These are merged *before* caller `extra_args`; a caller value for the same
 /// switch replaces the default (see [`assemble_chrome_args`]).
 pub(crate) const DEFAULT_CHROME_ARGS: &[&str] = &[
-    // ── Anti-automation core ────────────────────────────────────────
-    "disable-blink-features=AutomationControlled",
-    "disable-infobars",
-    "disable-features=IsolateOrigins,site-per-process,TranslateUI",
+    // ── Nodriver-like anti-automation core ──────────────────────────
+    "remote-allow-origins=*",
+    "disable-features=IsolateOrigins,site-per-process",
     // NOTE: `Page::evaluate_js_in_frame` needs cross-origin frames to stay
     // in-process. The flag above covers ordinary cross-origin frames, but
     // Chrome *field-trial*-isolates a few origins (notably google.com, hence
@@ -63,31 +63,14 @@ pub(crate) const DEFAULT_CHROME_ARGS: &[&str] = &[
     // `extra_args=["disable-site-isolation-trials"]` — rather than a global
     // default, so the browser's isolation posture is unchanged for callers who
     // don't need it.
-    // ── Safe defaults from chromiumoxide we keep ────────────────────
-    "disable-background-networking",
-    "disable-background-timer-throttling",
-    "disable-backgrounding-occluded-windows",
+    // ── Low-noise nodriver profile hygiene ──────────────────────────
     "disable-breakpad",
-    "disable-client-side-phishing-detection",
-    "disable-component-extensions-with-background-pages",
-    "disable-default-apps",
     "disable-dev-shm-usage",
-    "disable-hang-monitor",
-    "disable-ipc-flooding-protection",
-    "disable-popup-blocking",
-    "disable-prompt-on-repost",
-    "disable-renderer-backgrounding",
-    "disable-sync",
-    "force-color-profile=srgb",
-    "metrics-recording-only",
     "no-first-run",
-    "password-store=basic",
-    "use-mock-keychain",
-    // ── Extra zendriver flags ───────────────────────────────────────
     "no-service-autorun",
     "no-default-browser-check",
     "no-pings",
-    "disable-component-update",
+    "password-store=basic",
     "disable-session-crashed-bubble",
     "disable-search-engine-choice-screen",
     "homepage=about:blank",
@@ -198,6 +181,10 @@ pub struct BrowserSessionBuilder {
     /// existing profile (e.g. one you've logged into `LinkedIn` in) and
     /// leave the directory on disk after the session ends.
     user_data_dir:     Option<PathBuf>,
+    /// How many CDP domains to eagerly enable. Defaults to
+    /// [`CdpMode::Normal`], which every capture-dependent feature needs.
+    /// See [`BrowserSessionBuilder::cdp_mode`].
+    cdp_mode:          CdpMode,
 }
 
 impl Default for BrowserSessionBuilder {
@@ -212,6 +199,7 @@ impl Default for BrowserSessionBuilder {
             window_size:       None,
             port:              None,
             user_data_dir:     None,
+            cdp_mode:          CdpMode::from_env_default(),
         }
     }
 }
@@ -297,6 +285,38 @@ impl BrowserSessionBuilder {
         self
     }
 
+    /// Choose how many CDP domains to eagerly enable for this session.
+    ///
+    /// [`CdpMode::Normal`] (the default) enables `Runtime`, `Network`,
+    /// `Performance`, `Log`, and target auto-attach up front — the behavior
+    /// every capture-dependent feature is built on.
+    ///
+    /// [`CdpMode::Minimal`] skips all of them, which is what lets a session
+    /// clear a Cloudflare Managed Challenge that a normal CDP client
+    /// cannot. It is a real trade, not a free win — in Minimal mode these
+    /// stop working:
+    ///
+    /// - [`Page::arm_response_capture`](crate::Page::arm_response_capture) and
+    ///   everything over it (`network_capture_arm` / `network_capture_wait`,
+    ///   CDP request-header capture) — no `Network.enable`, so no events arrive
+    /// - [`Page::wait_for_network_idle`](crate::Page::wait_for_network_idle)
+    /// - cross-origin `evaluate_js_in_frame` and `evaluate_function` — both
+    ///   need `Runtime` / the isolated utility world
+    /// - OOPIF and child-target auto-attach
+    ///
+    /// Navigation, screenshots, accessibility, input, and main-world
+    /// `eval_js` are unaffected.
+    pub fn cdp_mode(mut self, mode: CdpMode) -> Self {
+        self.cdp_mode = mode;
+        self
+    }
+
+    /// Shorthand for [`cdp_mode(CdpMode::Minimal)`](Self::cdp_mode). Read that
+    /// method's list of what Minimal gives up before reaching for this.
+    pub fn minimal_cdp(self) -> Self {
+        self.cdp_mode(CdpMode::Minimal)
+    }
+
     /// Override the stealth viewport dimensions.
     ///
     /// This sets the CDP device metrics override that the page reports to
@@ -320,6 +340,7 @@ impl BrowserSessionBuilder {
             self.window_size,
             self.port,
             self.user_data_dir,
+            self.cdp_mode,
         )
         .await
     }
@@ -330,6 +351,7 @@ impl BrowserSessionBuilder {
 /// Use [`BrowserSessionBuilder`] or the convenience constructors to create one.
 pub struct BrowserSession {
     browser:        Arc<Mutex<Browser>>,
+    interrupts:     Arc<InterruptRegistry>,
     _handler_task:  JoinHandle<()>,
     handler_alive:  Arc<AtomicBool>,
     stealth:        StealthConfig,
@@ -343,6 +365,9 @@ pub struct BrowserSession {
     /// Dropped after `browser` and `_handler_task`, so Chrome has already
     /// been signalled to close before the directory is deleted.
     _user_data_dir: Option<tempfile::TempDir>,
+    /// Shared with every `Page` this session creates, so screenshot capture
+    /// is serialized per-browser rather than per-tab. See [`Page::screenshot`].
+    capture_lock:   Arc<Mutex<()>>,
 }
 
 impl fmt::Debug for BrowserSession {
@@ -398,13 +423,17 @@ impl BrowserSession {
         window_size: Option<(u32, u32)>,
         port: Option<u16>,
         persistent_user_data_dir: Option<PathBuf>,
+        cdp_mode: CdpMode,
     ) -> Result<Self> {
         let mut owned_user_data_dir: Option<tempfile::TempDir> = None;
 
         let (browser, handler) = match &mode {
             BrowserMode::RemoteDebug { ws_url } => {
                 let ws = resolve_ws_url(ws_url).await?;
-                Browser::connect(&ws)
+                // `Browser::connect` hardcodes `HandlerConfig::default()`, which would
+                // re-read the environment and discard an explicit `cdp_mode`.
+                let handler_config = HandlerConfig { cdp_mode, ..HandlerConfig::default() };
+                Browser::connect_with_config(&ws, handler_config)
                     .await
                     .map_err(|e| VoidCrawlError::ConnectionFailed(e.to_string()))?
             }
@@ -412,7 +441,8 @@ impl BrowserSession {
                 // Disable chromiumoxide's DEFAULT_ARGS which include
                 // `--enable-automation` and `--disable-extensions` —
                 // both are instant giveaways to WAFs like Akamai.
-                let mut builder = BrowserConfig::builder().disable_default_args();
+                let mut builder =
+                    BrowserConfig::builder().disable_default_args().cdp_mode(cdp_mode);
 
                 // Caller-supplied persistent profile vs. ephemeral
                 // `TempDir`. The ephemeral path handles SingletonLock
@@ -469,7 +499,15 @@ impl BrowserSession {
                 // default). Lets the PyO3/Python client override any default
                 // deterministically via `BrowserConfig(extra_args=...)`. See
                 // `assemble_chrome_args` and its unit tests.
-                for a in assemble_chrome_args(&extra_args) {
+                let mut final_args = assemble_chrome_args(&extra_args);
+                if !final_args.iter().any(|a| switch_key(a) == "disable-blink-features") {
+                    // Launched Chrome reports `navigator.webdriver === true`
+                    // when controlled over CDP unless AutomationControlled is
+                    // disabled. Keep this out of Docker/attached Chrome, but
+                    // apply it to launched sessions before first navigation.
+                    final_args.push("disable-blink-features=AutomationControlled".into());
+                }
+                for a in final_args {
                     builder = builder.arg(a);
                 }
 
@@ -491,11 +529,13 @@ impl BrowserSession {
 
         Ok(Self {
             browser: Arc::new(Mutex::new(browser)),
+            interrupts: InterruptRegistry::new(),
             _handler_task: handler_task,
             handler_alive: alive,
             stealth,
             attached: matches!(mode, BrowserMode::RemoteDebug { .. }),
             _user_data_dir: owned_user_data_dir,
+            capture_lock: Arc::new(Mutex::new(())),
         })
     }
 
@@ -512,10 +552,12 @@ impl BrowserSession {
                 .new_page("about:blank")
                 .await
                 .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
-            Page::new(cdp_page)
+            Page::new(cdp_page, Arc::clone(&self.capture_lock), Arc::clone(&self.interrupts))
         }; // browser lock released before navigation
 
-        page.apply_stealth(&self.stealth).await?;
+        if let Some(stealth) = self.stealth_for_session() {
+            page.apply_stealth(&stealth).await?;
+        }
         page.navigate(url).await?;
         Ok(page)
     }
@@ -529,19 +571,110 @@ impl BrowserSession {
                 .new_page("about:blank")
                 .await
                 .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
-            Page::new(cdp_page)
+            Page::new(cdp_page, Arc::clone(&self.capture_lock), Arc::clone(&self.interrupts))
         };
-        page.apply_stealth(&self.stealth).await?;
+        if let Some(stealth) = self.stealth_for_session() {
+            page.apply_stealth(&stealth).await?;
+        }
         Ok(page)
     }
 
+    fn stealth_for_session(&self) -> Option<StealthConfig> {
+        if self.attached {
+            // Remote/headful Chrome already has native UA, window, and language
+            // state. Avoid pre-navigation mutations and keep the CDP footprint
+            // close to nodriver/a human operator.
+            return None;
+        }
+
+        let mut cfg = self.stealth.clone();
+        // Launched headless still needs UA/viewport coherence, but broad
+        // page-world instrumentation is a higher-signal automation tell.
+        cfg.use_builtin_stealth = false;
+        cfg.bypass_csp = false;
+        cfg.inject_js = None;
+        Some(cfg)
+    }
+
+    /// Open a new tab **in its own browser window**, apply stealth settings,
+    /// and navigate to `url`.
+    ///
+    /// Headless Chrome composites the frontmost tab of a window. Tabs opened
+    /// by [`BrowserSession::new_page`] share one window, so bringing any of
+    /// them to the front stops the others painting — which is why
+    /// [`Page::screenshot`](crate::Page::screenshot) serializes on a
+    /// browser-wide capture lock, and why a
+    /// [`recording`](crate::recording) on a shared-window tab goes silent as
+    /// soon as a sibling captures.
+    ///
+    /// A tab in its own window is not occluded by activity in another
+    /// window, so it keeps painting and keeps delivering screencast frames
+    /// while other tabs capture. That makes this the tab to record on when
+    /// recording has to run concurrently with other work — see
+    /// [`RecordingOptions::foreground`](crate::RecordingOptions::foreground).
+    ///
+    /// Costs a real browser window's worth of resources, so this is opt-in
+    /// rather than what `new_page` does by default.
+    pub async fn new_page_in_window(&self, url: &str) -> Result<Page> {
+        self.check_alive()?;
+        let params = CreateTargetParams::builder()
+            .url("about:blank")
+            .new_window(true)
+            .build()
+            .map_err(VoidCrawlError::PageError)?;
+        let page = {
+            let browser = self.browser.lock().await;
+            let cdp_page = browser
+                .new_page(params)
+                .await
+                .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+            Page::new(cdp_page, Arc::clone(&self.capture_lock), Arc::clone(&self.interrupts))
+        }; // browser lock released before navigation
+
+        page.apply_stealth(&self.stealth).await?;
+        page.navigate(url).await?;
+        Ok(page)
+    }
     /// List all open pages.
     pub async fn pages(&self) -> Result<Vec<Page>> {
         self.check_alive()?;
-        let browser = self.browser.lock().await;
+        let mut browser = self.browser.lock().await;
+        if self.attached {
+            // A remote-debug session may attach after its tabs already exist.
+            // `fetch_targets` queues target attachment on the handler, so wait
+            // briefly for every reported page target to become usable before
+            // returning the all-open-pages snapshot.
+            let targets = browser
+                .fetch_targets()
+                .await
+                .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+            let expected_pages = targets.iter().filter(|target| target.r#type == "page").count();
+            for attempt in 0..20 {
+                let pages =
+                    browser.pages().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+                if pages.len() >= expected_pages || attempt == 19 {
+                    return Ok(pages
+                        .into_iter()
+                        .map(|page| {
+                            Page::new(
+                                page,
+                                Arc::clone(&self.capture_lock),
+                                Arc::clone(&self.interrupts),
+                            )
+                        })
+                        .collect());
+                }
+                time::sleep(Duration::from_millis(25)).await;
+            }
+        }
         let cdp_pages =
             browser.pages().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
-        Ok(cdp_pages.into_iter().map(Page::new).collect())
+        Ok(cdp_pages
+            .into_iter()
+            .map(|page| {
+                Page::new(page, Arc::clone(&self.capture_lock), Arc::clone(&self.interrupts))
+            })
+            .collect())
     }
 
     /// The browser's CDP WebSocket endpoint (`ws://…`).
@@ -574,7 +707,38 @@ impl BrowserSession {
             .get_page(TargetId::new(target_id))
             .await
             .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
-        Ok(Page::new(cdp_page))
+        Ok(Page::new(cdp_page, Arc::clone(&self.capture_lock), Arc::clone(&self.interrupts)))
+    }
+
+    /// Mark one page as requiring explicit external review. No page action is
+    /// replayed by [`resume_interrupt`](Self::resume_interrupt).
+    pub async fn interrupt_page(
+        &self,
+        page: &Page,
+        request: InterruptRequest,
+    ) -> Result<InterruptInfo> {
+        self.check_alive()?;
+        if !page.belongs_to_interrupt_registry(&self.interrupts) {
+            return Err(VoidCrawlError::InterruptPageNotOwned);
+        }
+        self.interrupts.interrupt(page.target_id(), request).await
+    }
+
+    /// Return redacted status for an interrupt owned by this browser session.
+    pub async fn interrupt_status(&self, interrupt_id: &str) -> Result<InterruptInfo> {
+        self.interrupts.status(interrupt_id).await
+    }
+
+    /// Reactivate a previously interrupted page in this browser session.
+    pub async fn resume_interrupt(&self, interrupt_id: &str) -> Result<InterruptInfo> {
+        self.check_alive()?;
+        self.interrupts.resume(interrupt_id).await
+    }
+
+    /// Release a previously interrupted page without replaying any browser
+    /// action.
+    pub async fn release_interrupt(&self, interrupt_id: &str) -> Result<InterruptInfo> {
+        self.interrupts.release(interrupt_id).await
     }
 
     /// Get browser version string.
@@ -679,18 +843,31 @@ mod tests {
     }
 
     /// Hardware-GPU defaults are present (so headless doesn't fall back to
-    /// SwiftShader), alongside the anti-automation core. Forms are un-prefixed.
+    /// SwiftShader), alongside the low-noise nodriver launch core. Forms are
+    /// un-prefixed.
     #[test]
-    fn defaults_enable_hardware_gpu_and_antiautomation() {
+    fn defaults_enable_hardware_gpu_and_nodriver_core() {
         let args = assemble_chrome_args(&[]);
         for expected in [
+            "remote-allow-origins=*",
+            "no-service-autorun",
+            "no-pings",
+            "password-store=basic",
             "use-angle=vulkan",
             "enable-gpu",
             "ignore-gpu-blocklist",
             "disable-gpu-sandbox",
-            "disable-blink-features=AutomationControlled",
         ] {
             assert!(args.iter().any(|a| a == expected), "missing default flag: {expected}");
+        }
+        for removed in [
+            "disable-blink-features=AutomationControlled",
+            "disable-infobars",
+            "disable-background-networking",
+            "disable-renderer-backgrounding",
+            "disable-ipc-flooding-protection",
+        ] {
+            assert!(!args.iter().any(|a| a == removed), "human defaults should omit {removed}");
         }
     }
 
@@ -728,7 +905,7 @@ mod tests {
     fn override_is_in_place_and_leaves_other_defaults() {
         let args = assemble_chrome_args(&["--use-angle=gl".to_string()]);
         assert!(args.iter().any(|a| a == "enable-gpu"));
-        assert!(args.iter().any(|a| a == "disable-blink-features=AutomationControlled"));
+        assert!(args.iter().any(|a| a == "remote-allow-origins=*"));
     }
 
     /// No `extra_args` => exactly the defaults, unchanged order.

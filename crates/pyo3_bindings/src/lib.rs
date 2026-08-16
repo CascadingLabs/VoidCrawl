@@ -8,7 +8,10 @@ use std::{
     convert::Infallible,
     fmt, mem,
     path::Path,
-    sync::{Arc, Mutex as StdMutex},
+    sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -19,16 +22,25 @@ use pyo3::{
     types::{PyBytes, PyDict, PyList, PyType},
 };
 use pyo3_async_runtimes::tokio::future_into_py;
+
+mod recording;
+
+use recording::{
+    PyFrame, PyMaskReport, PyRecordedRegion, PyRecording, PyRecordingHandle,
+    build_recording_options, into_py_recording,
+};
 use serde_json::Value;
 use tokio::{sync::Mutex, task::spawn_blocking};
 use void_crawl_core::{
     AntibotEvidence, AntibotVerdict, BrowserMode, BrowserPool, BrowserSession, CapturedResponse,
-    CookieParam, DEFAULT_MAX_BYTES, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_MAX_TOTAL_RESPONSE_BYTES,
-    DeleteCookiesParams, DispatchKeyEventType, DispatchMouseEventType, DownloadCapture,
-    DownloadOutcome, MAX_PROFILE_SPLIT_COPIES, ManagedProfileSnapshot, MouseButton, Page,
-    PageResponse, PoolConfig, PooledTab, ProfileHandle, ProfileInfo, ProfileRegistry,
-    ResponseCapture, ResponseCaptureLimits, ScanConfig, ScanReport, StealthConfig, Verdict,
-    acquire_profile, list_profiles, scan_bytes, scan_path,
+    CdpMode, CookieParam, DEFAULT_MAX_BYTES, DEFAULT_MAX_RESPONSE_BYTES,
+    DEFAULT_MAX_TOTAL_RESPONSE_BYTES, DeleteCookiesParams, DispatchKeyEventType,
+    DispatchMouseEventType, DownloadCapture, DownloadOutcome, InterruptInfo, InterruptRequest,
+    MAX_PROFILE_SPLIT_COPIES, ManagedProfileSnapshot, MouseButton, Page, PageResponse, PoolConfig,
+    PooledTab, ProfileHandle, ProfileInfo, ProfileRegistry, ResponseCapture, ResponseCaptureLimits,
+    ScanConfig, ScanReport, ScrollTarget, SelectorEntry, SelectorKind, StealthConfig,
+    TabInstrumentationState, Verdict, Viewport, acquire_profile, list_profiles, scan_bytes,
+    scan_path, viewport as viewport_mod,
 };
 
 // ── Error conversion ────────────────────────────────────────────────────
@@ -44,9 +56,157 @@ pyo3::create_exception!(voidcrawl._ext, ProfileLeaseExpired, VoidCrawlError);
 pyo3::create_exception!(voidcrawl._ext, ProfileNotFound, VoidCrawlError);
 pyo3::create_exception!(voidcrawl._ext, CaptchaDetected, VoidCrawlError);
 pyo3::create_exception!(voidcrawl._ext, AntibotChallenge, VoidCrawlError);
+pyo3::create_exception!(voidcrawl._ext, SessionInterrupted, VoidCrawlError);
+pyo3::create_exception!(voidcrawl._ext, InterruptExpired, VoidCrawlError);
+pyo3::create_exception!(voidcrawl._ext, InterruptTerminal, VoidCrawlError);
+pyo3::create_exception!(voidcrawl._ext, InterruptNotFound, VoidCrawlError);
+
+/// Resolve `(preset, width, height, device_scale_factor, mobile)` kwargs —
+/// shared by `PyPage`/`PyPooledTab`'s `set_viewport` and `screenshot`
+/// methods — into a `Viewport`. Pass either `preset` (a name from
+/// `list_device_presets()`) or `width`+`height`; mixing them is an error.
+/// This is the raw substrate: the pydantic `Viewport` model in
+/// `voidcrawl/__init__.py` is where a Python caller gets enum-style
+/// validation before a call ever reaches here.
+pub(crate) fn resolve_viewport_args(
+    preset: Option<&str>,
+    width: Option<u32>,
+    height: Option<u32>,
+    device_scale_factor: Option<f64>,
+    mobile: Option<bool>,
+) -> PyResult<Viewport> {
+    match (preset, width, height) {
+        (Some(name), None, None) => viewport_mod::preset(name).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "unknown device preset {name:?}; call list_device_presets() for valid names"
+            ))
+        }),
+        (None, Some(w), Some(h)) => {
+            let mut vp = Viewport::custom(w, h);
+            vp.device_scale_factor = device_scale_factor.unwrap_or(1.0);
+            vp.mobile = mobile.unwrap_or(false);
+            vp.has_touch = vp.mobile;
+            Ok(vp)
+        }
+        (Some(_), _, _) => {
+            Err(PyValueError::new_err("preset is mutually exclusive with width/height"))
+        }
+        (None, Some(_), None) | (None, None, Some(_)) => {
+            Err(PyValueError::new_err("width and height must both be set together"))
+        }
+        (None, None, None) => Err(PyValueError::new_err("pass either preset= or width=+height=")),
+    }
+}
+
+/// Resolve the raw `selector_*` kwargs `PyPage`/`PyPooledTab`'s
+/// `screenshot()` accept into a `SelectorEntry` — a Yosoi `SelectorEntry`,
+/// field-for-field (`yosoi/models/selectors.py`), so a caller can pass
+/// `entry.model_dump()` values straight through as kwargs. This module is
+/// the raw substrate and does no validation beyond parsing `selector_type`;
+/// build a validated model on the Python side if you want enum/mutual-
+/// exclusivity checking before it crosses into Rust.
+pub(crate) fn resolve_selector_args(
+    kind: Option<&str>,
+    value: Option<String>,
+    regex: Option<String>,
+    name: Option<String>,
+    nth: Option<u32>,
+    x: Option<f64>,
+    y: Option<f64>,
+) -> PyResult<SelectorEntry> {
+    let kind = match kind {
+        Some("css") => SelectorKind::Css,
+        Some("xpath") => SelectorKind::Xpath,
+        Some("regex") => SelectorKind::Regex,
+        Some("jsonld") => SelectorKind::Jsonld,
+        Some("attr") => SelectorKind::Attr,
+        Some("global_id") => SelectorKind::GlobalId,
+        Some("role") => SelectorKind::Role,
+        Some("visual") => SelectorKind::Visual,
+        Some(other) => {
+            return Err(PyValueError::new_err(format!(
+                "unknown selector_type {other:?}; expected one of css, xpath, regex, jsonld, \
+                 attr, global_id, role, visual"
+            )));
+        }
+        None => return Err(PyValueError::new_err("selector_type is required")),
+    };
+    Ok(SelectorEntry { kind, value: value.unwrap_or_default(), regex, name, nth, x, y })
+}
+
+/// Build a `ScreenshotOptions` from the raw kwargs `PyPage`/`PyPooledTab`'s
+/// `screenshot()` accept. Shared so both bindings resolve `selector`/
+/// `viewport`/`scroll`/`full_page` identically.
+#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+fn build_screenshot_options(
+    path: Option<String>,
+    bbox: Option<(u32, u32, u32, u32)>,
+    selector_type: Option<&str>,
+    selector_value: Option<String>,
+    selector_regex: Option<String>,
+    selector_name: Option<String>,
+    selector_nth: Option<u32>,
+    selector_x: Option<f64>,
+    selector_y: Option<f64>,
+    viewport_preset: Option<&str>,
+    viewport_width: Option<u32>,
+    viewport_height: Option<u32>,
+    viewport_device_scale_factor: Option<f64>,
+    viewport_mobile: Option<bool>,
+    scroll_viewports: Option<f64>,
+    scroll_pixels: Option<i64>,
+    full_page: Option<bool>,
+) -> PyResult<void_crawl_core::ScreenshotOptions> {
+    if bbox.is_some() && selector_type.is_some() {
+        return Err(PyValueError::new_err("bbox and selector_type are mutually exclusive"));
+    }
+    let mut opts = void_crawl_core::ScreenshotOptions::default();
+    if let Some(p) = path {
+        opts = opts.with_path(p);
+    }
+    if let Some((x, y, w, h)) = bbox {
+        opts = opts.with_bbox(void_crawl_core::Bbox { x, y, width: w, height: h });
+    }
+    if selector_type.is_some() {
+        let entry = resolve_selector_args(
+            selector_type,
+            selector_value,
+            selector_regex,
+            selector_name,
+            selector_nth,
+            selector_x,
+            selector_y,
+        )?;
+        opts = opts.with_selector(entry);
+    }
+    if viewport_preset.is_some() || viewport_width.is_some() || viewport_height.is_some() {
+        let vp = resolve_viewport_args(
+            viewport_preset,
+            viewport_width,
+            viewport_height,
+            viewport_device_scale_factor,
+            viewport_mobile,
+        )?;
+        opts = opts.with_viewport(vp);
+    }
+    match (scroll_viewports, scroll_pixels) {
+        (Some(n), None) => opts = opts.with_scroll(ScrollTarget::Viewports(n)),
+        (None, Some(y)) => opts = opts.with_scroll(ScrollTarget::Pixels(y)),
+        (Some(_), Some(_)) => {
+            return Err(PyValueError::new_err(
+                "scroll_viewports and scroll_pixels are mutually exclusive",
+            ));
+        }
+        (None, None) => {}
+    }
+    if full_page == Some(false) {
+        opts = opts.viewport_only();
+    }
+    Ok(opts)
+}
 
 #[allow(clippy::needless_pass_by_value)] // used as fn pointer in map_err(to_py_err)
-fn to_py_err(e: void_crawl_core::VoidCrawlError) -> PyErr {
+pub(crate) fn to_py_err(e: void_crawl_core::VoidCrawlError) -> PyErr {
     match e {
         void_crawl_core::VoidCrawlError::NavigationTimeout {
             ref url,
@@ -97,6 +257,22 @@ fn to_py_err(e: void_crawl_core::VoidCrawlError) -> PyErr {
         }
         void_crawl_core::VoidCrawlError::AntibotChallenge { .. } => {
             AntibotChallenge::new_err(e.to_string())
+        }
+        void_crawl_core::VoidCrawlError::SessionInterrupted { ref interrupt_id } => {
+            let err = SessionInterrupted::new_err(e.to_string());
+            Python::attach(|py| {
+                let _ = err.value(py).setattr("interrupt_id", interrupt_id);
+            });
+            err
+        }
+        void_crawl_core::VoidCrawlError::InterruptExpired { .. } => {
+            InterruptExpired::new_err(e.to_string())
+        }
+        void_crawl_core::VoidCrawlError::InterruptTerminal { .. } => {
+            InterruptTerminal::new_err(e.to_string())
+        }
+        void_crawl_core::VoidCrawlError::InterruptNotFound { .. } => {
+            InterruptNotFound::new_err(e.to_string())
         }
         _ => PyRuntimeError::new_err(e.to_string()),
     }
@@ -346,6 +522,20 @@ impl PyCapturedResponse {
         self.inner.headers.iter().cloned().collect()
     }
 
+    /// Headers the browser SENT for this request, lowercased.
+    ///
+    /// This is where a request-side credential appears — an `Authorization`
+    /// bearer set by page code. Unlike the MCP tools, these values are NOT
+    /// redacted: an in-process caller is the intended holder of them. Do not
+    /// log or persist them.
+    ///
+    /// Empty when Chrome reported none. Browser-managed `Cookie` is not among
+    /// them (see `CapturedResponse::request_headers` in the core crate).
+    #[getter]
+    fn request_headers(&self) -> HashMap<String, String> {
+        self.inner.request_headers.iter().cloned().collect()
+    }
+
     #[getter]
     fn mime_type(&self) -> &str {
         &self.inner.mime_type
@@ -434,16 +624,38 @@ fn captured_body(response: &CapturedResponse) -> PyResult<Vec<u8>> {
     Ok(response.body().to_vec())
 }
 
-/// Async expectation context returned by ``Page.expect_response(s)``.
+/// Owner of a response expectation.
+///
+/// Pooled expectations retain the checkout slot so ``__aexit__`` can hold the
+/// lease while waiting and fail closed after release instead of observing a
+/// recycled tab.
+#[derive(Clone)]
+enum ResponseExpectationOwner {
+    Page(Arc<Mutex<Option<Arc<Page>>>>),
+    PooledTab { tab: Arc<Mutex<Option<PooledTab>>>, active: Arc<AtomicUsize> },
+}
+
+/// Releases a pooled expectation count even when Python cancels ``__aexit__``.
+struct ActiveResponseExpectationGuard(Arc<AtomicUsize>);
+
+impl Drop for ActiveResponseExpectationGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Async expectation context returned by ``Page.expect_response(s)`` or
+/// ``PooledTab.expect_response(s)``.
 #[pyclass(name = "ResponseExpectation")]
 pub struct PyResponseExpectation {
-    page:     Arc<Mutex<Option<Arc<Page>>>>,
-    patterns: Vec<(String, String)>,
-    timeout:  Duration,
-    limits:   ResponseCaptureLimits,
-    single:   bool,
-    capture:  Arc<Mutex<Option<ResponseCapture>>>,
-    result:   Arc<Mutex<Option<HashMap<String, CapturedResponse>>>>,
+    owner:     ResponseExpectationOwner,
+    patterns:  Vec<(String, String)>,
+    timeout:   Duration,
+    limits:    ResponseCaptureLimits,
+    single:    bool,
+    lifecycle: Arc<Mutex<()>>,
+    capture:   Arc<Mutex<Option<ResponseCapture>>>,
+    result:    Arc<Mutex<Option<HashMap<String, CapturedResponse>>>>,
 }
 
 impl fmt::Debug for PyResponseExpectation {
@@ -463,12 +675,50 @@ impl PyResponseExpectation {
         max_total_bytes: usize,
         single: bool,
     ) -> Self {
+        Self::new_for_owner(
+            ResponseExpectationOwner::Page(page),
+            patterns,
+            timeout,
+            max_response_bytes,
+            max_total_bytes,
+            single,
+        )
+    }
+
+    fn new_pooled(
+        tab: Arc<Mutex<Option<PooledTab>>>,
+        active: Arc<AtomicUsize>,
+        patterns: Vec<(String, String)>,
+        timeout: f64,
+        max_response_bytes: usize,
+        max_total_bytes: usize,
+        single: bool,
+    ) -> Self {
+        Self::new_for_owner(
+            ResponseExpectationOwner::PooledTab { tab, active },
+            patterns,
+            timeout,
+            max_response_bytes,
+            max_total_bytes,
+            single,
+        )
+    }
+
+    fn new_for_owner(
+        owner: ResponseExpectationOwner,
+        patterns: Vec<(String, String)>,
+        timeout: f64,
+        max_response_bytes: usize,
+        max_total_bytes: usize,
+        single: bool,
+    ) -> Self {
         Self {
-            page,
+            owner,
             patterns,
             timeout: Duration::from_secs_f64(timeout),
             limits: ResponseCaptureLimits { max_response_bytes, max_total_bytes },
             single,
+            lifecycle: Arc::new(Mutex::new(())),
             capture: Arc::new(Mutex::new(None)),
             result: Arc::new(Mutex::new(None)),
         }
@@ -478,27 +728,54 @@ impl PyResponseExpectation {
 #[pymethods]
 impl PyResponseExpectation {
     fn __aenter__<'py>(slf: Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let (page_slot, patterns, timeout, limits, capture_slot) = {
+        let (owner, patterns, timeout, limits, lifecycle, capture_slot) = {
             let this = slf.borrow();
             (
-                Arc::clone(&this.page),
+                this.owner.clone(),
                 this.patterns.clone(),
                 this.timeout,
                 this.limits,
+                Arc::clone(&this.lifecycle),
                 Arc::clone(&this.capture),
             )
         };
         let slf_ref = slf.into_any().unbind();
         future_into_py(py, async move {
-            let page = page_slot
-                .lock()
-                .await
-                .as_ref()
-                .cloned()
-                .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
-            let capture =
-                page.expect_responses(patterns, timeout, limits).await.map_err(to_py_err)?;
-            *capture_slot.lock().await = Some(capture);
+            // Serialize enter/exit on this expectation so its tab and capture
+            // locks can never be acquired in opposite order by concurrent misuse.
+            let _lifecycle = lifecycle.lock().await;
+            let capture = match &owner {
+                ResponseExpectationOwner::Page(page_slot) => {
+                    let page = page_slot
+                        .lock()
+                        .await
+                        .as_ref()
+                        .cloned()
+                        .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
+                    page.expect_responses(patterns, timeout, limits).await.map_err(to_py_err)?
+                }
+                ResponseExpectationOwner::PooledTab { tab: tab_slot, active } => {
+                    let tab = tab_slot.lock().await;
+                    let tab = tab
+                        .as_ref()
+                        .ok_or_else(|| PyRuntimeError::new_err("tab has been released"))?;
+                    let capture = tab
+                        .page
+                        .expect_responses(patterns, timeout, limits)
+                        .await
+                        .map_err(to_py_err)?;
+                    active.fetch_add(1, Ordering::AcqRel);
+                    capture
+                }
+            };
+            let mut slot = capture_slot.lock().await;
+            if slot.is_some() {
+                if let ResponseExpectationOwner::PooledTab { active, .. } = &owner {
+                    active.fetch_sub(1, Ordering::AcqRel);
+                }
+                return Err(PyRuntimeError::new_err("response expectation was already entered"));
+            }
+            *slot = Some(capture);
             Ok(slf_ref)
         })
     }
@@ -513,17 +790,46 @@ impl PyResponseExpectation {
         _exc_tb: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let failed = exc_type.is_some();
+        let owner = self.owner.clone();
+        let lifecycle = Arc::clone(&self.lifecycle);
         let capture_slot = Arc::clone(&self.capture);
         let result_slot = Arc::clone(&self.result);
         future_into_py(py, async move {
+            let _lifecycle = lifecycle.lock().await;
             let capture = capture_slot.lock().await.take();
             if failed {
+                let was_entered = capture.is_some();
                 drop(capture);
+                if let (true, ResponseExpectationOwner::PooledTab { active, .. }) =
+                    (was_entered, owner)
+                {
+                    active.fetch_sub(1, Ordering::AcqRel);
+                }
                 return Ok(false);
             }
             let capture = capture
                 .ok_or_else(|| PyRuntimeError::new_err("response expectation was not entered"))?;
-            let responses = capture.wait().await.map_err(to_py_err)?;
+            // Once the capture leaves its slot, cancellation drops the Rust future.
+            // Keep decrement ownership in an RAII guard so a cancelled Python task
+            // cannot permanently poison release of the borrowed tab.
+            let _active_guard = match &owner {
+                ResponseExpectationOwner::PooledTab { active, .. } => {
+                    Some(ActiveResponseExpectationGuard(Arc::clone(active)))
+                }
+                ResponseExpectationOwner::Page(_) => None,
+            };
+            let responses = match owner {
+                ResponseExpectationOwner::Page(_) => capture.wait().await.map_err(to_py_err)?,
+                ResponseExpectationOwner::PooledTab { tab: tab_slot, .. } => {
+                    // Hold the checkout slot while waiting so the pool cannot release,
+                    // reset, or lend this tab to another caller mid-expectation.
+                    let tab = tab_slot.lock().await;
+                    if tab.is_none() {
+                        return Err(PyRuntimeError::new_err("tab has been released"));
+                    }
+                    capture.wait().await.map_err(to_py_err)?
+                }
+            };
             *result_slot.lock().await = Some(responses);
             Ok(false)
         })
@@ -559,6 +865,52 @@ impl PyResponseExpectation {
     }
 }
 
+/// Per-tab CDP instrumentation state for routing sensitive vs instrumented
+/// work.
+#[pyclass(name = "TabInstrumentationState", frozen)]
+#[derive(Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Python state snapshot mirrors core routing flags"
+)]
+pub struct PyTabInstrumentationState {
+    #[pyo3(get)]
+    pub low_cdp:                bool,
+    #[pyo3(get)]
+    pub network_enabled:        bool,
+    #[pyo3(get)]
+    pub runtime_enabled:        bool,
+    #[pyo3(get)]
+    pub utility_world_enabled:  bool,
+    #[pyo3(get)]
+    pub pre_navigation_stealth: bool,
+}
+
+#[pymethods]
+impl PyTabInstrumentationState {
+    fn __repr__(&self) -> String {
+        format!(
+            "TabInstrumentationState(low_cdp={}, network_enabled={}, runtime_enabled={}, utility_world_enabled={}, pre_navigation_stealth={})",
+            self.low_cdp,
+            self.network_enabled,
+            self.runtime_enabled,
+            self.utility_world_enabled,
+            self.pre_navigation_stealth,
+        )
+    }
+}
+
+impl From<TabInstrumentationState> for PyTabInstrumentationState {
+    fn from(state: TabInstrumentationState) -> Self {
+        Self {
+            low_cdp:                state.low_cdp,
+            network_enabled:        state.network_enabled,
+            runtime_enabled:        state.runtime_enabled,
+            utility_world_enabled:  state.utility_world_enabled,
+            pre_navigation_stealth: state.pre_navigation_stealth,
+        }
+    }
+}
 // ── DownloadOutcome ─────────────────────────────────────────────────────
 
 /// Python-visible result of `Page.download()` / `PooledTab.download()`.
@@ -719,6 +1071,19 @@ fn parse_key_event_type(s: &str) -> PyResult<DispatchKeyEventType> {
 
 // ── Shared launch logic ─────────────────────────────────────────────────
 
+/// Parse the Python-facing `cdp_mode` string. `None` leaves the core default
+/// (which honors `VOIDCRAWL_STEALTH_NO_RUNTIME`) in place.
+fn parse_cdp_mode(mode: Option<&str>) -> PyResult<Option<CdpMode>> {
+    match mode {
+        None => Ok(None),
+        Some("normal") => Ok(Some(CdpMode::Normal)),
+        Some("minimal") => Ok(Some(CdpMode::Minimal)),
+        Some(other) => Err(PyValueError::new_err(format!(
+            "cdp_mode must be 'normal' or 'minimal', got {other:?}"
+        ))),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn do_launch(
     inner: Arc<Mutex<Option<Arc<BrowserSession>>>>,
@@ -730,12 +1095,16 @@ async fn do_launch(
     extra_args: Vec<String>,
     user_data_dir: Option<String>,
     port: Option<u16>,
+    cdp_mode: Option<CdpMode>,
 ) -> PyResult<()> {
     let stealth =
         if stealth_enabled { StealthConfig::chrome_like() } else { StealthConfig::none() };
 
     let mut builder = BrowserSession::builder().mode(mode).stealth(stealth);
 
+    if let Some(m) = cdp_mode {
+        builder = builder.cdp_mode(m);
+    }
     if let Some(p) = port {
         builder = builder.port(p);
     }
@@ -944,6 +1313,21 @@ impl PyPage {
         })
     }
 
+    /// Return this tab's CDP instrumentation state for routing/debugging.
+    fn instrumentation_state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let page = inner
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
+            let state = page.instrumentation_state();
+            inner.lock().await.replace(page);
+            Ok(PyTabInstrumentationState::from(state))
+        })
+    }
+
     /// Evaluate a JavaScript expression and return the result as a native
     /// Python object.
     ///
@@ -1015,19 +1399,106 @@ impl PyPage {
         with_page_map!(self, py, |page| page.screenshot_png(), |bytes| PyBytesResult(bytes))
     }
 
-    /// Take a PNG screenshot with optional disk output and/or cropping.
+    /// Take a PNG screenshot with optional disk output, cropping, a one-shot
+    /// device/viewport override, scrolling, and/or viewport-only capture.
     ///
     /// Args:
     ///     path: If set, writes PNG to this path and returns the path as a
     ///         string. If omitted, returns raw bytes.
     ///     bbox: Optional ``(x, y, width, height)`` in CSS pixels to crop.
-    #[pyo3(signature = (path=None, bbox=None))]
+    ///         With ``scroll_viewports``/``scroll_pixels`` set, ``x``/``y``
+    ///         are relative to wherever that scroll lands. Mutually
+    ///         exclusive with ``selector_type``.
+    ///     selector_type: Crop to a Yosoi selector's resolved rectangle
+    ///         instead of an explicit ``bbox`` — one of ``"css"``,
+    ///         ``"xpath"``, ``"regex"``, ``"jsonld"``, ``"attr"``,
+    ///         ``"global_id"``, ``"role"``, ``"visual"``. Mutually
+    ///         exclusive with ``bbox``. A selector that matches nothing, is
+    ///         ambiguous, or is inherently non-visual (``jsonld``/
+    ///         ``regex``) raises rather than silently cropping an
+    ///         arbitrary target. Prefer building a validated
+    ///         ``voidcrawl.viewport``-style pydantic model on the Python
+    ///         side and unpacking its fields here (this layer does no
+    ///         enum/mutual-exclusivity validation beyond parsing the type).
+    ///     selector_value: CSS selector / XPath expression, depending on
+    ///         ``selector_type`` (unused for ``role``/``visual``/``jsonld``/
+    ///         ``regex``, which use ``name``/``x``/``y``/``regex`` instead).
+    ///     selector_regex: Regex pattern (``selector_type="regex"`` only —
+    ///         currently always resolves to "empty"; not cropped).
+    ///     selector_name: Accessible name (``role``), attribute name
+    ///         (``attr`` — metadata only, not part of the DOM query), or
+    ///         id-prefix filter (``global_id``).
+    ///     selector_nth: 0-based index to disambiguate when a selector
+    ///         matches more than one visible target.
+    ///     selector_x, selector_y: CSS-pixel point (``selector_type="visual"``
+    ///         only) — resolves to an exact 1x1 box.
+    ///     viewport_preset: Named device (see :func:`list_device_presets`),
+    ///         e.g. ``"iPhone 16 Pro Max"``. Mutually exclusive with
+    ///         ``viewport_width``/``viewport_height``. One-shot: restores
+    ///         whatever viewport was active before, even on error.
+    ///     viewport_width, viewport_height: Custom one-shot viewport size in
+    ///         CSS pixels. Both required together.
+    ///     viewport_device_scale_factor: DPR for a custom viewport
+    ///         (default 1.0). Ignored with ``viewport_preset``.
+    ///     viewport_mobile: Emulate a mobile viewport for a custom size —
+    ///         also enables touch (default ``False``). Ignored with
+    ///         ``viewport_preset``.
+    ///     scroll_viewports: Scroll to N viewport-heights from the top
+    ///         before capturing (``2.0`` = "scrolled down twice"). Mutually
+    ///         exclusive with ``scroll_pixels``. Restored after capture.
+    ///     scroll_pixels: Scroll to an absolute pixel Y before capturing.
+    ///     full_page: Capture the full scrollable page (default ``True``).
+    ///         Pass ``False`` to capture only the visible viewport. Ignored
+    ///         when ``bbox``/``selector_type`` is set.
+    #[pyo3(signature = (
+        path=None, bbox=None,
+        selector_type=None, selector_value=None, selector_regex=None, selector_name=None,
+        selector_nth=None, selector_x=None, selector_y=None,
+        viewport_preset=None, viewport_width=None, viewport_height=None,
+        viewport_device_scale_factor=None, viewport_mobile=None,
+        scroll_viewports=None, scroll_pixels=None, full_page=None,
+    ))]
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
     fn screenshot<'py>(
         &self,
         py: Python<'py>,
         path: Option<String>,
         bbox: Option<(u32, u32, u32, u32)>,
+        selector_type: Option<String>,
+        selector_value: Option<String>,
+        selector_regex: Option<String>,
+        selector_name: Option<String>,
+        selector_nth: Option<u32>,
+        selector_x: Option<f64>,
+        selector_y: Option<f64>,
+        viewport_preset: Option<String>,
+        viewport_width: Option<u32>,
+        viewport_height: Option<u32>,
+        viewport_device_scale_factor: Option<f64>,
+        viewport_mobile: Option<bool>,
+        scroll_viewports: Option<f64>,
+        scroll_pixels: Option<i64>,
+        full_page: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = build_screenshot_options(
+            path,
+            bbox,
+            selector_type.as_deref(),
+            selector_value,
+            selector_regex,
+            selector_name,
+            selector_nth,
+            selector_x,
+            selector_y,
+            viewport_preset.as_deref(),
+            viewport_width,
+            viewport_height,
+            viewport_device_scale_factor,
+            viewport_mobile,
+            scroll_viewports,
+            scroll_pixels,
+            full_page,
+        )?;
         let inner = Arc::clone(&self.inner);
         future_into_py(py, async move {
             let page = inner
@@ -1036,16 +1507,255 @@ impl PyPage {
                 .as_ref()
                 .cloned()
                 .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
-            let mut opts = void_crawl_core::ScreenshotOptions::default();
-            if let Some(p) = path {
-                opts = opts.with_path(p);
-            }
-            if let Some((x, y, w, h)) = bbox {
-                opts = opts.with_bbox(void_crawl_core::Bbox { x, y, width: w, height: h });
-            }
             let result = page.screenshot(opts).await.map_err(to_py_err)?;
             Ok(PyScreenshotOutput(result))
         })
+    }
+
+    /// Record this page for ``duration_secs`` and return a
+    /// :class:`Recording`.
+    ///
+    /// The moving-picture counterpart to :meth:`screenshot`, with the same
+    /// ``viewport_*`` / ``scroll_*`` / ``bbox`` kwargs. Two differences,
+    /// both forced by CDP's screencast:
+    ///
+    /// * No ``full_page`` — a screencast only ever contains the viewport. Use
+    ///   ``viewport_*`` for a bigger visible area, or ``scroll_*`` to choose
+    ///   which part of a long page is on screen.
+    /// * ``selectors`` is a **list**: each entry becomes its own cropped region
+    ///   in ``recording.regions``, all cut from one screencast. Each is
+    ///   resolved to a rectangle once, at start, then held fixed.
+    ///
+    /// Frames arrive when Chrome paints, not on a clock, so ``fps`` is a
+    /// ceiling rather than a guarantee and a static page yields very few
+    /// frames. Every frame carries its real ``offset_ms``.
+    ///
+    /// Args:
+    ///     duration_secs: How long to record (default 30).
+    ///     selectors: List of Yosoi ``SelectorEntry``-shaped dicts to crop
+    ///         to, one region each. Mutually exclusive with ``bbox``.
+    ///     bbox: ``(x, y, width, height)`` in CSS pixels, **viewport
+    ///         relative** (unlike :meth:`screenshot`'s page-relative bbox,
+    ///         since a screencast frame only contains the viewport).
+    ///     masks: Rectangles to paint solid black in every frame, before
+    ///         anything is cropped, written, or encoded. Each entry is
+    ///         either a selector dict (``{"type": "css", "value":
+    ///         "#password"}``) or ``{"bbox": (x, y, w, h)}`` /
+    ///         ``{"selector": {...}, "track": False, "label": "pw"}``.
+    ///         Orthogonal to ``bbox``/``selectors``: crop to the form and
+    ///         mask a field inside it. Unlike a crop region, a selector mask
+    ///         is re-resolved while recording, so it keeps covering an
+    ///         element that moves; a selector that resolves to nothing fails
+    ///         the call rather than leaving a hole. What each mask actually
+    ///         did is reported in ``recording.masks``.
+    ///
+    ///         This is a geometric primitive, not a redaction policy: it
+    ///         covers exactly what you name and reports what it covered. It
+    ///         does not decide what is sensitive, so a masked recording is
+    ///         not thereby a safe-to-share one.
+    ///     mask_pad: Outward padding in CSS pixels on every mask, to swallow
+    ///         antialiasing at the edges (default 2). Set 0 for the exact
+    ///         rectangle.
+    ///     fps: Frame-rate ceiling (default 10).
+    ///     frame_format: ``"jpeg"`` (default) or ``"png"``.
+    ///     quality: JPEG quality 1-100 (default 80).
+    ///     output_dir: Directory for encoded artifacts and, with
+    ///         ``write_frames=True``, the frames themselves.
+    ///     encode: List of ``"gif"`` / ``"mp4"`` / ``"webm"``. Requires
+    ///         ``output_dir``, and the matching cargo feature at build time —
+    ///         otherwise this raises rather than silently producing
+    ///         nothing. The frames are always available regardless.
+    ///     foreground: Force whether to pin the tab to the foreground and
+    ///         hold the browser-wide capture lock. Leave unset to detect it:
+    ///         a tab sharing its window must be foregrounded to paint at
+    ///         all, while a tab alone in its window records at full rate
+    ///         concurrently with everything else.
+    ///     max_frames: In-memory frame cap (default 900).
+    #[pyo3(signature = (duration_secs=None, selectors=None, bbox=None, masks=None,
+        mask_pad=None, viewport_preset=None,
+        viewport_width=None, viewport_height=None, viewport_device_scale_factor=None,
+        viewport_mobile=None, scroll_viewports=None, scroll_pixels=None, fps=None,
+        max_frames=None, frame_format=None, quality=None, output_dir=None, write_frames=None,
+        foreground=None, encode=None))]
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+    fn record<'py>(
+        &self,
+        py: Python<'py>,
+        duration_secs: Option<f64>,
+        selectors: Option<Vec<Py<PyAny>>>,
+        bbox: Option<(u32, u32, u32, u32)>,
+        masks: Option<Vec<Py<PyAny>>>,
+        mask_pad: Option<u32>,
+        viewport_preset: Option<String>,
+        viewport_width: Option<u32>,
+        viewport_height: Option<u32>,
+        viewport_device_scale_factor: Option<f64>,
+        viewport_mobile: Option<bool>,
+        scroll_viewports: Option<f64>,
+        scroll_pixels: Option<i64>,
+        fps: Option<u8>,
+        max_frames: Option<usize>,
+        frame_format: Option<String>,
+        quality: Option<u8>,
+        output_dir: Option<String>,
+        write_frames: Option<bool>,
+        foreground: Option<bool>,
+        encode: Option<Vec<String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = build_recording_options(
+            output_dir,
+            bbox,
+            selectors,
+            masks,
+            mask_pad,
+            viewport_preset.as_deref(),
+            viewport_width,
+            viewport_height,
+            viewport_device_scale_factor,
+            viewport_mobile,
+            scroll_viewports,
+            scroll_pixels,
+            fps,
+            duration_secs,
+            max_frames,
+            frame_format.as_deref(),
+            quality,
+            write_frames,
+            foreground,
+            encode,
+            py,
+        )?;
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let page = inner
+                .lock()
+                .await
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
+            let recording = page.record(opts).await.map_err(to_py_err)?;
+            Python::attach(|py| into_py_recording(py, recording))
+        })
+    }
+
+    /// Begin recording and return a :class:`RecordingHandle` to stop it.
+    ///
+    /// Use this instead of :meth:`record` when you need to *drive* the page
+    /// while it records — click, type, navigate, then ``await
+    /// handle.stop()``. Takes the same kwargs as :meth:`record`, where
+    /// ``duration_secs`` becomes a hard upper bound rather than the exact
+    /// length.
+    #[pyo3(signature = (duration_secs=None, selectors=None, bbox=None, masks=None,
+        mask_pad=None, viewport_preset=None,
+        viewport_width=None, viewport_height=None, viewport_device_scale_factor=None,
+        viewport_mobile=None, scroll_viewports=None, scroll_pixels=None, fps=None,
+        max_frames=None, frame_format=None, quality=None, output_dir=None, write_frames=None,
+        foreground=None, encode=None))]
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+    fn start_recording<'py>(
+        &self,
+        py: Python<'py>,
+        duration_secs: Option<f64>,
+        selectors: Option<Vec<Py<PyAny>>>,
+        bbox: Option<(u32, u32, u32, u32)>,
+        masks: Option<Vec<Py<PyAny>>>,
+        mask_pad: Option<u32>,
+        viewport_preset: Option<String>,
+        viewport_width: Option<u32>,
+        viewport_height: Option<u32>,
+        viewport_device_scale_factor: Option<f64>,
+        viewport_mobile: Option<bool>,
+        scroll_viewports: Option<f64>,
+        scroll_pixels: Option<i64>,
+        fps: Option<u8>,
+        max_frames: Option<usize>,
+        frame_format: Option<String>,
+        quality: Option<u8>,
+        output_dir: Option<String>,
+        write_frames: Option<bool>,
+        foreground: Option<bool>,
+        encode: Option<Vec<String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = build_recording_options(
+            output_dir,
+            bbox,
+            selectors,
+            masks,
+            mask_pad,
+            viewport_preset.as_deref(),
+            viewport_width,
+            viewport_height,
+            viewport_device_scale_factor,
+            viewport_mobile,
+            scroll_viewports,
+            scroll_pixels,
+            fps,
+            duration_secs,
+            max_frames,
+            frame_format.as_deref(),
+            quality,
+            write_frames,
+            foreground,
+            encode,
+            py,
+        )?;
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let page = inner
+                .lock()
+                .await
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
+            let handle = page.start_recording(opts).await.map_err(to_py_err)?;
+            Ok(PyRecordingHandle::new(handle, page))
+        })
+    }
+
+    /// Whether this tab is the only one in its browser window.
+    ///
+    /// Chrome composites only a window's frontmost tab, so a page sharing
+    /// its window can't paint while a sibling is active. A page alone in its
+    /// window keeps painting regardless — which is what lets :meth:`record`
+    /// run concurrently without holding the browser's capture lock.
+    fn alone_in_window<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        with_page_map!(self, py, |page| page.alone_in_window(), |v| v)
+    }
+
+    /// Persistently override this page's CDP viewport — dimensions, DPR,
+    /// mobile/touch identity, and (for a preset) a matching UA. Stays in
+    /// effect across subsequent navigate/click/screenshot calls until
+    /// :meth:`clear_viewport` or another `set_viewport` call. For a
+    /// one-off override scoped to a single capture, pass ``viewport_*``
+    /// kwargs to :meth:`screenshot` instead.
+    ///
+    /// Args:
+    ///     preset: Named device (see :func:`list_device_presets`).
+    ///         Mutually exclusive with ``width``/``height``.
+    ///     width, height: Custom viewport size in CSS pixels.
+    ///     device_scale_factor: DPR for a custom viewport (default 1.0).
+    ///     mobile: Emulate a mobile viewport for a custom size (default
+    ///         ``False``; also enables touch).
+    #[pyo3(signature = (preset=None, width=None, height=None, device_scale_factor=None, mobile=None))]
+    #[allow(clippy::needless_pass_by_value)]
+    fn set_viewport<'py>(
+        &self,
+        py: Python<'py>,
+        preset: Option<String>,
+        width: Option<u32>,
+        height: Option<u32>,
+        device_scale_factor: Option<f64>,
+        mobile: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let viewport =
+            resolve_viewport_args(preset.as_deref(), width, height, device_scale_factor, mobile)?;
+        with_page_map!(self, py, |page| page.set_viewport(viewport), |_r| ())
+    }
+
+    /// Clear a :meth:`set_viewport` override, returning to the session's
+    /// launch-time default viewport.
+    fn clear_viewport<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        with_page_map!(self, py, |page| page.clear_viewport(), |_r| ())
     }
 
     /// Probe DOM for captcha / bot-wall markers. Returns the kind tag
@@ -1539,6 +2249,42 @@ impl PyPage {
     }
 }
 
+// ── Interrupt results ───────────────────────────────────────────────────
+
+/// Redacted state returned after a page is explicitly interrupted, resumed,
+/// or released. This contains no CDP endpoint, cookies, or credentials.
+#[pyclass(name = "InterruptInfo")]
+#[derive(Debug)]
+pub struct PyInterruptInfo {
+    #[pyo3(get)]
+    interrupt_id:  String,
+    #[pyo3(get)]
+    target_id:     String,
+    #[pyo3(get)]
+    code:          String,
+    #[pyo3(get)]
+    summary:       String,
+    #[pyo3(get)]
+    state:         String,
+    #[pyo3(get)]
+    expires_in_ms: u64,
+}
+
+impl From<InterruptInfo> for PyInterruptInfo {
+    fn from(info: InterruptInfo) -> Self {
+        #[allow(clippy::cast_possible_truncation)]
+        let expires_in_ms = info.expires_in.as_millis().min(u128::from(u64::MAX)) as u64;
+        Self {
+            interrupt_id: info.interrupt_id,
+            target_id: info.target_id,
+            code: info.code,
+            summary: info.summary,
+            state: info.state.as_str().into(),
+            expires_in_ms,
+        }
+    }
+}
+
 // ── PyBrowserSession ────────────────────────────────────────────────────
 
 /// Browser session that wraps a Chromium instance via CDP.
@@ -1562,6 +2308,7 @@ pub struct PyBrowserSession {
     extra_args:        Vec<String>,
     user_data_dir:     Option<String>,
     port:              Option<u16>,
+    cdp_mode:          Option<CdpMode>,
 }
 
 impl fmt::Debug for PyBrowserSession {
@@ -1586,8 +2333,16 @@ impl PyBrowserSession {
     ///     port: Pin Chrome's `--remote-debugging-port` so another process can
     ///         attach to this browser via its `ws_url`. `None` lets the OS pick
     ///         a free ephemeral port.
+    ///     `cdp_mode`: `"normal"` (default) or `"minimal"`. `"minimal"` skips
+    /// the         eager `Runtime`/`Network`/`Performance`/`Log` domain
+    /// enables that         make a CDP browser detectable, which is what
+    /// lets a session clear a         Cloudflare Managed Challenge. It is a
+    /// trade: response capture,         `wait_for_network_idle`,
+    /// cross-origin frame eval, and OOPIF         auto-attach are
+    /// unavailable in that mode. `None` keeps the default         (and
+    /// still honors `VOIDCRAWL_STEALTH_NO_RUNTIME`).
     #[new]
-    #[pyo3(signature = (*, headless=true, ws_url=None, stealth=true, no_sandbox=false, proxy=None, chrome_executable=None, extra_args=None, user_data_dir=None, port=None))]
+    #[pyo3(signature = (*, headless=true, ws_url=None, stealth=true, no_sandbox=false, proxy=None, chrome_executable=None, extra_args=None, user_data_dir=None, port=None, cdp_mode=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         headless: bool,
@@ -1599,7 +2354,8 @@ impl PyBrowserSession {
         extra_args: Option<Vec<String>>,
         user_data_dir: Option<String>,
         port: Option<u16>,
-    ) -> Self {
+        cdp_mode: Option<&str>,
+    ) -> PyResult<Self> {
         let mode = if let Some(url) = ws_url {
             BrowserMode::RemoteDebug { ws_url: url }
         } else if headless {
@@ -1608,7 +2364,7 @@ impl PyBrowserSession {
             BrowserMode::Headful
         };
 
-        Self {
+        Ok(Self {
             inner: Arc::new(Mutex::new(None)),
             mode,
             stealth_enabled: stealth,
@@ -1618,7 +2374,8 @@ impl PyBrowserSession {
             extra_args: extra_args.unwrap_or_default(),
             user_data_dir,
             port,
-        }
+            cdp_mode: parse_cdp_mode(cdp_mode)?,
+        })
     }
 
     /// Launch (or connect to) the browser. Called automatically by
@@ -1633,6 +2390,7 @@ impl PyBrowserSession {
         let extra_args = self.extra_args.clone();
         let user_data_dir = self.user_data_dir.clone();
         let port = self.port;
+        let cdp_mode = self.cdp_mode;
 
         future_into_py(py, async move {
             do_launch(
@@ -1645,6 +2403,7 @@ impl PyBrowserSession {
                 extra_args,
                 user_data_dir,
                 port,
+                cdp_mode,
             )
             .await
         })
@@ -1675,6 +2434,31 @@ impl PyBrowserSession {
         })
     }
 
+    /// Open a new tab in its **own browser window** and navigate to ``url``.
+    ///
+    /// Chrome composites only the frontmost tab of a window, so tabs from
+    /// :meth:`new_page` — which share one window — can't all paint at once.
+    /// A tab alone in its window keeps painting whatever other windows do,
+    /// which is what lets :meth:`Page.record` run concurrently instead of
+    /// holding the browser's capture lock.
+    ///
+    /// Costs a real window's worth of resources, so it's opt-in. Note that a
+    /// later :meth:`new_page` targets the most recently active window and can
+    /// land inside this one — create recording windows last, or check
+    /// :meth:`Page.alone_in_window`.
+    fn new_page_in_window<'py>(&self, py: Python<'py>, url: String) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let session = inner.lock().await.as_ref().cloned().ok_or_else(|| {
+                PyRuntimeError::new_err(
+                    "browser not launched — use `async with` or call launch() first",
+                )
+            })?;
+            let page = session.new_page_in_window(&url).await.map_err(to_py_err)?;
+            Ok(PyPage::new(page))
+        })
+    }
+
     /// Adopt an existing tab by its CDP ``target_id`` (see
     /// :meth:`Page.target_id`).
     ///
@@ -1692,6 +2476,84 @@ impl PyBrowserSession {
             })?;
             let page = session.attach_page(&target_id).await.map_err(to_py_err)?;
             Ok(PyPage::new(page))
+        })
+    }
+
+    /// Explicitly park one page for external operator review. This uses the
+    /// existing page handle; it neither re-attaches the target nor navigates.
+    #[pyo3(signature = (page, code, summary, ttl_seconds=600))]
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "PyO3 requires extracting a PyRef argument by value"
+    )]
+    fn interrupt<'py>(
+        &self,
+        py: Python<'py>,
+        page: PyRef<'py, PyPage>,
+        code: String,
+        summary: String,
+        ttl_seconds: u64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        let page_inner = Arc::clone(&page.inner);
+        future_into_py(py, async move {
+            let session = inner
+                .lock()
+                .await
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| PyRuntimeError::new_err("browser not launched"))?;
+            let page = page_inner
+                .lock()
+                .await
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
+            let info = session
+                .interrupt_page(
+                    page.as_ref(),
+                    InterruptRequest { code, summary, ttl: Duration::from_secs(ttl_seconds) },
+                )
+                .await
+                .map_err(to_py_err)?;
+            Ok(PyInterruptInfo::from(info))
+        })
+    }
+
+    /// Reactivate the page associated with an interrupt ID. This never
+    /// navigates or replays the action that caused the interruption.
+    fn resume<'py>(&self, py: Python<'py>, interrupt_id: String) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let session = inner
+                .lock()
+                .await
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| PyRuntimeError::new_err("browser not launched"))?;
+            session
+                .resume_interrupt(&interrupt_id)
+                .await
+                .map(PyInterruptInfo::from)
+                .map_err(to_py_err)
+        })
+    }
+
+    /// Mark an interrupt released without replaying any browser action.
+    fn release<'py>(&self, py: Python<'py>, interrupt_id: String) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let session = inner
+                .lock()
+                .await
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| PyRuntimeError::new_err("browser not launched"))?;
+            session
+                .release_interrupt(&interrupt_id)
+                .await
+                .map(PyInterruptInfo::from)
+                .map_err(to_py_err)
         })
     }
 
@@ -1751,6 +2613,7 @@ impl PyBrowserSession {
             extra_args,
             user_data_dir,
             port,
+            cdp_mode,
         ) = {
             let this = slf.borrow();
             (
@@ -1763,6 +2626,7 @@ impl PyBrowserSession {
                 this.extra_args.clone(),
                 this.user_data_dir.clone(),
                 this.port,
+                this.cdp_mode,
             )
         };
         let slf_ref = slf.into_any().unbind();
@@ -1778,6 +2642,7 @@ impl PyBrowserSession {
                 extra_args,
                 user_data_dir,
                 port,
+                cdp_mode,
             )
             .await?;
             Ok(slf_ref)
@@ -1821,7 +2686,8 @@ impl PyBrowserSession {
 /// is handled automatically by the context manager.
 #[pyclass(name = "PooledTab")]
 pub struct PyPooledTab {
-    inner:     Arc<Mutex<Option<PooledTab>>>,
+    inner: Arc<Mutex<Option<PooledTab>>>,
+    active_response_expectations: Arc<AtomicUsize>,
     /// Snapshot of `use_count` at the moment the tab was acquired.
     #[pyo3(get)]
     use_count: u32,
@@ -1882,6 +2748,51 @@ impl PyPooledTab {
         with_pooled_page!(self, py, |page| page.navigate(&url))
     }
 
+    /// Arm one passive response expectation before a triggering action.
+    #[pyo3(signature = (pattern, timeout=30.0, max_response_bytes=DEFAULT_MAX_RESPONSE_BYTES, max_total_bytes=DEFAULT_MAX_TOTAL_RESPONSE_BYTES))]
+    fn expect_response(
+        &self,
+        pattern: String,
+        timeout: f64,
+        max_response_bytes: usize,
+        max_total_bytes: usize,
+    ) -> PyResult<PyResponseExpectation> {
+        validate_response_options(timeout, max_response_bytes, max_total_bytes)?;
+        Ok(PyResponseExpectation::new_pooled(
+            Arc::clone(&self.inner),
+            Arc::clone(&self.active_response_expectations),
+            vec![("response".into(), pattern)],
+            timeout,
+            max_response_bytes,
+            max_total_bytes,
+            true,
+        ))
+    }
+
+    /// Arm named passive response expectations before a triggering action.
+    #[pyo3(signature = (patterns, timeout=30.0, max_response_bytes=DEFAULT_MAX_RESPONSE_BYTES, max_total_bytes=DEFAULT_MAX_TOTAL_RESPONSE_BYTES))]
+    fn expect_responses(
+        &self,
+        patterns: HashMap<String, String>,
+        timeout: f64,
+        max_response_bytes: usize,
+        max_total_bytes: usize,
+    ) -> PyResult<PyResponseExpectation> {
+        validate_response_options(timeout, max_response_bytes, max_total_bytes)?;
+        if patterns.is_empty() {
+            return Err(PyValueError::new_err("patterns must not be empty"));
+        }
+        Ok(PyResponseExpectation::new_pooled(
+            Arc::clone(&self.inner),
+            Arc::clone(&self.active_response_expectations),
+            patterns.into_iter().collect(),
+            timeout,
+            max_response_bytes,
+            max_total_bytes,
+            false,
+        ))
+    }
+
     /// Navigate and wait for network idle in one shot.
     ///
     /// Faster than calling `navigate()` then `wait_for_network_idle()`
@@ -1921,6 +2832,16 @@ impl PyPooledTab {
 
     fn url<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         with_pooled_page!(self, py, |page| page.url())
+    }
+
+    /// Return this tab's CDP instrumentation state for routing/debugging.
+    fn instrumentation_state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page_map!(
+            self,
+            py,
+            |page| async move { Ok::<_, void_crawl_core::VoidCrawlError>(page.instrumentation_state()) },
+            |state| PyTabInstrumentationState::from(state)
+        )
     }
 
     fn evaluate_js<'py>(&self, py: Python<'py>, expression: String) -> PyResult<Bound<'py, PyAny>> {
@@ -1971,6 +2892,63 @@ impl PyPooledTab {
 
     fn screenshot_png<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         with_pooled_page_map!(self, py, |page| page.screenshot_png(), |bytes| PyBytesResult(bytes))
+    }
+
+    /// Take a PNG screenshot with optional disk output, cropping, a one-shot
+    /// device/viewport override, scrolling, and/or viewport-only capture.
+    /// See :meth:`Page.screenshot` for the full argument reference.
+    #[pyo3(signature = (
+        path=None, bbox=None,
+        selector_type=None, selector_value=None, selector_regex=None, selector_name=None,
+        selector_nth=None, selector_x=None, selector_y=None,
+        viewport_preset=None, viewport_width=None, viewport_height=None,
+        viewport_device_scale_factor=None, viewport_mobile=None,
+        scroll_viewports=None, scroll_pixels=None, full_page=None,
+    ))]
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+    fn screenshot<'py>(
+        &self,
+        py: Python<'py>,
+        path: Option<String>,
+        bbox: Option<(u32, u32, u32, u32)>,
+        selector_type: Option<String>,
+        selector_value: Option<String>,
+        selector_regex: Option<String>,
+        selector_name: Option<String>,
+        selector_nth: Option<u32>,
+        selector_x: Option<f64>,
+        selector_y: Option<f64>,
+        viewport_preset: Option<String>,
+        viewport_width: Option<u32>,
+        viewport_height: Option<u32>,
+        viewport_device_scale_factor: Option<f64>,
+        viewport_mobile: Option<bool>,
+        scroll_viewports: Option<f64>,
+        scroll_pixels: Option<i64>,
+        full_page: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = build_screenshot_options(
+            path,
+            bbox,
+            selector_type.as_deref(),
+            selector_value,
+            selector_regex,
+            selector_name,
+            selector_nth,
+            selector_x,
+            selector_y,
+            viewport_preset.as_deref(),
+            viewport_width,
+            viewport_height,
+            viewport_device_scale_factor,
+            viewport_mobile,
+            scroll_viewports,
+            scroll_pixels,
+            full_page,
+        )?;
+        with_pooled_page_map!(self, py, |page| page.screenshot(opts), |result| PyScreenshotOutput(
+            result
+        ))
     }
 
     /// Download the resource at ``url`` into directory ``dir`` over this pooled
@@ -2419,8 +3397,9 @@ impl PyPooledTab {
 ///         html = await tab.content()
 #[pyclass(name = "_AcquireContext")]
 pub struct PyAcquireContext {
-    pool:     Arc<BrowserPool>,
+    pool: Arc<BrowserPool>,
     tab_slot: Arc<Mutex<Option<PooledTab>>>,
+    active_response_expectations: Arc<AtomicUsize>,
 }
 
 impl fmt::Debug for PyAcquireContext {
@@ -2432,15 +3411,19 @@ impl fmt::Debug for PyAcquireContext {
 #[pymethods]
 impl PyAcquireContext {
     fn __aenter__<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let (pool, tab_slot) = {
+        let (pool, tab_slot, active_response_expectations) = {
             let this = slf.borrow();
-            (Arc::clone(&this.pool), Arc::clone(&this.tab_slot))
+            (
+                Arc::clone(&this.pool),
+                Arc::clone(&this.tab_slot),
+                Arc::clone(&this.active_response_expectations),
+            )
         };
         future_into_py(py, async move {
             let tab = pool.acquire().await.map_err(to_py_err)?;
             let use_count = tab.use_count;
             *tab_slot.lock().await = Some(tab);
-            Ok(PyPooledTab { inner: tab_slot, use_count })
+            Ok(PyPooledTab { inner: tab_slot, active_response_expectations, use_count })
         })
     }
 
@@ -2454,8 +3437,17 @@ impl PyAcquireContext {
     ) -> PyResult<Bound<'py, PyAny>> {
         let pool = Arc::clone(&self.pool);
         let tab_slot = Arc::clone(&self.tab_slot);
+        let active_response_expectations = Arc::clone(&self.active_response_expectations);
         future_into_py(py, async move {
-            if let Some(tab) = tab_slot.lock().await.take() {
+            let mut tab_slot = tab_slot.lock().await;
+            if active_response_expectations.load(Ordering::Acquire) != 0 {
+                return Err(PyRuntimeError::new_err(
+                    "cannot release tab with an active response expectation",
+                ));
+            }
+            let tab = tab_slot.take();
+            drop(tab_slot);
+            if let Some(tab) = tab {
                 pool.release(tab).await;
             }
             Ok(false)
@@ -2565,7 +3557,11 @@ impl PyBrowserPool {
     ///     async with pool.acquire() as tab:
     ///         ...
     fn acquire(&self) -> PyAcquireContext {
-        PyAcquireContext { pool: Arc::clone(&self.inner), tab_slot: Arc::new(Mutex::new(None)) }
+        PyAcquireContext {
+            pool: Arc::clone(&self.inner),
+            tab_slot: Arc::new(Mutex::new(None)),
+            active_response_expectations: Arc::new(AtomicUsize::new(0)),
+        }
     }
 
     /// Return a context manager that builds a pool from explicit parameters.
@@ -2576,7 +3572,7 @@ impl PyBrowserPool {
     #[pyo3(signature = (
         browsers, tabs_per_browser, tab_max_uses, tab_max_idle_secs, acquire_timeout_secs,
         auto_evict, headless, no_sandbox, stealth, ws_urls, proxy, chrome_executable, extra_args,
-        user_data_dir
+        user_data_dir, cdp_mode=None
     ))]
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::fn_params_excessive_bools)]
@@ -2596,8 +3592,10 @@ impl PyBrowserPool {
         chrome_executable: Option<String>,
         extra_args: Vec<String>,
         user_data_dir: Option<String>,
-    ) -> PyPoolParamsContext {
-        PyPoolParamsContext {
+        cdp_mode: Option<&str>,
+    ) -> PyResult<PyPoolParamsContext> {
+        let cdp_mode = parse_cdp_mode(cdp_mode)?;
+        Ok(PyPoolParamsContext {
             browsers,
             tabs_per_browser,
             tab_max_uses,
@@ -2612,8 +3610,9 @@ impl PyBrowserPool {
             chrome_executable,
             extra_args,
             user_data_dir,
+            cdp_mode,
             pool_slot: Arc::new(Mutex::new(None)),
-        }
+        })
     }
 
     /// Return a tab to the pool.
@@ -2623,10 +3622,20 @@ impl PyBrowserPool {
         tab: &Bound<'py, PyPooledTab>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let pool = Arc::clone(&self.inner);
-        let tab_inner = Arc::clone(&tab.borrow().inner);
+        let borrowed = tab.borrow();
+        let tab_inner = Arc::clone(&borrowed.inner);
+        let active_response_expectations = Arc::clone(&borrowed.active_response_expectations);
+        drop(borrowed);
         future_into_py(py, async move {
             let mut guard = tab_inner.lock().await;
-            if let Some(pooled_tab) = guard.take() {
+            if active_response_expectations.load(Ordering::Acquire) != 0 {
+                return Err(PyRuntimeError::new_err(
+                    "cannot release tab with an active response expectation",
+                ));
+            }
+            let pooled_tab = guard.take();
+            drop(guard);
+            if let Some(pooled_tab) = pooled_tab {
                 pool.release(pooled_tab).await;
             }
             Ok(())
@@ -2686,6 +3695,7 @@ pub struct PyPoolParamsContext {
     chrome_executable:    Option<String>,
     extra_args:           Vec<String>,
     user_data_dir:        Option<String>,
+    cdp_mode:             Option<CdpMode>,
     pool_slot:            Arc<Mutex<Option<Arc<BrowserPool>>>>,
 }
 
@@ -2713,6 +3723,7 @@ impl PyPoolParamsContext {
         let chrome_executable = this.chrome_executable.clone();
         let extra_args = this.extra_args.clone();
         let user_data_dir = this.user_data_dir.clone();
+        let cdp_mode = this.cdp_mode;
         let pool_slot = Arc::clone(&this.pool_slot);
         drop(this);
 
@@ -2729,6 +3740,9 @@ impl PyPoolParamsContext {
                             BrowserSession::builder().headful()
                         };
                         builder = builder.stealth(stealth.clone());
+                        if let Some(m) = cdp_mode {
+                            builder = builder.cdp_mode(m);
+                        }
                         if no_sandbox {
                             builder = builder.no_sandbox();
                         }
@@ -2756,10 +3770,12 @@ impl PyPoolParamsContext {
                 let futs: Vec<_> = ws_urls
                     .into_iter()
                     .map(|url| {
-                        BrowserSession::builder()
-                            .remote_debug(url)
-                            .stealth(stealth.clone())
-                            .launch()
+                        let mut builder =
+                            BrowserSession::builder().remote_debug(url).stealth(stealth.clone());
+                        if let Some(m) = cdp_mode {
+                            builder = builder.cdp_mode(m);
+                        }
+                        builder.launch()
                     })
                     .collect();
                 future::join_all(futs)
@@ -3283,6 +4299,21 @@ fn py_scan_file(
     Ok(PyScanReport::from(report))
 }
 
+/// List named device presets (phones, tablets, desktop sizes) available to
+/// `Page.set_viewport` / `Page.screenshot(viewport_preset=...)` — Chrome
+/// DevTools' device-toolbar dropdown, as data. Returns
+/// ``(name, width, height, device_scale_factor, mobile)`` tuples.
+#[pyfunction]
+#[pyo3(name = "list_device_presets")]
+fn py_list_device_presets() -> Vec<(String, u32, u32, f64, bool)> {
+    viewport_mod::all_presets()
+        .into_iter()
+        .map(|(name, vp)| {
+            (name.to_string(), vp.width, vp.height, vp.device_scale_factor, vp.mobile)
+        })
+        .collect()
+}
+
 /// Scan an in-memory buffer with the content-safety gate. See
 /// :func:`scan_file`.
 #[pyfunction]
@@ -3310,13 +4341,21 @@ fn _ext(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPageResponse>()?;
     m.add_class::<PyCapturedResponse>()?;
     m.add_class::<PyResponseExpectation>()?;
+
+    m.add_class::<PyTabInstrumentationState>()?;
     m.add_class::<PyAntibotVerdict>()?;
     m.add_class::<PyDownloadOutcome>()?;
     m.add_class::<PyDownloadCapture>()?;
     m.add_class::<PyScanReport>()?;
+    m.add_class::<PyInterruptInfo>()?;
     m.add_class::<PyProfileHandle>()?;
     m.add_class::<PyManagedProfileSnapshot>()?;
     m.add_class::<PyManagedProfileSplit>()?;
+    m.add_class::<PyRecording>()?;
+    m.add_class::<PyRecordedRegion>()?;
+    m.add_class::<PyMaskReport>()?;
+    m.add_class::<PyFrame>()?;
+    m.add_class::<PyRecordingHandle>()?;
     m.add_function(wrap_pyfunction!(py_list_profiles, m)?)?;
     m.add_function(wrap_pyfunction!(py_acquire_profile, m)?)?;
     m.add_function(wrap_pyfunction!(py_profile_registry_root, m)?)?;
@@ -3333,6 +4372,7 @@ fn _ext(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_profile_pool_describe, m)?)?;
     m.add_function(wrap_pyfunction!(py_scan_file, m)?)?;
     m.add_function(wrap_pyfunction!(py_scan_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(py_list_device_presets, m)?)?;
     let py = m.py();
     m.add("VoidCrawlError", py.get_type::<VoidCrawlError>())?;
     m.add("NavigationError", py.get_type::<NavigationError>())?;
@@ -3345,5 +4385,9 @@ fn _ext(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("ProfileNotFound", py.get_type::<ProfileNotFound>())?;
     m.add("CaptchaDetected", py.get_type::<CaptchaDetected>())?;
     m.add("AntibotChallenge", py.get_type::<AntibotChallenge>())?;
+    m.add("SessionInterrupted", py.get_type::<SessionInterrupted>())?;
+    m.add("InterruptExpired", py.get_type::<InterruptExpired>())?;
+    m.add("InterruptTerminal", py.get_type::<InterruptTerminal>())?;
+    m.add("InterruptNotFound", py.get_type::<InterruptNotFound>())?;
     Ok(())
 }

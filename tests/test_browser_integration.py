@@ -15,6 +15,7 @@ import http.server
 import shutil
 import socketserver
 import threading
+import urllib.parse
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -25,11 +26,13 @@ from voidcrawl import (
     BrowserConfig,
     BrowserPool,
     BrowserSession,
+    InterruptRequest,
     NavigationTimeoutError,
     Page,
     PoolConfig,
     ProfileRegistry,
     ResponseTimeoutError,
+    SessionInterrupted,
 )
 from voidcrawl.actions import CollectNetworkRequests, InstallNetworkObserver
 
@@ -65,6 +68,16 @@ class _NetworkFixtureHandler(http.server.BaseHTTPRequestHandler):
             self._send(
                 "text/html",
                 b"<script>setInterval(() => fetch('/api/data'), 25)</script>",
+            )
+        elif self.path == "/action":
+            self._send(
+                "text/html",
+                b"""<!doctype html>
+<button type="button">Load data</button>
+<script>
+document.querySelector('button').addEventListener('click', () => fetch('/api/one'));
+</script>
+""",
             )
         elif self.path == "/style.css":
             self._send("text/css", b"main { color: rgb(10 20 30); }\n")
@@ -137,6 +150,54 @@ class TestPageLifecycleAndResponses:
             await page.add_init_script("window.__voidcrawlInit = 'ready'")
             await page.goto(network_fixture_url)
             assert await page.evaluate_js("window.__voidcrawlInit") == "ready"
+
+    @pytest.mark.asyncio
+    async def test_explicit_interrupt_parks_same_target_and_rejects_mutation(
+        self, network_fixture_url: str
+    ) -> None:
+        async with (
+            BrowserSession(BrowserConfig()) as browser,
+            browser.page(network_fixture_url) as page,
+        ):
+            target_id = await page.target_id()
+            await page.evaluate_js("sessionStorage.setItem('interrupt-proof', 'kept')")
+            interrupt = await browser.interrupt(
+                page,
+                InterruptRequest(
+                    code="policy.operator_review", summary="fixture review"
+                ),
+            )
+
+            assert interrupt.target_id == target_id
+            assert "network fixture" in await page.content()
+            with pytest.raises(SessionInterrupted) as exc:
+                await page.evaluate_js("document.body.dataset.mutated = 'yes'")
+            assert exc.value.interrupt_id == interrupt.interrupt_id
+
+            resumed = await browser.resume(interrupt.interrupt_id)
+            assert resumed.state == "resumed"
+            assert await page.target_id() == target_id
+            assert (
+                await page.evaluate_js("sessionStorage.getItem('interrupt-proof')")
+                == "kept"
+            )
+
+    @pytest.mark.asyncio
+    async def test_interrupt_rejects_page_from_another_session(
+        self, network_fixture_url: str
+    ) -> None:
+        async with (
+            BrowserSession(BrowserConfig()) as first,
+            BrowserSession(BrowserConfig()) as second,
+        ):
+            page = await first.new_page(network_fixture_url)
+            with pytest.raises(RuntimeError, match="does not belong"):
+                await second.interrupt(
+                    page,
+                    InterruptRequest(
+                        code="policy.operator_review", summary="wrong owner"
+                    ),
+                )
 
     @pytest.mark.asyncio
     async def test_single_response_body_capture(self, network_fixture_url: str) -> None:
@@ -235,6 +296,113 @@ class TestPageLifecycleAndResponses:
             assert raised.value.elapsed >= 0.2
 
     @pytest.mark.asyncio
+    async def test_pooled_tab_captures_action_response(
+        self, network_fixture_url: str
+    ) -> None:
+        async with BrowserPool(PoolConfig()) as pool, pool.acquire() as tab:
+            await tab.goto(f"{network_fixture_url}action")
+            async with tab.expect_response("**/api/one") as pending:
+                await tab.click_by_role("button", "Load data")
+
+            response = await pending.value
+            assert response.status == 200
+            assert await response.json() == {"endpoint": "one"}
+
+    @pytest.mark.asyncio
+    async def test_pooled_tab_response_options_fail_closed(self) -> None:
+        async with BrowserPool(PoolConfig()) as pool, pool.acquire() as tab:
+            with pytest.raises(ValueError, match="timeout"):
+                tab.expect_response("**/api/one", timeout=0)
+            with pytest.raises(ValueError, match="byte limits"):
+                tab.expect_response("**/api/one", max_response_bytes=0)
+            with pytest.raises(ValueError, match="must not be empty"):
+                tab.expect_responses({})
+
+    @pytest.mark.asyncio
+    async def test_pooled_tab_response_expectation_rejects_released_tab(self) -> None:
+        async with BrowserPool(PoolConfig()) as pool:
+            async with pool.acquire() as tab:
+                pending = tab.expect_response("**/api/one", timeout=0.1)
+
+            with pytest.raises(RuntimeError, match="tab has been released"):
+                async with pending:
+                    pass
+
+    @pytest.mark.asyncio
+    async def test_pooled_tab_cannot_release_while_expectation_is_active(
+        self, network_fixture_url: str
+    ) -> None:
+        async with BrowserPool(PoolConfig()) as pool:
+            checkout = pool.acquire()
+            tab = await checkout.__aenter__()
+            await tab.goto(f"{network_fixture_url}action")
+            pending = tab.expect_response("**/api/one")
+            await pending.__aenter__()
+
+            with pytest.raises(RuntimeError, match="active response expectation"):
+                await checkout.__aexit__(None, None, None)
+
+            await tab.click_by_role("button", "Load data")
+            await pending.__aexit__(None, None, None)
+            response = await pending.value
+            assert response.status == 200
+
+            await checkout.__aexit__(None, None, None)
+
+    @pytest.mark.asyncio
+    async def test_repeated_error_exit_does_not_poison_pooled_tab_release(self) -> None:
+        async with BrowserPool(PoolConfig()) as pool:
+            checkout = pool.acquire()
+            tab = await checkout.__aenter__()
+            pending = tab.expect_response("**/api/missing", timeout=0.1)
+            await pending.__aenter__()
+
+            await pending.__aexit__(RuntimeError, None, None)
+            await pending.__aexit__(RuntimeError, None, None)
+            await checkout.__aexit__(None, None, None)
+
+    @pytest.mark.asyncio
+    async def test_concurrent_duplicate_enter_and_exit_cannot_deadlock_or_leak(
+        self,
+    ) -> None:
+        async with BrowserPool(PoolConfig()) as pool:
+            checkout = pool.acquire()
+            tab = await checkout.__aenter__()
+            pending = tab.expect_response("**/api/missing", timeout=0.1)
+            await pending.__aenter__()
+
+            duplicate, _ = await asyncio.wait_for(
+                asyncio.gather(
+                    pending.__aenter__(),
+                    pending.__aexit__(RuntimeError, None, None),
+                    return_exceptions=True,
+                ),
+                timeout=2,
+            )
+            if not isinstance(duplicate, BaseException):
+                await pending.__aexit__(RuntimeError, None, None)
+
+            await checkout.__aexit__(None, None, None)
+
+    @pytest.mark.asyncio
+    async def test_cancelled_response_exit_does_not_poison_pooled_tab_release(
+        self,
+    ) -> None:
+        async with BrowserPool(PoolConfig()) as pool:
+            checkout = pool.acquire()
+            tab = await checkout.__aenter__()
+            pending = tab.expect_response("**/api/missing", timeout=30)
+            await pending.__aenter__()
+
+            exit_task = asyncio.ensure_future(pending.__aexit__(None, None, None))
+            await asyncio.sleep(0.05)
+            exit_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await exit_task
+
+            await checkout.__aexit__(None, None, None)
+
+    @pytest.mark.asyncio
     async def test_page_context_closes_tab_when_owning_task_is_cancelled(self) -> None:
         async with BrowserSession(BrowserConfig()) as browser:
             entered = asyncio.Event()
@@ -328,9 +496,9 @@ class TestPageLifecycleAndResponses:
 
 class TestCookiesSession:
     @pytest.mark.asyncio
-    async def test_set_and_get_cookies(self) -> None:
+    async def test_set_and_get_cookies(self, network_fixture_url: str) -> None:
         async with BrowserSession(BrowserConfig()) as browser:
-            page = await browser.new_page("https://example.com")
+            page = await browser.new_page(network_fixture_url)
 
             await page.set_cookie("test_name", "test_value")
             cookies = await page.get_cookies()
@@ -343,9 +511,9 @@ class TestCookiesSession:
             await page.close()
 
     @pytest.mark.asyncio
-    async def test_set_cookie_with_options(self) -> None:
+    async def test_set_cookie_with_options(self, network_fixture_url: str) -> None:
         async with BrowserSession(BrowserConfig()) as browser:
-            page = await browser.new_page("https://example.com")
+            page = await browser.new_page(network_fixture_url)
 
             await page.set_cookie(
                 "secure_cookie",
@@ -361,9 +529,9 @@ class TestCookiesSession:
             await page.close()
 
     @pytest.mark.asyncio
-    async def test_delete_cookie(self) -> None:
+    async def test_delete_cookie(self, network_fixture_url: str) -> None:
         async with BrowserSession(BrowserConfig()) as browser:
-            page = await browser.new_page("https://example.com")
+            page = await browser.new_page(network_fixture_url)
 
             await page.set_cookie("to_delete", "val")
             cookies_before = await page.get_cookies()
@@ -375,9 +543,9 @@ class TestCookiesSession:
             await page.close()
 
     @pytest.mark.asyncio
-    async def test_multiple_cookies(self) -> None:
+    async def test_multiple_cookies(self, network_fixture_url: str) -> None:
         async with BrowserSession(BrowserConfig()) as browser:
-            page = await browser.new_page("https://example.com")
+            page = await browser.new_page(network_fixture_url)
 
             await page.set_cookie("c1", "v1")
             await page.set_cookie("c2", "v2")
@@ -402,9 +570,9 @@ class TestCookiesSession:
 
 class TestCookiesPool:
     @pytest.mark.asyncio
-    async def test_set_and_get_cookies_pooled(self) -> None:
+    async def test_set_and_get_cookies_pooled(self, network_fixture_url: str) -> None:
         async with BrowserPool(PoolConfig()) as pool, pool.acquire() as tab:
-            await tab.navigate("https://example.com")
+            await tab.navigate(network_fixture_url)
             await tab.wait_for_navigation()
 
             await tab.set_cookie("pool_cookie", "pool_value")
@@ -414,9 +582,9 @@ class TestCookiesPool:
             assert match["value"] == "pool_value"
 
     @pytest.mark.asyncio
-    async def test_delete_cookie_pooled(self) -> None:
+    async def test_delete_cookie_pooled(self, network_fixture_url: str) -> None:
         async with BrowserPool(PoolConfig()) as pool, pool.acquire() as tab:
-            await tab.navigate("https://example.com")
+            await tab.navigate(network_fixture_url)
             await tab.wait_for_navigation()
 
             await tab.set_cookie("temp", "val")
@@ -424,6 +592,66 @@ class TestCookiesPool:
 
             cookies = await tab.get_cookies()
             assert not any(c["name"] == "temp" for c in cookies)
+
+
+# ── Lazy CDP escalation tests (BrowserSession) ──────────────────────────
+
+
+class TestLazyCdpIntegration:
+    @pytest.mark.asyncio
+    async def test_public_js_apis_have_expected_minimal_cdp_transitions(
+        self,
+    ) -> None:
+        async def run_smoke() -> None:
+            frame_html = (
+                "<html><body><script>"
+                "setTimeout(() => {"
+                "const el = document.createElement('div');"
+                "el.id = 'late';"
+                "document.body.appendChild(el);"
+                "}, 25);"
+                "</script>"
+                '<iframe srcdoc="'
+                "<script>window.voidcrawlFrameValue=7</script><p>frame</p>"
+                '"></iframe></body></html>'
+            )
+            url = "data:text/html," + urllib.parse.quote(frame_html)
+
+            async with BrowserSession(BrowserConfig(no_sandbox=True)) as browser:
+                page = await browser.new_page(url)
+                before = await page.instrumentation_state()
+                ready_state = await page.eval_js("document.readyState")
+                after_eval = await page.instrumentation_state()
+
+                await page.wait_for_selector("#late", timeout=2.0)
+                after_wait = await page.instrumentation_state()
+
+                result = await page.evaluate_js_in_frame(
+                    "about:srcdoc",
+                    "window.voidcrawlFrameValue",
+                )
+                after = await page.instrumentation_state()
+
+                assert ready_state in {"interactive", "complete"}
+                assert result == 7
+                assert before.low_cdp is True
+                assert before.runtime_enabled is False
+                assert before.network_enabled is False
+                assert after_eval.low_cdp is True
+                assert after_eval.runtime_enabled is False
+                assert after_eval.network_enabled is False
+                assert after_wait.low_cdp is True
+                assert after_wait.runtime_enabled is False
+                assert after_wait.network_enabled is False
+                assert after.low_cdp is False
+                assert after.runtime_enabled is True
+                assert after.network_enabled is False
+                await page.close()
+
+        try:
+            await asyncio.wait_for(run_smoke(), timeout=45.0)
+        except TimeoutError as exc:
+            raise AssertionError("lazy-CDP browser smoke timed out after 45s") from exc
 
 
 # ── Network observer tests (BrowserSession) ─────────────────────────────

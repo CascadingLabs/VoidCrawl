@@ -37,6 +37,11 @@ from voidcrawl._ext import (
     ChromeProfileBusy,
     DownloadCapture,
     DownloadOutcome,
+    Frame,
+    InterruptExpired,
+    InterruptNotFound,
+    InterruptTerminal,
+    MaskReport,
     NavigationError,
     NavigationTimeoutError,
     Page,
@@ -46,9 +51,14 @@ from voidcrawl._ext import (
     ProfileHandle,
     ProfileLeaseExpired,
     ProfileNotFound,
+    RecordedRegion,
+    Recording,
+    RecordingHandle,
     ResponseExpectation,
     ResponseTimeoutError,
     ScanReport,
+    SessionInterrupted,
+    TabInstrumentationState,
     VoidCrawlError,
     _AcquireContext,
     _PoolParamsContext,
@@ -62,6 +72,7 @@ from voidcrawl._ext import (
     BrowserSession as _BrowserSession,
 )
 from voidcrawl.actions._protocol import JsTab, Tab
+from voidcrawl.interrupts import InterruptRef, InterruptRequest
 from voidcrawl.profiles import (
     ManagedProfileSnapshot,
     ManagedProfileSplit,
@@ -72,6 +83,7 @@ from voidcrawl.profiles import (
 )
 from voidcrawl.scale import ScaleProfile, ScaleReport
 from voidcrawl.schema import Attr, Schema, Text, safe_url, strip_tags
+from voidcrawl.viewport import Viewport, list_device_presets
 
 Selector = Text
 
@@ -88,9 +100,16 @@ __all__ = [
     "ChromeProfileBusy",
     "DownloadCapture",
     "DownloadOutcome",
+    "Frame",
+    "InterruptExpired",
+    "InterruptNotFound",
+    "InterruptRef",
+    "InterruptRequest",
+    "InterruptTerminal",
     "JsTab",
     "ManagedProfileSnapshot",
     "ManagedProfileSplit",
+    "MaskReport",
     "NavigationError",
     "NavigationTimeoutError",
     "Page",
@@ -102,6 +121,9 @@ __all__ = [
     "ProfileLeaseExpired",
     "ProfileNotFound",
     "ProfileRegistry",
+    "RecordedRegion",
+    "Recording",
+    "RecordingHandle",
     "ResponseExpectation",
     "ResponseTimeoutError",
     "ScaleProfile",
@@ -109,11 +131,15 @@ __all__ = [
     "ScanReport",
     "Schema",
     "Selector",
+    "SessionInterrupted",
     "Tab",
+    "TabInstrumentationState",
     "Text",
+    "Viewport",
     "VoidCrawlError",
     "acquire_profile",
     "capture_download",
+    "list_device_presets",
     "list_profiles",
     "safe_url",
     "scan_bytes",
@@ -150,7 +176,8 @@ def _default_docker_ports(*, headful: bool) -> list[int]:
     Resolution order (first match wins):
 
     1. ``CDP_PORTS`` — comma-separated explicit list (e.g. ``"12345,12346"``).
-    2. ``CDP_PORT_BASE`` — single integer; yields ``[base, base + 1]``.
+    2. ``CDP_PORT_BASE`` — single integer; yields one port per positive
+       ``BROWSER_COUNT`` (default 2).
     3. Hard defaults: ``[9222, 9223]`` headless, ``[19222, 19223]`` headful.
 
     Lets operators avoid hardcoded ports when 9222/19222 collide with
@@ -169,10 +196,12 @@ def _default_docker_ports(*, headful: bool) -> list[int]:
     if raw_base:
         try:
             base = int(raw_base)
+            browser_count = int(os.environ.get("BROWSER_COUNT", "2"))
         except ValueError:
             base = None
-        if base is not None:
-            return [base, base + 1]
+            browser_count = 0
+        if base is not None and browser_count > 0:
+            return list(range(base, base + browser_count))
 
     return [19222, 19223] if headful else [9222, 9223]
 
@@ -206,6 +235,15 @@ class BrowserConfig(BaseModel):
             adopt one of its tabs with
             :meth:`BrowserSession.attach_page`. ``None`` (default) lets the OS
             pick a free ephemeral port.
+        cdp_mode: How many CDP domains to enable eagerly. ``"normal"``
+            (the default) enables ``Runtime``, ``Network``, ``Performance``,
+            ``Log``, and target auto-attach up front — every capture-dependent
+            feature needs this. ``"minimal"`` skips them, which is what lets a
+            session clear a Cloudflare Managed Challenge that a normal CDP
+            client cannot; in exchange, response capture,
+            :meth:`Page.wait_for_network_idle`, cross-origin frame eval, and
+            OOPIF auto-attach are unavailable. ``None`` keeps the default and
+            still honors ``VOIDCRAWL_STEALTH_NO_RUNTIME``.
         debug: Wrap pages in an interactive step-debugger.  When ``True``,
             :meth:`BrowserSession.new_page` returns a
             :class:`~voidcrawl.debug.DebugPage` and
@@ -242,6 +280,7 @@ class BrowserConfig(BaseModel):
     user_data_dir: str | None = None
     ws_url: str | None = None
     port: int | None = None
+    cdp_mode: Literal["normal", "minimal"] | None = None
     debug: bool = False
     stepping: bool = True
     highlight: bool = True
@@ -351,9 +390,10 @@ class PoolConfig(BaseModel):
                 Defaults to ``"localhost"``.
             ports: Override the default port list.  When ``None``, the
                 defaults resolve in this order: explicit ``CDP_PORTS``
-                env var (comma-separated), else ``CDP_PORT_BASE`` +
-                ``[0, 1]``, else ``[9222, 9223]`` for headless /
-                ``[19222, 19223]`` for headful.
+                env var (comma-separated), else ``CDP_PORT_BASE`` plus one
+                port per positive ``BROWSER_COUNT`` (default 2), else
+                ``[9222, 9223]`` for headless / ``[19222, 19223]`` for
+                headful.
             tabs_per_browser: Max concurrent tabs per Chrome process.
                 Defaults to ``4``.
             check: Probe each Chrome endpoint before returning and raise
@@ -375,7 +415,7 @@ class PoolConfig(BaseModel):
                     async with pool.acquire() as tab:
                         await tab.goto("https://example.com")
 
-            Headful pool — watch Chrome live at ``localhost:5900``::
+            Headful pool — open a local noVNC lease when inspection is needed::
 
                 async with BrowserPool(PoolConfig.from_docker(headful=True)) as pool:
                     async with pool.acquire() as tab:
@@ -545,6 +585,7 @@ class BrowserSession:
             user_data_dir=bc.user_data_dir,
             ws_url=bc.ws_url,
             port=bc.port,
+            cdp_mode=bc.cdp_mode,
         )
         self._inner = await inner.__aenter__()
         return self
@@ -588,6 +629,30 @@ class BrowserSession:
             )
         return page
 
+    async def new_page_in_window(self, url: str) -> Page:
+        """Open a tab in its **own browser window** and navigate to *url*.
+
+        Chrome composites only the frontmost tab of a window, so tabs from
+        :meth:`new_page` (which share one window) cannot all paint at once. A
+        tab alone in its window keeps painting regardless of what other
+        windows do — which is what lets :meth:`Page.record` run concurrently
+        instead of holding the browser's capture lock.
+
+        Costs a real window's worth of resources, so it is opt-in. A later
+        :meth:`new_page` targets the most recently active window and can land
+        inside this one, so create recording windows last (or check
+        :meth:`Page.alone_in_window`).
+
+        Args:
+            url: The URL to load in the new window.
+
+        Returns:
+            The new tab handle.
+        """
+        if self._inner is None:
+            raise RuntimeError("BrowserSession not started — use async with")
+        return await self._inner.new_page_in_window(url)
+
     def page(self, url: str | None = None) -> _PageContext:
         """Create a page context that always closes its tab.
 
@@ -617,6 +682,63 @@ class BrowserSession:
         if self._inner is None:
             raise RuntimeError("BrowserSession not started — use async with")
         return await self._inner.attach_page(target_id)
+
+    async def interrupt(self, page: Page, request: InterruptRequest) -> InterruptRef:
+        """Park *page* for explicit operator review.
+
+        This is an AI-free state transition. It does not infer a login or
+        challenge, expose CDP credentials, or replay work when resumed.
+        """
+        if self._inner is None:
+            raise RuntimeError("BrowserSession not started — use async with")
+        raw = await self._inner.interrupt(
+            page,
+            request.code,
+            request.summary,
+            request.ttl_seconds,
+        )
+        return InterruptRef.model_validate(
+            {
+                "interrupt_id": raw.interrupt_id,
+                "target_id": raw.target_id,
+                "code": raw.code,
+                "summary": raw.summary,
+                "state": raw.state,
+                "expires_in_ms": raw.expires_in_ms,
+            }
+        )
+
+    async def resume(self, interrupt_id: str) -> InterruptRef:
+        """Reactivate an interrupted page without replaying an action."""
+        if self._inner is None:
+            raise RuntimeError("BrowserSession not started — use async with")
+        raw = await self._inner.resume(interrupt_id)
+        return InterruptRef.model_validate(
+            {
+                "interrupt_id": raw.interrupt_id,
+                "target_id": raw.target_id,
+                "code": raw.code,
+                "summary": raw.summary,
+                "state": raw.state,
+                "expires_in_ms": raw.expires_in_ms,
+            }
+        )
+
+    async def release(self, interrupt_id: str) -> InterruptRef:
+        """Release an interrupted page without replaying an action."""
+        if self._inner is None:
+            raise RuntimeError("BrowserSession not started — use async with")
+        raw = await self._inner.release(interrupt_id)
+        return InterruptRef.model_validate(
+            {
+                "interrupt_id": raw.interrupt_id,
+                "target_id": raw.target_id,
+                "code": raw.code,
+                "summary": raw.summary,
+                "state": raw.state,
+                "expires_in_ms": raw.expires_in_ms,
+            }
+        )
 
     async def websocket_url(self) -> str:
         """The browser's CDP WebSocket endpoint (``ws://…``).
@@ -720,6 +842,7 @@ class BrowserPool:
             chrome_executable=bc.chrome_executable,
             extra_args=bc.extra_args,
             user_data_dir=bc.user_data_dir,
+            cdp_mode=bc.cdp_mode,
         )
         self._inner = await ctx.__aenter__()
         return self

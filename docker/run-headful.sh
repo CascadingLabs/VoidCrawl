@@ -11,8 +11,10 @@
 #   COMPOSE_PROFILES=amd docker compose -f docker/docker-compose.headful.yml up
 #     # ...is the equivalent compose-native invocation. Use that in CI.
 #
-# Override resolution via .env or inline:
+# Override generated output resolution or enable the local viewer control:
 #   VNC_WIDTH=2560 VNC_HEIGHT=1440 ./docker/run-headful.sh
+#   VIEWER_MODE=local ./docker/run-headful.sh -d
+#   ./docker/viewer.sh open --browser 1 --ttl 15m
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

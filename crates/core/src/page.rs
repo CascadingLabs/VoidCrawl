@@ -5,7 +5,7 @@ use std::{
     fs, future,
     path::{Path, PathBuf},
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -17,43 +17,50 @@ use chromiumoxide::{
         browser_protocol::{
             accessibility::{AxNode, AxValue, GetFullAxTreeParams, QueryAxTreeParams},
             browser::{
-                PermissionDescriptor, PermissionSetting, SetDownloadBehaviorBehavior,
-                SetDownloadBehaviorParams, SetPermissionParams,
+                GetWindowForTargetParams, PermissionDescriptor, PermissionSetting,
+                SetDownloadBehaviorBehavior, SetDownloadBehaviorParams, SetPermissionParams,
             },
             dom::{BackendNodeId, GetBoxModelParams, GetDocumentParams, ResolveNodeParams},
             emulation::{
-                SetDeviceMetricsOverrideParams, SetGeolocationOverrideParams,
-                SetLocaleOverrideParams, SetTimezoneOverrideParams, SetUserAgentOverrideParams,
-                UserAgentBrandVersion, UserAgentMetadata,
+                ClearDeviceMetricsOverrideParams, SetDeviceMetricsOverrideParams,
+                SetGeolocationOverrideParams, SetLocaleOverrideParams, SetTimezoneOverrideParams,
+                SetTouchEmulationEnabledParams, SetUserAgentOverrideParams, UserAgentBrandVersion,
+                UserAgentMetadata,
             },
             input::{
                 DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams,
                 DispatchMouseEventType, MouseButton,
             },
             network::{
-                Cookie, CookieParam, DeleteCookiesParams, EventRequestWillBeSent,
-                EventResponseReceived, Headers, ResourceType, SetExtraHttpHeadersParams,
+                Cookie, CookieParam, DeleteCookiesParams, EnableParams as NetworkEnableParams,
+                EventRequestWillBeSent, EventResponseReceived, Headers, ResourceType,
+                SetExtraHttpHeadersParams,
             },
             page::{
                 AddScriptToEvaluateOnNewDocumentParams, CaptureScreenshotFormat,
-                EventLifecycleEvent, FrameId, PrintToPdfParams, SetBypassCspParams, Viewport,
+                EventLifecycleEvent, FrameId, PrintToPdfParams, SetBypassCspParams,
+                Viewport as CdpClipViewport,
             },
+            target::GetTargetsParams,
         },
-        js_protocol::runtime::{CallFunctionOnParams, EvaluateParams},
+        js_protocol::runtime::{CallFunctionOnParams, EvaluateParams, ExecutionContextId},
     },
     page::ScreenshotParams,
 };
 use futures::StreamExt;
 use serde_json::Value;
-use tokio::time;
+use tokio::{sync::Mutex as AsyncMutex, time};
 
 use crate::{
     antibot::{self, AntibotVerdict},
     ax::compact_outline,
     error::{Result, VoidCrawlError},
     input::{HumanizeOptions, Rng, humanized_path},
+    interrupt::InterruptRegistry,
     response::{ResponseCapture, ResponseCaptureLimits},
+    selector::{self, RawRect, SelectorEntry, SelectorKind, SelectorResolution},
     stealth::StealthConfig,
+    viewport::{ScrollTarget, Viewport},
 };
 
 /// Wall-clock-derived seed for live humanized pointer paths. Tests seed the
@@ -109,6 +116,33 @@ pub struct PageResponse {
     /// the set (mirrors `AntibotVerdict::corpus_version`). `None` iff
     /// `endpoints` is `None` (capture was not requested).
     pub endpoint_sanitizer_version: Option<&'static str>,
+}
+
+/// Per-tab CDP instrumentation state.
+///
+/// Tabs start in a human-first, low-CDP state. Calling network-heavy helpers
+/// lazily enables the required CDP domains on that tab and flips these flags;
+/// use this state to route sensitive challenge traversal away from tabs that
+/// have already escalated into instrumentation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "state snapshot intentionally exposes independent routing flags"
+)]
+pub struct TabInstrumentationState {
+    /// `true` while the tab has not enabled higher-signal CDP domains.
+    pub low_cdp:                bool,
+    /// `true` after `Network.enable` has been sent for this target.
+    pub network_enabled:        bool,
+    /// `true` after `Runtime.enable` has been sent for frame-scoped JS.
+    /// `eval_js` uses one-shot `Runtime.evaluate` without enabling the Runtime
+    /// domain.
+    pub runtime_enabled:        bool,
+    /// Reserved for future isolated utility-world escalation tracking.
+    pub utility_world_enabled:  bool,
+    /// `true` if VoidCrawl applied UA/viewport pre-navigation stealth to this
+    /// tab.
+    pub pre_navigation_stealth: bool,
 }
 
 /// Version of the endpoint-sanitization rules ([`safe_endpoint`]). Bump on any
@@ -296,7 +330,7 @@ fn flatten_headers(value: &serde_json::Value) -> Vec<(String, String)> {
 }
 
 /// Rectangular crop in CSS pixels for [`ScreenshotOptions::bbox`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct Bbox {
     pub x:      u32,
     pub y:      u32,
@@ -305,12 +339,52 @@ pub struct Bbox {
 }
 
 /// Options for [`Page::screenshot`].
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct ScreenshotOptions {
     /// Write PNG to this path instead of returning bytes.
-    pub path: Option<PathBuf>,
-    /// Crop to this CSS-pixel region. None = full page.
-    pub bbox: Option<Bbox>,
+    pub path:      Option<PathBuf>,
+    /// Crop to this CSS-pixel region. Takes precedence over `full_page`.
+    /// With `scroll` set, coordinates are relative to wherever that scroll
+    /// lands rather than the top of the document.
+    pub bbox:      Option<Bbox>,
+    /// Crop to a Yosoi selector's resolved rectangle instead of an explicit
+    /// `bbox`. Mutually exclusive with `bbox`: setting both is an error.
+    /// A non-[`Resolved`](crate::selector::SelectorResolution::Resolved)
+    /// outcome (nothing matched, hidden/zero-area target, ambiguous match,
+    /// or a non-visual kind like `jsonld`/`regex`) becomes an actionable
+    /// `Err` here — see [`Page::resolve_selector`] for a version that
+    /// returns the typed outcome instead of erroring.
+    pub selector:  Option<SelectorEntry>,
+    /// Apply this viewport/device override for just this capture, then
+    /// restore whatever was active before (even on error). See
+    /// [`Page::set_viewport`] for a persistent version.
+    pub viewport:  Option<Viewport>,
+    /// Scroll to this position before capturing, then restore the original
+    /// scroll position after (even on error). Combine with `bbox` to crop a
+    /// specific on-screen region after paging down a fixed viewport, or use
+    /// alone with `full_page: false` to capture whatever's scrolled into
+    /// view without cropping.
+    pub scroll:    Option<ScrollTarget>,
+    /// Capture the full scrollable page (default `true`) vs just what's
+    /// currently visible in the viewport. Ignored when `bbox` is set — a
+    /// crop always wins. Set `false` via [`ScreenshotOptions::viewport_only`]
+    /// to capture only the visible fold: cheaper, and the right choice when
+    /// "screenshot this page" really means "what does a visitor see first,"
+    /// not the whole scroll history.
+    pub full_page: bool,
+}
+
+impl Default for ScreenshotOptions {
+    fn default() -> Self {
+        Self {
+            path:      None,
+            bbox:      None,
+            selector:  None,
+            viewport:  None,
+            scroll:    None,
+            full_page: true,
+        }
+    }
 }
 
 impl ScreenshotOptions {
@@ -321,6 +395,28 @@ impl ScreenshotOptions {
 
     pub fn with_bbox(mut self, bbox: Bbox) -> Self {
         self.bbox = Some(bbox);
+        self
+    }
+
+    pub fn with_selector(mut self, selector: SelectorEntry) -> Self {
+        self.selector = Some(selector);
+        self
+    }
+
+    pub fn with_viewport(mut self, viewport: Viewport) -> Self {
+        self.viewport = Some(viewport);
+        self
+    }
+
+    pub fn with_scroll(mut self, scroll: ScrollTarget) -> Self {
+        self.scroll = Some(scroll);
+        self
+    }
+
+    /// Capture only the currently visible viewport instead of the full
+    /// scrollable page.
+    pub fn viewport_only(mut self) -> Self {
+        self.full_page = false;
         self
     }
 }
@@ -397,23 +493,257 @@ impl DownloadCapture {
     }
 }
 
+const DOCUMENT_SNAPSHOT_JS: &str = r#"
+(() => {
+  const MAX = {
+    headings: 80,
+    textBlocks: 240,
+    links: 160,
+    controls: 160,
+    forms: 60,
+    formControls: 30,
+    textChars: 700,
+    smallChars: 220
+  };
+  const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const clip = (value, limit) => {
+    const text = clean(value);
+    return text.length > limit ? text.slice(0, Math.max(0, limit - 3)) + '...' : text;
+  };
+  const visible = (el) => {
+    if (!el || !el.isConnected) return false;
+    const style = window.getComputedStyle(el);
+    if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+  const attr = (el, name) => {
+    const value = el.getAttribute(name);
+    return value == null || value === '' ? null : clip(value, MAX.smallChars);
+  };
+  const labelText = (el) => {
+    const id = el.id ? CSS.escape(el.id) : null;
+    const label = id ? document.querySelector(`label[for="${id}"]`) : null;
+    return clip(
+      el.getAttribute('aria-label')
+        || el.getAttribute('title')
+        || el.getAttribute('placeholder')
+        || (label && label.textContent)
+        || el.value
+        || el.textContent
+        || el.name
+        || '',
+      MAX.smallChars
+    );
+  };
+  const control = (el) => ({
+    tag: el.tagName.toLowerCase(),
+    type: attr(el, 'type'),
+    role: attr(el, 'role'),
+    name: labelText(el) || null,
+    placeholder: attr(el, 'placeholder'),
+    disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true')
+  });
+  const all = (selector) => Array.from(document.querySelectorAll(selector)).filter(visible);
+  const unique = (items) => Array.from(new Set(items));
+
+  const headingNodes = all('h1,h2,h3,h4,h5,h6');
+  const headings = headingNodes.slice(0, MAX.headings).map((el) => ({
+    level: Number(el.tagName.slice(1)),
+    text: clip(el.textContent, MAX.smallChars)
+  })).filter((h) => h.text);
+
+  const textNodes = unique([
+    ...all('main p, main li, article p, article li, section p, blockquote, body > p, td, th'),
+    ...all('[role="main"] p, [role="article"] p')
+  ]).filter((el) => clean(el.textContent).length >= 20);
+  const text_blocks = textNodes.slice(0, MAX.textBlocks).map((el) => ({
+    tag: el.tagName.toLowerCase(),
+    text: clip(el.textContent, MAX.textChars)
+  })).filter((b) => b.text);
+
+  const linkNodes = all('a[href]');
+  const links = linkNodes.slice(0, MAX.links).map((el) => ({
+    text: clip(el.textContent || el.getAttribute('aria-label') || el.href, MAX.smallChars),
+    href: clip(el.href, MAX.smallChars)
+  })).filter((l) => l.href);
+
+  const controlNodes = all('button,input,select,textarea,[role="button"],[role="link"],[role="textbox"],[role="combobox"],[contenteditable="true"]');
+  const controls = controlNodes.slice(0, MAX.controls).map(control);
+
+  const formNodes = all('form');
+  const forms = formNodes.slice(0, MAX.forms).map((form) => {
+    const fields = Array.from(form.querySelectorAll('button,input,select,textarea,[role="button"],[role="textbox"],[role="combobox"]'))
+      .filter(visible)
+      .slice(0, MAX.formControls)
+      .map(control);
+    return {
+      action: attr(form, 'action') || (form.action ? clip(form.action, MAX.smallChars) : null),
+      method: clip(form.method || 'get', 20).toLowerCase(),
+      controls: fields
+    };
+  });
+
+  return {
+    url: location.href,
+    title: document.title || null,
+    headings,
+    text_blocks,
+    links,
+    controls,
+    forms,
+    total: {
+      headings: headingNodes.length,
+      text_blocks: textNodes.length,
+      links: linkNodes.length,
+      controls: controlNodes.length,
+      forms: formNodes.length
+    }
+  };
+})()
+"#;
+
 /// Thin wrapper over `chromiumoxide::Page` exposing a clean async API.
 #[derive(Debug)]
 pub struct Page {
-    inner:          CdpPage,
+    inner:                  CdpPage,
+    interrupts:             Arc<InterruptRegistry>,
     /// `true` between [`Page::arm_download`] / a `download_to_dir` in flight
     /// and the matching reset. The pool checks this on release to reset an
     /// abandoned download behavior cheaply (no CDP call on the common path).
-    download_armed: AtomicBool,
+    download_armed:         AtomicBool,
     /// Last virtual cursor position (CSS px), so a humanized move starts from
     /// where the pointer actually is. Defaults to the top-left.
-    cursor:         Mutex<(f64, f64)>,
+    cursor:                 Mutex<(f64, f64)>,
+    /// Shared with every other `Page` from the same `BrowserSession`.
+    /// Headless Chrome only reliably composites frames for the foregrounded
+    /// tab, so `screenshot()` holds this while it brings itself to front and
+    /// captures — serializing just that instant across tabs on one browser,
+    /// not the tabs' navigation/JS work.
+    capture_lock:           Arc<AsyncMutex<()>>,
+    /// The viewport/device override currently in effect via
+    /// [`Page::set_viewport`], or `None` when using the session's launch-time
+    /// default. `screenshot()`'s one-shot `viewport` option snapshots and
+    /// restores this so a temporary override never leaks to later calls on the
+    /// same page.
+    viewport_override:      Mutex<Option<Viewport>>,
+    network_enabled:        AtomicBool,
+    runtime_enabled:        AtomicBool,
+    pre_navigation_stealth: AtomicBool,
 }
 
 impl Page {
-    /// Wrap an existing CDP page.
-    pub(crate) fn new(inner: CdpPage) -> Self {
-        Self { inner, download_armed: AtomicBool::new(false), cursor: Mutex::new((0.0, 0.0)) }
+    /// Wrap an existing CDP page. `capture_lock` and `interrupts` are shared
+    /// by every page created from the same `BrowserSession`.
+    pub(crate) fn new(
+        inner: CdpPage,
+        capture_lock: Arc<AsyncMutex<()>>,
+        interrupts: Arc<InterruptRegistry>,
+    ) -> Self {
+        Self {
+            inner,
+            interrupts,
+            download_armed: AtomicBool::new(false),
+            cursor: Mutex::new((0.0, 0.0)),
+            network_enabled: AtomicBool::new(false),
+            runtime_enabled: AtomicBool::new(false),
+            pre_navigation_stealth: AtomicBool::new(false),
+            capture_lock,
+            viewport_override: Mutex::new(None),
+        }
+    }
+
+    /// The underlying CDP page, for sibling modules that need to issue raw
+    /// protocol commands (see [`crate::recording`], which drives the
+    /// `Page.startScreencast` domain directly).
+    pub(crate) fn cdp(&self) -> &CdpPage {
+        &self.inner
+    }
+
+    /// A second handle on the same tab, sharing the browser's capture lock and
+    /// interrupt registry.
+    ///
+    /// For background tasks that need to *query* a page the caller still owns —
+    /// [`crate::recording`]'s mask tracker re-resolves selectors on a timer
+    /// while the original `Page` stays behind its own lock. Deliberately not
+    /// `Clone`: the per-page state that isn't shared (virtual cursor position,
+    /// one-shot viewport override) resets on the new handle, so this is only
+    /// safe for read-only work like [`Page::resolve_selector`].
+    pub(crate) fn clone_handle(&self) -> Self {
+        Self::new(self.inner.clone(), Arc::clone(&self.capture_lock), Arc::clone(&self.interrupts))
+    }
+
+    /// The browser-wide capture lock this page shares with its siblings.
+    /// Cloned rather than borrowed so a caller can hold it across an await
+    /// without borrowing the page for that whole span.
+    pub(crate) fn capture_lock(&self) -> Arc<AsyncMutex<()>> {
+        Arc::clone(&self.capture_lock)
+    }
+
+    /// The id of the browser window this tab lives in.
+    ///
+    /// Chrome composites only the frontmost tab *of a window*, so two pages
+    /// sharing a window id cannot both paint — the constraint behind
+    /// [`Page::screenshot`]'s capture lock and
+    /// [`RecordingOptions::foreground`](crate::RecordingOptions::foreground).
+    /// Use this to check that a page intended for concurrent recording really
+    /// is alone in its window.
+    pub async fn window_id(&self) -> Result<i64> {
+        let params =
+            GetWindowForTargetParams::builder().target_id(self.inner.target_id().clone()).build();
+        let result = self
+            .inner
+            .execute(params)
+            .await
+            .map_err(|e| VoidCrawlError::PageError(format!("getWindowForTarget: {e}")))?;
+        Ok(result.result.window_id.inner().to_owned())
+    }
+
+    /// Whether this tab is the only one in its browser window.
+    ///
+    /// Chrome composites only a window's frontmost tab, so a page that shares
+    /// its window with others cannot paint while a sibling is active. A page
+    /// that is alone in its window keeps painting regardless of what other
+    /// windows do — which is what makes a concurrent, non-foregrounded
+    /// [`recording`](crate::recording) possible.
+    ///
+    /// Costs one `Target.getTargets` plus one `Browser.getWindowForTarget`
+    /// per page target, so it's a per-operation check, not a per-frame one.
+    pub async fn alone_in_window(&self) -> Result<bool> {
+        let mine = self.window_id().await?;
+        let targets = self
+            .inner
+            .execute(GetTargetsParams::default())
+            .await
+            .map_err(|e| VoidCrawlError::PageError(format!("getTargets: {e}")))?;
+
+        let own_target = self.target_id();
+        for info in &targets.result.target_infos {
+            // Only page targets occupy a window's tab strip; workers and
+            // iframes report a window but never occlude anything.
+            if info.r#type != "page" || info.target_id.inner() == &own_target {
+                continue;
+            }
+            let params =
+                GetWindowForTargetParams::builder().target_id(info.target_id.clone()).build();
+            // A target can die between enumeration and lookup; a target we
+            // can't place can't be proven to share this window.
+            if let Ok(result) = self.inner.execute(params).await
+                && *result.result.window_id.inner() == mine
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Reject a mutation while this target is parked by an explicit interrupt.
+    pub async fn ensure_active(&self) -> Result<()> {
+        self.interrupts.page_is_active(&self.target_id()).await
+    }
+
+    pub(crate) fn belongs_to_interrupt_registry(&self, registry: &Arc<InterruptRegistry>) -> bool {
+        Arc::ptr_eq(&self.interrupts, registry)
     }
 
     /// Whether a download is currently armed on this page (set by
@@ -433,8 +763,70 @@ impl Page {
         self.inner.target_id().inner().clone()
     }
 
+    /// Snapshot this tab's instrumentation state for routing/debugging.
+    pub fn instrumentation_state(&self) -> TabInstrumentationState {
+        let network_enabled = self.network_enabled.load(Ordering::Relaxed);
+        let runtime_enabled = self.runtime_enabled.load(Ordering::Relaxed);
+        let pre_navigation_stealth = self.pre_navigation_stealth.load(Ordering::Relaxed);
+        TabInstrumentationState {
+            low_cdp: !(network_enabled || runtime_enabled),
+            network_enabled,
+            runtime_enabled,
+            utility_world_enabled: false,
+            pre_navigation_stealth,
+        }
+    }
+
+    async fn ensure_network_enabled(&self) -> Result<()> {
+        if !self.network_enabled.load(Ordering::Relaxed) {
+            self.inner
+                .execute(NetworkEnableParams::default())
+                .await
+                .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+            self.network_enabled.store(true, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    async fn ensure_runtime_enabled(&self) -> Result<()> {
+        if !self.runtime_enabled.load(Ordering::Relaxed) {
+            self.inner
+                .enable_runtime()
+                .await
+                .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+            self.runtime_enabled.store(true, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    async fn frame_execution_context_with_runtime(
+        &self,
+        frame_id: FrameId,
+        frame_url_pattern: &str,
+    ) -> Result<ExecutionContextId> {
+        self.ensure_runtime_enabled().await?;
+        for attempt in 0..20 {
+            if let Some(context_id) = self
+                .inner
+                .frame_execution_context(frame_id.clone())
+                .await
+                .map_err(|e| VoidCrawlError::JsEvalError(e.to_string()))?
+            {
+                return Ok(context_id);
+            }
+            if attempt < 19 {
+                time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+        Err(VoidCrawlError::FrameNotFound(format!(
+            "{frame_url_pattern:?}: matched frame has no scriptable execution context \
+             (sandboxed without allow-scripts, cross-process, or not yet loaded)"
+        )))
+    }
+
     /// Apply stealth settings to this page.
     pub(crate) async fn apply_stealth(&self, cfg: &StealthConfig) -> Result<()> {
+        self.pre_navigation_stealth.store(true, Ordering::Relaxed);
         // 1. Built-in stealth (patches navigator.webdriver etc.)
         if cfg.use_builtin_stealth {
             if let Some(ua) = &cfg.user_agent {
@@ -490,14 +882,13 @@ impl Page {
                 .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
         }
 
-        // 3. Viewport / device metrics
-        let metrics = SetDeviceMetricsOverrideParams::new(
-            i64::from(cfg.viewport_width),
-            i64::from(cfg.viewport_height),
-            1.0,
-            false,
-        );
-        self.inner.execute(metrics).await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        // 3. Viewport / device metrics — through `set_viewport` (not a raw
+        // CDP call) so `viewport_override` reflects this as the page's
+        // baseline. Otherwise a later one-shot `screenshot(viewport: ...)`
+        // would see `current_viewport() == None`, "restore" by calling
+        // `clear_viewport`, and wipe this launch-time override instead of
+        // putting it back.
+        self.set_viewport(Viewport::custom(cfg.viewport_width, cfg.viewport_height)).await?;
 
         // 4. Bypass CSP so our injected JS can run
         if cfg.bypass_csp {
@@ -521,6 +912,7 @@ impl Page {
     /// tab. The script is registered through CDP; it does not modify fetch,
     /// XHR, or request interception.
     pub async fn add_init_script(&self, script: &str) -> Result<()> {
+        self.ensure_active().await?;
         self.inner
             .execute(AddScriptToEvaluateOnNewDocumentParams::new(script.to_string()))
             .await
@@ -543,6 +935,7 @@ impl Page {
 
     /// Navigate to `url` and wait for the CDP response.
     pub async fn navigate(&self, url: &str) -> Result<()> {
+        self.ensure_active().await?;
         self.inner.goto(url).await.map_err(|e| VoidCrawlError::NavigationFailed(e.to_string()))?;
         Ok(())
     }
@@ -584,6 +977,8 @@ impl Page {
         timeout: Duration,
         capture_endpoints: bool,
     ) -> Result<PageResponse> {
+        self.ensure_active().await?;
+        self.ensure_network_enabled().await?;
         let started = Instant::now();
         // Subscribe to ALL event streams BEFORE navigation so no events slip
         // through the gap between goto() and the listener setup.
@@ -743,6 +1138,7 @@ impl Page {
     ///
     /// This is fully async and event-driven — **no polling**.
     pub async fn wait_for_network_idle(&self, timeout: Duration) -> Result<Option<String>> {
+        self.ensure_network_enabled().await?;
         let mut events = self
             .inner
             .event_listener::<EventLifecycleEvent>()
@@ -787,7 +1183,7 @@ impl Page {
             .map_err(|e| VoidCrawlError::Other(format!("selector encode: {e}")))?;
         let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
         let js = format!(
-            "() => new Promise((resolve, reject) => {{\
+            "new Promise((resolve, reject) => {{\
               const sel = {sel_lit};\
               if (document.querySelector(sel)) return resolve(true);\
               const root = document.documentElement || document.body;\
@@ -805,7 +1201,13 @@ impl Page {
               }}, {timeout_ms});\
             }})"
         );
-        match self.inner.evaluate_function(js).await {
+        let params = EvaluateParams::builder()
+            .expression(js)
+            .return_by_value(true)
+            .await_promise(true)
+            .build()
+            .map_err(VoidCrawlError::JsEvalError)?;
+        match self.inner.evaluate_expression(params).await {
             Ok(_) => Ok(()),
             Err(e) => {
                 let msg = e.to_string();
@@ -837,10 +1239,25 @@ impl Page {
         self.inner.url().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))
     }
 
+    /// Collect the fixed, read-only document snapshot used by MCP inspection.
+    ///
+    /// This deliberately bypasses [`Self::ensure_active`]: the script is
+    /// internal, has no caller-provided input, and only reads the current DOM.
+    /// Arbitrary JavaScript remains blocked while an interrupt is active.
+    pub async fn document_snapshot(&self) -> Result<Value> {
+        let result = self
+            .inner
+            .evaluate(DOCUMENT_SNAPSHOT_JS)
+            .await
+            .map_err(|e| VoidCrawlError::JsEvalError(e.to_string()))?;
+        Ok(result.value().cloned().unwrap_or(Value::Null))
+    }
+
     // ── JavaScript ──────────────────────────────────────────────────────
 
     /// Evaluate a JS expression and return the result as a JSON value.
     pub async fn evaluate_js(&self, expression: &str) -> Result<Value> {
+        self.ensure_active().await?;
         let result = self
             .inner
             .evaluate(expression)
@@ -885,18 +1302,10 @@ impl Page {
         frame_url_pattern: &str,
         expression: &str,
     ) -> Result<Value> {
+        self.ensure_active().await?;
         let frame_id = self.resolve_frame(frame_url_pattern).await?;
-        let context_id = self
-            .inner
-            .frame_execution_context(frame_id)
-            .await
-            .map_err(|e| VoidCrawlError::JsEvalError(e.to_string()))?
-            .ok_or_else(|| {
-                VoidCrawlError::FrameNotFound(format!(
-                    "{frame_url_pattern:?}: matched frame has no scriptable execution \
-                     context (sandboxed without allow-scripts, or not yet loaded)"
-                ))
-            })?;
+        let context_id =
+            self.frame_execution_context_with_runtime(frame_id, frame_url_pattern).await?;
         let params = EvaluateParams::builder()
             .expression(expression)
             .context_id(context_id)
@@ -979,6 +1388,93 @@ impl Page {
         Ok(urls)
     }
 
+    // ── Viewport / device emulation ──────────────────────────────────────
+
+    /// Persistently override this page's CDP viewport: dimensions, device
+    /// pixel ratio, mobile/touch identity, and (if set) UA — the "set the
+    /// viewport once, then click/navigate/screenshot as that device" flow.
+    /// Stays in effect until [`Page::clear_viewport`] or another call to
+    /// this method; does **not** auto-restore.
+    ///
+    /// `device_scale_factor` drives `window.devicePixelRatio` and CSS
+    /// media-query matching (`min-resolution`, etc.) correctly, so layout
+    /// and JS see a real Retina/mobile device. It does **not** change the
+    /// pixel dimensions of a [`Page::screenshot`] PNG, though — CDP's
+    /// `Page.captureScreenshot` renders at CSS-pixel size regardless of
+    /// DPR in this configuration (tried both the device-metrics `scale`
+    /// field and the per-clip `scale`; neither affected raster output).
+    /// For pixel-perfect high-DPI captures, request `width`/`height`
+    /// already multiplied by the density you want.
+    ///
+    /// For a one-off override scoped to a single capture, pass
+    /// [`ScreenshotOptions::viewport`] to [`Page::screenshot`] instead —
+    /// that snapshots and restores whatever was here before, so it can't
+    /// leak a device identity to the next unrelated caller of a pooled tab.
+    pub async fn set_viewport(&self, viewport: Viewport) -> Result<()> {
+        let metrics = SetDeviceMetricsOverrideParams::new(
+            i64::from(viewport.width),
+            i64::from(viewport.height),
+            viewport.device_scale_factor,
+            viewport.mobile,
+        );
+        self.inner.execute(metrics).await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        self.inner
+            .execute(SetTouchEmulationEnabledParams::new(viewport.has_touch))
+            .await
+            .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        if let Some(ua) = viewport.user_agent.clone() {
+            let (nav_platform, metadata) = if viewport.mobile {
+                mobile_ua_platform_and_metadata(&ua)
+            } else {
+                client_hints_for_ua(&ua)
+            };
+            let mut builder =
+                SetUserAgentOverrideParams::builder().user_agent(ua).platform(nav_platform);
+            if let Some(metadata) = metadata {
+                builder = builder.user_agent_metadata(metadata);
+            }
+            let params = builder.build().map_err(VoidCrawlError::PageError)?;
+            self.inner
+                .execute(params)
+                .await
+                .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        }
+        *self
+            .viewport_override
+            .lock()
+            .map_err(|_| VoidCrawlError::Other("viewport lock poisoned".into()))? = Some(viewport);
+        // The device-metrics change doesn't always reflect in
+        // `window.innerWidth`/media queries synchronously once the CDP
+        // response returns — settle it before returning.
+        self.wait_for_repaint().await
+    }
+
+    /// Clear a [`Page::set_viewport`] override, returning to the session's
+    /// launch-time default viewport. Does not restore a prior UA override
+    /// — call `set_viewport` again with the desired identity if you need
+    /// one back.
+    pub async fn clear_viewport(&self) -> Result<()> {
+        self.inner
+            .execute(ClearDeviceMetricsOverrideParams {})
+            .await
+            .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        self.inner
+            .execute(SetTouchEmulationEnabledParams::new(false))
+            .await
+            .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        *self
+            .viewport_override
+            .lock()
+            .map_err(|_| VoidCrawlError::Other("viewport lock poisoned".into()))? = None;
+        self.wait_for_repaint().await
+    }
+
+    /// The viewport override currently in effect via [`Page::set_viewport`],
+    /// or `None` if using the session's launch-time default.
+    pub fn current_viewport(&self) -> Option<Viewport> {
+        self.viewport_override.lock().ok().and_then(|guard| guard.clone())
+    }
+
     // ── Screenshots & PDF ───────────────────────────────────────────────
 
     /// Capture a full-page PNG screenshot, returned as raw bytes.
@@ -992,32 +1488,150 @@ impl Page {
         }
     }
 
-    /// Capture a PNG screenshot with optional cropping and/or writing
-    /// to disk.
+    /// Capture a PNG screenshot with optional cropping, viewport override,
+    /// scrolling, and/or writing to disk.
     ///
     /// * No `path` → returns bytes in memory.
     /// * `path` set → writes PNG to disk and returns that path.
-    /// * `bbox` crops to a pixel region (CSS pixels, pre-DPR).
+    /// * `bbox` crops to a pixel region (CSS pixels, pre-DPR); with `scroll`
+    ///   set, `bbox.x`/`bbox.y` are relative to wherever that scroll lands
+    ///   rather than the top of the document.
+    /// * `viewport` swaps in a device/dimension override (see
+    ///   [`Page::set_viewport`]) for just this capture and restores whatever
+    ///   was active before, even on error.
+    /// * `scroll` moves the page before capturing (see [`ScrollTarget`]) and
+    ///   restores the original scroll position after, even on error.
     pub async fn screenshot(&self, opts: ScreenshotOptions) -> Result<ScreenshotOutput> {
+        if opts.bbox.is_some() && opts.selector.is_some() {
+            return Err(VoidCrawlError::Other(
+                "ScreenshotOptions: `bbox` and `selector` are mutually exclusive".into(),
+            ));
+        }
+
+        // One-shot viewport override for just this capture — snapshot
+        // whatever's already in effect so it's restored exactly, even on
+        // error, so a temporary device identity never leaks to the next
+        // call on this page (important on pooled tabs shared across
+        // unrelated callers).
+        let restore_viewport = if let Some(ref viewport) = opts.viewport {
+            let prev = self.current_viewport();
+            self.set_viewport(viewport.clone()).await?;
+            Some(prev)
+        } else {
+            None
+        };
+
+        let result = self.screenshot_inner(&opts).await;
+
+        if let Some(prev) = restore_viewport {
+            let restored = match prev {
+                Some(v) => self.set_viewport(v).await,
+                None => self.clear_viewport().await,
+            };
+            let _ = restored;
+        }
+
+        result
+    }
+
+    async fn screenshot_inner(&self, opts: &ScreenshotOptions) -> Result<ScreenshotOutput> {
+        // Scroll before cropping — lets a fixed viewport (e.g. a 4K
+        // desktop) be paged through and a specific on-screen region cropped
+        // from wherever it lands, the way a human scrolling and
+        // screenshotting would. Restored after capture for the same
+        // leak-proofing reason as the viewport override above.
+        let restore_scroll = match opts.scroll {
+            Some(_) => Some(self.scroll_position().await?),
+            None => None,
+        };
+        let bbox_shift = if let Some(target) = opts.scroll {
+            self.scroll_to(target).await?;
+            self.scroll_position().await?
+        } else {
+            (0.0, 0.0)
+        };
+
+        // A `selector` resolves to viewport-relative coordinates *as of
+        // right now* (after any scroll above), so unlike a caller-supplied
+        // numeric `bbox` — specified relative to the page and shifted by
+        // `bbox_shift` below — it needs no shift: `getBoundingClientRect`
+        // already reflects wherever the page is currently scrolled to.
+        let effective_bbox: Option<(Bbox, bool)> = if let Some(bbox) = opts.bbox {
+            Some((bbox, true))
+        } else if let Some(entry) = &opts.selector {
+            match self.resolve_selector(entry).await? {
+                SelectorResolution::Resolved { bbox } => Some((bbox, false)),
+                SelectorResolution::Empty { reason } => {
+                    return Err(VoidCrawlError::ElementNotVisible(reason));
+                }
+                SelectorResolution::Ambiguous { reason, .. } => {
+                    return Err(VoidCrawlError::AmbiguousSelector(reason));
+                }
+            }
+        } else {
+            None
+        };
+
         let mut builder = ScreenshotParams::builder().format(CaptureScreenshotFormat::Png);
-        if let Some(bbox) = opts.bbox {
-            builder = builder.clip(Viewport {
-                x:      f64::from(bbox.x),
-                y:      f64::from(bbox.y),
-                width:  f64::from(bbox.width),
-                height: f64::from(bbox.height),
+        if let Some((bbox, apply_shift)) = effective_bbox {
+            let (shift_x, shift_y) = if apply_shift { bbox_shift } else { (0.0, 0.0) };
+            builder = builder
+                .clip(CdpClipViewport {
+                    x:      f64::from(bbox.x) + shift_x,
+                    y:      f64::from(bbox.y) + shift_y,
+                    width:  f64::from(bbox.width),
+                    height: f64::from(bbox.height),
+                    scale:  1.0,
+                })
+                // A region can legitimately sit outside the layout viewport
+                // (e.g. paging through a fixed viewport via `scroll`), so
+                // always allow capture beyond it rather than silently
+                // clamping to whatever's currently on screen.
+                .capture_beyond_viewport(true);
+        } else if opts.full_page {
+            builder = builder.full_page(true);
+        } else if let Some(vp) = self.current_viewport() {
+            // Viewport-only: an explicit clip at the tracked viewport's exact
+            // size, rather than relying on Chrome's ambient "currently
+            // visible" state. A prior full-page/capture-beyond-viewport
+            // capture on this same page can leave that ambient state stale,
+            // so an explicit size makes this mode order-independent.
+            builder = builder.clip(CdpClipViewport {
+                x:      0.0,
+                y:      0.0,
+                width:  f64::from(vp.width),
+                height: f64::from(vp.height),
                 scale:  1.0,
             });
-        } else {
-            builder = builder.full_page(true);
         }
+        // else: no tracked viewport (e.g. a page adopted via attach_page
+        // that skipped apply_stealth) — leave unset and take whatever
+        // Chrome currently considers the visible viewport.
+
+        // Headless Chrome only reliably composites a frame for the
+        // foregrounded tab. With several tabs sharing one browser process
+        // (the pool's normal case), an un-guarded capture on a backgrounded
+        // tab can fail with CDP -32000 ("Unable to capture screenshot").
+        // Hold the browser-wide capture lock only for the activate+capture
+        // instant — navigation, JS, and extraction on other tabs stay fully
+        // concurrent; they just take turns for this one step.
+        let capture_guard = self.capture_lock.lock().await;
+        self.inner
+            .bring_to_front()
+            .await
+            .map_err(|e| VoidCrawlError::ScreenshotError(e.to_string()))?;
         let bytes = self
             .inner
             .screenshot(builder.build())
             .await
             .map_err(|e| VoidCrawlError::ScreenshotError(e.to_string()))?;
+        drop(capture_guard);
 
-        if let Some(path) = opts.path {
+        if let Some((x, y)) = restore_scroll {
+            let _ = self.evaluate_js(&format!("window.scrollTo({x}, {y})")).await;
+        }
+
+        if let Some(path) = opts.path.clone() {
             fs::write(&path, &bytes).map_err(|e| {
                 VoidCrawlError::ScreenshotError(format!("write {}: {e}", path.display()))
             })?;
@@ -1025,6 +1639,62 @@ impl Page {
         } else {
             Ok(ScreenshotOutput::Bytes(bytes))
         }
+    }
+
+    /// Current `window.scrollX`/`scrollY`, in CSS pixels.
+    pub(crate) async fn scroll_position(&self) -> Result<(f64, f64)> {
+        let value = self.evaluate_js("[window.scrollX, window.scrollY]").await?;
+        let arr = value.as_array().ok_or_else(|| {
+            VoidCrawlError::JsEvalError("scroll position: expected a [x, y] array".into())
+        })?;
+        let x = arr.first().and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+        let y = arr.get(1).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+        Ok((x, y))
+    }
+
+    /// Scroll to `target` (see [`ScrollTarget`]) and wait for the resulting
+    /// layout to actually paint — two animation frames — before the caller
+    /// captures, rather than a blind sleep.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "scroll offsets are CSS pixels, always far below f64's 2^52 exact-integer range"
+    )]
+    pub(crate) async fn scroll_to(&self, target: ScrollTarget) -> Result<()> {
+        let y = match target {
+            ScrollTarget::Pixels(y) => y as f64,
+            ScrollTarget::Viewports(n) => {
+                let height = self.evaluate_js("window.innerHeight").await?.as_f64().unwrap_or(0.0);
+                height * n
+            }
+        };
+        self.evaluate_js(&format!("window.scrollTo(0, {y})")).await?;
+        self.wait_for_repaint().await
+    }
+
+    /// Wait for two animation frames — a layout-affecting CDP command
+    /// (device-metrics override, scroll) doesn't always reflect in
+    /// `window.innerWidth`/`scrollY`/etc. synchronously once the CDP
+    /// response returns; this settles it before the caller reads or
+    /// captures, without a blind sleep.
+    ///
+    /// Bounded: `requestAnimationFrame` never fires on a backgrounded tab in
+    /// headless Chrome (the same reason `screenshot()` brings a tab to
+    /// front before capturing — see `capture_lock`), and this is called
+    /// from `set_viewport`/`clear_viewport`, which run on pool tabs that
+    /// are *not* guaranteed to be foregrounded. An unbounded wait there
+    /// would deadlock pool warmup/eviction forever instead of just being
+    /// occasionally stale. Best-effort: on timeout the caller's JS-visible
+    /// state may lag by a frame until the tab is next foregrounded or
+    /// navigated, which is an acceptable trade for "never hangs."
+    async fn wait_for_repaint(&self) -> Result<()> {
+        let _ = time::timeout(
+            Duration::from_millis(500),
+            self.evaluate_js(
+                "new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))",
+            ),
+        )
+        .await;
+        Ok(())
     }
 
     /// Generate a PDF of the page, returned as raw bytes.
@@ -1069,6 +1739,7 @@ impl Page {
         timeout: Duration,
         max_bytes: u64,
     ) -> Result<DownloadOutcome> {
+        self.ensure_active().await?;
         let outcome = self.run_download(url, dir, timeout, max_bytes).await;
         // ALWAYS reset: setDownloadBehavior is browser-context-scoped and our
         // download_path points at a quarantine dir the caller is about to
@@ -1093,6 +1764,7 @@ impl Page {
     /// `dir` should be a fresh directory the caller treats as quarantine and
     /// scans before trusting the file.
     pub async fn arm_download(&self, dir: &Path, max_bytes: u64) -> Result<DownloadCapture> {
+        self.ensure_active().await?;
         let params = SetDownloadBehaviorParams::builder()
             .behavior(SetDownloadBehaviorBehavior::AllowAndName)
             .download_path(dir.to_string_lossy().into_owned())
@@ -1285,6 +1957,7 @@ impl Page {
         nth: usize,
         humanize: bool,
     ) -> Result<()> {
+        self.ensure_active().await?;
         let nodes = self.query_ax_nodes(Some(role), Some(name)).await?;
         let backends: Vec<_> =
             nodes.iter().filter(|n| !n.ignored).filter_map(|n| n.backend_dom_node_id).collect();
@@ -1351,6 +2024,151 @@ impl Page {
             .map_err(VoidCrawlError::PageError)?;
         self.inner.execute(call).await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
         Ok(())
+    }
+
+    // ── Selector-backed bbox resolution ──────────────────────────────────
+
+    /// Resolve a Yosoi [`SelectorEntry`] (any of its 8 kinds) to a CSS-pixel
+    /// rectangle. See the [`selector`](crate::selector) module docs for the
+    /// full design: all three outcomes — resolved, empty, ambiguous — are a
+    /// typed `Ok(...)`, not an exception; `Err` is reserved for genuine
+    /// infra failures (a bad regex/XPath pattern, a CDP call failing).
+    ///
+    /// For a one-off crop, pass [`ScreenshotOptions::selector`] to
+    /// [`Page::screenshot`] instead — that converts a non-`Resolved`
+    /// outcome into an actionable `Err`, since a screenshot fundamentally
+    /// needs a rectangle.
+    pub async fn resolve_selector(&self, entry: &SelectorEntry) -> Result<SelectorResolution> {
+        match entry.kind {
+            SelectorKind::Jsonld => Ok(SelectorResolution::Empty {
+                reason: "jsonld selectors address non-visual structured data (a <script> tag \
+                         has no render box); not resolved to a rectangle"
+                    .into(),
+            }),
+            SelectorKind::Regex => Ok(SelectorResolution::Empty {
+                reason: "regex selectors match raw HTML text, which has no canonical DOM \
+                         element; not resolved to a rectangle"
+                    .into(),
+            }),
+            SelectorKind::Visual => Ok(self.resolve_visual_selector(entry).await?),
+            SelectorKind::Role => self.resolve_role_selector(entry).await,
+            SelectorKind::Css
+            | SelectorKind::Xpath
+            | SelectorKind::Attr
+            | SelectorKind::GlobalId => self.resolve_dom_selector(entry).await,
+        }
+    }
+
+    /// `visual`: an exact 1x1 CSS-pixel box at `(x, y)` — no invented
+    /// hit-radius. `Empty` when coordinates are missing or fall outside the
+    /// current viewport (`window.innerWidth`/`innerHeight`).
+    async fn resolve_visual_selector(&self, entry: &SelectorEntry) -> Result<SelectorResolution> {
+        let (Some(x), Some(y)) = (entry.x, entry.y) else {
+            return Ok(SelectorResolution::Empty {
+                reason: "visual selector requires both x and y".into(),
+            });
+        };
+        if x < 0.0 || y < 0.0 {
+            return Ok(SelectorResolution::Empty {
+                reason: format!("visual point ({x}, {y}) has a negative coordinate"),
+            });
+        }
+        let dims = self
+            .evaluate_js("[window.innerWidth, window.innerHeight]")
+            .await?
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let (vw, vh) = (
+            dims.first().and_then(Value::as_f64).unwrap_or(f64::INFINITY),
+            dims.get(1).and_then(Value::as_f64).unwrap_or(f64::INFINITY),
+        );
+        if x > vw || y > vh {
+            return Ok(SelectorResolution::Empty {
+                reason: format!(
+                    "visual point ({x}, {y}) is outside the current viewport ({vw}x{vh})"
+                ),
+            });
+        }
+        Ok(SelectorResolution::Resolved {
+            bbox: RawRect { x, y, width: 1.0, height: 1.0 }.to_bbox(),
+        })
+    }
+
+    /// `role`: `Accessibility.queryAXTree` role + exact accessible-name
+    /// match — the same resolution [`Page::click_by_role`] uses, so a
+    /// selector that could click an element can also crop it.
+    async fn resolve_role_selector(&self, entry: &SelectorEntry) -> Result<SelectorResolution> {
+        let name = entry.name.as_deref();
+        let nodes = self.query_ax_nodes(Some(&entry.value), name).await?;
+        let backends: Vec<_> =
+            nodes.iter().filter(|n| !n.ignored).filter_map(|n| n.backend_dom_node_id).collect();
+        let describe = || format!("role={:?} name={:?}", entry.value, name.unwrap_or(""));
+
+        if backends.is_empty() {
+            return Ok(SelectorResolution::Empty {
+                reason: format!("{} matched no AX nodes", describe()),
+            });
+        }
+        // AX-tree matches are already "exists in the accessibility tree",
+        // which excludes `display:none`/`aria-hidden` — but the box model
+        // can still be a zero-area detached node, so resolve+filter each
+        // candidate the same way `pick_resolution` treats DOM rects.
+        let mut visible = Vec::with_capacity(backends.len());
+        for backend_id in &backends {
+            let bm = self
+                .inner
+                .execute(GetBoxModelParams {
+                    backend_node_id: Some(*backend_id),
+                    ..Default::default()
+                })
+                .await;
+            let Ok(bm) = bm else { continue };
+            // The *border* box, not the content box: it's what
+            // `getBoundingClientRect()` returns for a typical element, and
+            // every other selector kind here resolves via that same JS
+            // call — using the content box would exclude an element's own
+            // padding/border and disagree with them for no reason.
+            let q = bm.result.model.border.inner();
+            if q.len() < 8 {
+                continue;
+            }
+            let xs = [q[0], q[2], q[4], q[6]];
+            let ys = [q[1], q[3], q[5], q[7]];
+            let left = xs.iter().copied().fold(f64::INFINITY, f64::min);
+            let top = ys.iter().copied().fold(f64::INFINITY, f64::min);
+            let right = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let bottom = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let (width, height) = (right - left, bottom - top);
+            if width > 0.0 && height > 0.0 {
+                visible.push(RawRect { x: left, y: top, width, height });
+            }
+        }
+        Ok(selector::pick_resolution(backends.len(), &visible, entry.nth, describe))
+    }
+
+    /// `css` / `xpath` / `attr` / `global_id`: gather DOM candidates (see
+    /// [`selector::candidates_js`]), filter to visible ones, then resolve
+    /// via [`selector::pick_resolution`].
+    async fn resolve_dom_selector(&self, entry: &SelectorEntry) -> Result<SelectorResolution> {
+        let candidates = selector::candidates_js(entry).ok_or_else(|| {
+            VoidCrawlError::PageError(format!("{:?} has no DOM candidate step", entry.kind))
+        })?;
+        let count_js = format!("({candidates}).length");
+        let count = self.evaluate_js(&count_js).await?.as_u64().ok_or_else(|| {
+            VoidCrawlError::JsEvalError("candidate count was not a number".into())
+        })?;
+        let total_matches = usize::try_from(count).map_err(|_| {
+            VoidCrawlError::JsEvalError(format!("implausible candidate count: {count}"))
+        })?;
+
+        let rects_js = selector::visible_rects_js(&candidates);
+        let raw: Value = self.evaluate_js(&rects_js).await?;
+        let visible: Vec<RawRect> = serde_json::from_value(raw)
+            .map_err(|e| VoidCrawlError::JsEvalError(format!("rect decode failed: {e}")))?;
+
+        let describe = || format!("{:?} {:?}", entry.kind, entry.value);
+        Ok(selector::pick_resolution(total_matches, &visible, entry.nth, describe))
     }
 
     /// Compact accessibility outline of a specific (possibly cross-origin)
@@ -1520,6 +2338,7 @@ impl Page {
     /// **No page-world JS** is injected. The path length/duration scale with
     /// distance and stay bounded for agent workflows.
     pub async fn move_mouse(&self, x: f64, y: f64, humanize: bool) -> Result<()> {
+        self.ensure_active().await?;
         if humanize {
             let start = *self
                 .cursor
@@ -1566,6 +2385,7 @@ impl Page {
     ///
     /// [`move_mouse`]: Self::move_mouse
     pub async fn click_xy(&self, x: f64, y: f64, humanize: bool) -> Result<()> {
+        self.ensure_active().await?;
         self.move_mouse(x, y, humanize).await?;
         self.dispatch_mouse_event(
             DispatchMouseEventType::MousePressed,
@@ -1610,6 +2430,7 @@ impl Page {
         longitude: f64,
         accuracy: Option<f64>,
     ) -> Result<()> {
+        self.ensure_active().await?;
         // Grant the geolocation permission first, otherwise headless Chrome
         // auto-denies `navigator.geolocation` and the override is never read.
         // Origin omitted → applies to every origin (incl. opaque `data:`).
@@ -1636,6 +2457,7 @@ impl Page {
     /// `"fr-FR"`). This is the lever that shifts region-aware content like
     /// Google Maps results or localized pricing.
     pub async fn set_locale(&self, locale: &str) -> Result<()> {
+        self.ensure_active().await?;
         let params = SetLocaleOverrideParams { locale: Some(locale.to_string()) };
         self.inner.execute(params).await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
         Ok(())
@@ -1644,6 +2466,7 @@ impl Page {
     /// Override the timezone by IANA id (e.g. `"America/New_York"`). Affects
     /// `Date`, `Intl`, and any server probes that read the rendered clock.
     pub async fn set_timezone(&self, timezone_id: &str) -> Result<()> {
+        self.ensure_active().await?;
         let params = SetTimezoneOverrideParams::new(timezone_id.to_string());
         self.inner.execute(params).await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
         Ok(())
@@ -1716,6 +2539,7 @@ impl Page {
 
     /// Click on the first element matching `selector`.
     pub async fn click_element(&self, selector: &str) -> Result<()> {
+        self.ensure_active().await?;
         let el = self
             .inner
             .find_element(selector)
@@ -1729,6 +2553,7 @@ impl Page {
     ///
     /// Focuses the element first so that key events are directed to it.
     pub async fn type_into(&self, selector: &str, text: &str) -> Result<()> {
+        self.ensure_active().await?;
         let el = self
             .inner
             .find_element(selector)
@@ -1743,6 +2568,8 @@ impl Page {
 
     /// Set extra HTTP headers for all subsequent requests from this page.
     pub async fn set_headers(&self, headers: HashMap<String, String>) -> Result<()> {
+        self.ensure_active().await?;
+        self.ensure_network_enabled().await?;
         let json_val =
             serde_json::to_value(&headers).map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
         let params = SetExtraHttpHeadersParams::new(Headers::new(json_val));
@@ -1759,6 +2586,7 @@ impl Page {
 
     /// Set a single cookie on the current page.
     pub async fn set_cookie(&self, cookie: CookieParam) -> Result<()> {
+        self.ensure_active().await?;
         self.inner
             .set_cookie(cookie)
             .await
@@ -1768,6 +2596,7 @@ impl Page {
 
     /// Set multiple cookies at once.
     pub async fn set_cookies(&self, cookies: Vec<CookieParam>) -> Result<()> {
+        self.ensure_active().await?;
         self.inner
             .set_cookies(cookies)
             .await
@@ -1777,6 +2606,7 @@ impl Page {
 
     /// Delete cookies by name, optionally scoped by domain and path.
     pub async fn delete_cookies(&self, cookies: Vec<DeleteCookiesParams>) -> Result<()> {
+        self.ensure_active().await?;
         self.inner
             .delete_cookies(cookies)
             .await
@@ -1804,6 +2634,7 @@ impl Page {
         delta_y: Option<f64>,
         modifiers: Option<i64>,
     ) -> Result<()> {
+        self.ensure_active().await?;
         let mut builder = DispatchMouseEventParams::builder().r#type(event_type).x(x).y(y);
 
         if let Some(b) = button {
@@ -1839,6 +2670,7 @@ impl Page {
         text: Option<&str>,
         modifiers: Option<i64>,
     ) -> Result<()> {
+        self.ensure_active().await?;
         let mut builder = DispatchKeyEventParams::builder().r#type(event_type);
 
         if let Some(k) = key {
@@ -2129,6 +2961,51 @@ fn client_hints_for_ua(ua: &str) -> (String, Option<UserAgentMetadata>) {
     // platform_version, architecture, model, and mobile are all set above, so
     // this is `Some` in practice. `None` (unreachable) simply skips metadata.
     (nav_platform.to_string(), builder.build().ok())
+}
+
+/// The mobile counterpart to [`client_hints_for_ua`], used by
+/// [`Page::set_viewport`] for device-preset UAs. Real Safari (iPhone/iPad
+/// UAs) never sends Client-Hints headers at all, so those get a plain UA
+/// override with no fabricated metadata — matching a real device rather
+/// than inventing brands Safari itself doesn't have. Chrome-on-Android UAs
+/// get `mobile: true` metadata built the same way `client_hints_for_ua`
+/// builds it for desktop Chrome.
+fn mobile_ua_platform_and_metadata(ua: &str) -> (String, Option<UserAgentMetadata>) {
+    if ua.contains("iPad") {
+        return ("iPad".to_string(), None);
+    }
+    if ua.contains("iPhone") {
+        return ("iPhone".to_string(), None);
+    }
+
+    let chrome_ver: Option<&str> =
+        ua.split("Chrome/").nth(1).and_then(|s| s.split_whitespace().next());
+    let major: Option<&str> = chrome_ver.and_then(|v| v.split('.').next());
+
+    let mut builder = UserAgentMetadata::builder()
+        .platform("Android")
+        .platform_version("14.0.0")
+        .architecture("")
+        .model("")
+        .mobile(true)
+        .bitness("64")
+        .wow64(false);
+
+    if let (Some(major), Some(full)) = (major, chrome_ver) {
+        builder = builder
+            .brands([
+                UserAgentBrandVersion::new("Chromium", major),
+                UserAgentBrandVersion::new("Google Chrome", major),
+                UserAgentBrandVersion::new("Not_A Brand", "24"),
+            ])
+            .full_version_lists([
+                UserAgentBrandVersion::new("Chromium", full),
+                UserAgentBrandVersion::new("Google Chrome", full),
+                UserAgentBrandVersion::new("Not_A Brand", "24.0.0.0"),
+            ]);
+    }
+
+    ("Linux armv8l".to_string(), builder.build().ok())
 }
 
 #[cfg(test)]

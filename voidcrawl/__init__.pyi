@@ -23,6 +23,18 @@ from voidcrawl._ext import (
     ChromeProfileBusy as ChromeProfileBusy,
 )
 from voidcrawl._ext import (
+    Frame as Frame,
+)
+from voidcrawl._ext import (
+    InterruptExpired as InterruptExpired,
+)
+from voidcrawl._ext import (
+    InterruptNotFound as InterruptNotFound,
+)
+from voidcrawl._ext import (
+    InterruptTerminal as InterruptTerminal,
+)
+from voidcrawl._ext import (
     NavigationError as NavigationError,
 )
 from voidcrawl._ext import (
@@ -50,10 +62,25 @@ from voidcrawl._ext import (
     ProfileNotFound as ProfileNotFound,
 )
 from voidcrawl._ext import (
+    RecordedRegion as RecordedRegion,
+)
+from voidcrawl._ext import (
+    Recording as Recording,
+)
+from voidcrawl._ext import (
+    RecordingHandle as RecordingHandle,
+)
+from voidcrawl._ext import (
     ResponseExpectation as ResponseExpectation,
 )
 from voidcrawl._ext import (
     ResponseTimeoutError as ResponseTimeoutError,
+)
+from voidcrawl._ext import (
+    SessionInterrupted as SessionInterrupted,
+)
+from voidcrawl._ext import (
+    TabInstrumentationState as TabInstrumentationState,
 )
 from voidcrawl._ext import (
     VoidCrawlError as VoidCrawlError,
@@ -66,6 +93,12 @@ from voidcrawl.actions._protocol import (
 )
 from voidcrawl.actions._protocol import (
     Tab as Tab,
+)
+from voidcrawl.interrupts import (
+    InterruptRef as InterruptRef,
+)
+from voidcrawl.interrupts import (
+    InterruptRequest as InterruptRequest,
 )
 from voidcrawl.profiles import (
     ManagedProfileSnapshot as ManagedProfileSnapshot,
@@ -120,6 +153,12 @@ __all__ = [
     "CaptchaDetected",
     "CapturedResponse",
     "ChromeProfileBusy",
+    "Frame",
+    "InterruptExpired",
+    "InterruptNotFound",
+    "InterruptRef",
+    "InterruptRequest",
+    "InterruptTerminal",
     "JsTab",
     "ManagedProfileSnapshot",
     "ManagedProfileSplit",
@@ -134,13 +173,18 @@ __all__ = [
     "ProfileLeaseExpired",
     "ProfileNotFound",
     "ProfileRegistry",
+    "RecordedRegion",
+    "Recording",
+    "RecordingHandle",
     "ResponseExpectation",
     "ResponseTimeoutError",
     "ScaleProfile",
     "ScaleReport",
     "Schema",
     "Selector",
+    "SessionInterrupted",
     "Tab",
+    "TabInstrumentationState",
     "Text",
     "VoidCrawlError",
     "acquire_profile",
@@ -162,6 +206,7 @@ class BrowserConfig:
     user_data_dir: str | None
     ws_url: str | None
     port: int | None
+    cdp_mode: Literal["normal", "minimal"] | None
     debug: bool
     stepping: bool
     highlight: bool
@@ -179,6 +224,7 @@ class BrowserConfig:
         user_data_dir: str | None = None,
         ws_url: str | None = None,
         port: int | None = None,
+        cdp_mode: Literal["normal", "minimal"] | None = None,
         debug: bool = False,
         stepping: bool = True,
         highlight: bool = True,
@@ -241,8 +287,14 @@ class BrowserSession:
         self, exc_type: object, exc_val: object, exc_tb: object
     ) -> bool: ...
     async def new_page(self, url: str | None = None) -> Page: ...
+    async def new_page_in_window(self, url: str) -> Page: ...
     def page(self, url: str | None = None) -> _PageContext: ...
     async def attach_page(self, target_id: str) -> Page: ...
+    async def interrupt(
+        self, page: Page, request: InterruptRequest
+    ) -> InterruptRef: ...
+    async def resume(self, interrupt_id: str) -> InterruptRef: ...
+    async def release(self, interrupt_id: str) -> InterruptRef: ...
     async def websocket_url(self) -> str: ...
     async def version(self) -> str: ...
     async def close(self) -> None: ...

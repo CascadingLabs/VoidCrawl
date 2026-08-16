@@ -14,4 +14,5 @@ cd "$(dirname "$0")"
 cargo build --release -p voidcrawl-mcp
 
 # 2. Build + install the Python extension (editable).
-maturin develop --release --manifest-path crates/pyo3_bindings/Cargo.toml
+# MP4/WebM recording uses the system ffmpeg binary (required at runtime).
+maturin develop --release --manifest-path crates/pyo3_bindings/Cargo.toml --features encode-ffmpeg

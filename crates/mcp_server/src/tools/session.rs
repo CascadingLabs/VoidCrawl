@@ -3,7 +3,7 @@
 //! hold the returned `session_id` across tool calls until
 //! `session_close`.
 
-use std::{env, sync::Arc, time::Duration};
+use std::{collections::HashMap, env, sync::Arc, time::Duration};
 
 use rmcp::ErrorData;
 use schemars::JsonSchema;
@@ -169,6 +169,9 @@ pub async fn open(
         last_navigation: Mutex::new(None),
         challenge: Mutex::new(None),
         pending_download: Mutex::new(None),
+        pending_network_capture: Mutex::new(None),
+        pending_recording: Mutex::new(None),
+        cookie_leases: Mutex::new(HashMap::new()),
     });
     server.state().sessions.insert(id.clone(), handle).await;
     Ok(SessionOpenResult {

@@ -19,7 +19,9 @@ pub fn map_err(err: VoidCrawlError) -> ErrorData {
         | VoidCrawlError::FrameNotFound(s)
         | VoidCrawlError::AmbiguousFrame(s)
         | VoidCrawlError::NavigationFailed(s)
-        | VoidCrawlError::JsEvalError(s) => ErrorData::invalid_params(s, None),
+        | VoidCrawlError::JsEvalError(s)
+        | VoidCrawlError::ElementNotVisible(s)
+        | VoidCrawlError::AmbiguousSelector(s) => ErrorData::invalid_params(s, None),
         VoidCrawlError::Timeout(s) => ErrorData::internal_error(format!("timeout: {s}"), None),
         VoidCrawlError::BrowserClosed => ErrorData::internal_error("browser closed", None),
         VoidCrawlError::CaptchaDetected { ref kind } => {
@@ -46,6 +48,25 @@ pub fn map_err(err: VoidCrawlError) -> ErrorData {
         }
         VoidCrawlError::ProfileNotFound { ref name, ref searched } => {
             let data = tagged("ProfileNotFound", json!({ "name": name, "searched": searched }));
+            ErrorData::invalid_params(err.to_string(), Some(obj(data)))
+        }
+        VoidCrawlError::SessionInterrupted { ref interrupt_id } => {
+            let data = tagged("SessionInterrupted", json!({ "interrupt_id": interrupt_id }));
+            ErrorData::internal_error(err.to_string(), Some(obj(data)))
+        }
+        VoidCrawlError::InterruptExpired { ref interrupt_id } => {
+            let data = tagged("InterruptExpired", json!({ "interrupt_id": interrupt_id }));
+            ErrorData::internal_error(err.to_string(), Some(obj(data)))
+        }
+        VoidCrawlError::InterruptTerminal { ref interrupt_id, ref state } => {
+            let data = tagged(
+                "InterruptTerminal",
+                json!({ "interrupt_id": interrupt_id, "state": state }),
+            );
+            ErrorData::internal_error(err.to_string(), Some(obj(data)))
+        }
+        VoidCrawlError::InterruptNotFound { ref interrupt_id } => {
+            let data = tagged("InterruptNotFound", json!({ "interrupt_id": interrupt_id }));
             ErrorData::invalid_params(err.to_string(), Some(obj(data)))
         }
         other => ErrorData::internal_error(other.to_string(), None),

@@ -190,6 +190,19 @@ class TestPoolConfigFromDocker:
         assert cfg.browsers == 3
         assert "http://localhost:5000" in cfg.chrome_ws_urls
 
+    def test_headful_ports_follow_browser_count(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"CDP_PORT_BASE": "19222", "BROWSER_COUNT": "3"},
+            clear=True,
+        ):
+            cfg = PoolConfig.from_docker(headful=True, check=False)
+        assert cfg.chrome_ws_urls == [
+            "http://localhost:19222",
+            "http://localhost:19223",
+            "http://localhost:19224",
+        ]
+
     def test_tabs_per_browser(self) -> None:
         cfg = PoolConfig.from_docker(tabs_per_browser=8, check=False)
         assert cfg.tabs_per_browser == 8
