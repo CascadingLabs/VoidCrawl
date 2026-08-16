@@ -181,6 +181,7 @@ __all__ = [
     "Selector",
     "SessionInterrupted",
     "Tab",
+    "TabInstrumentationState",
     "Text",
     "VoidCrawlError",
     "acquire_profile",

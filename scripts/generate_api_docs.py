@@ -94,6 +94,17 @@ def _source_text_at_ref(ref: str, rel_path: str) -> str:
     return result.stdout
 
 
+def _existing_output_ref(path: Path, repo_url: str) -> str | None:
+    """Return the source-link ref already committed in a generated doc file."""
+    if not path.exists():
+        return None
+    pattern = re.compile(
+        rf'href="{re.escape(repo_url)}/blob/(.+?)/(?:voidcrawl|scripts)/'
+    )
+    match = pattern.search(path.read_text())
+    return match.group(1) if match else None
+
+
 def _validate_source_links(content: str, repo_url: str, ref: str) -> None:
     """Validate generated GitHub source links against the local git database."""
     link_pattern = re.compile(
@@ -674,7 +685,8 @@ def main() -> None:
         default="",
         help=(
             "Git ref (tag/branch/commit) for source links; defaults to the "
-            "current commit SHA"
+            "current commit SHA; --check reuses the existing output file ref "
+            "when omitted so committed docs do not chase their own commit SHA"
         ),
     )
     args = parser.parse_args()
@@ -715,9 +727,11 @@ def main() -> None:
         out_path = (
             args.output or "../VoidCrawlDocs/voidcrawl/reference/api-reference.md"
         )
+        out = Path(out_path)
+        if args.check and not args.ref:
+            ref = _existing_output_ref(out, args.github_repo) or ref
         content = generate(version, exclude, args.github_repo, ref)
         _validate_source_links(content, args.github_repo, ref)
-        out = Path(out_path)
         if args.check:
             _check_file(out, content)
             return

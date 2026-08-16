@@ -12,7 +12,7 @@ What voidcrawl does, and why each piece exists:
 
 | Layer | What we do | Why |
 |---|---|---|
-| **Launch flags** | Drop chromiumoxide's `--enable-automation`/`--disable-extensions`; add `--disable-blink-features=AutomationControlled` + zendriver flags | The automation signal lives in the flags, not JS. `AutomationControlled` is what makes `navigator.webdriver` **`false`** (a native value — we do **not** patch it in JS). |
+| **Launch flags** | Drop chromiumoxide's `--enable-automation`/`--disable-extensions`; use a nodriver/zendriver-style low-noise flag set | The biggest automation signal lives in launch flags. With `--enable-automation` absent, Chrome reports `navigator.webdriver === false` natively — no JS patch needed. |
 | **No JS injection** | `addScriptToEvaluateOnNewDocument` is **empty** | Each injected script is itself a fingerprint. We patch nothing in page-world JS. |
 | **UA / Client Hints** | Real UA (Headless stripped), with `navigator.platform` + `userAgentData` (Sec-CH-UA) **derived from that UA** so they agree | A Linux UA with `platform === "Win32"` or empty `brands` is a bot tell. |
 | **GPU** | `--headless=new` + ANGLE + `--disable-gpu-sandbox` → **hardware** WebGL | Legacy headless renders WebGL with **SwiftShader** (software) — a strong bot signal. |
@@ -21,8 +21,8 @@ What voidcrawl does, and why each piece exists:
 
 | Mode | Result |
 |---|---|
-| **Headful** | ✅ Passes managed Turnstile non-interactively (verified server-side: `siteverify` `success:true, interactive:false`). |
-| **Headless** | ❌ Still gated — the challenge stalls at `before-interactive`. Use headful for Turnstile-walled targets. |
+| **Headful** | Best option; still profile/IP/environment dependent. Docker headful, nodriver, and bare Docker Chrome currently all stall on the same Cloudflare canary from this host. |
+| **Headless** | Usually gated — use headful + warm profile + clean exit for Turnstile-walled targets. |
 
 All defaults are **overridable** by the caller (see [Overriding the defaults](#overriding-the-defaults)).
 
@@ -73,17 +73,21 @@ a bug we fixed, which had silently disabled the whole list).
 |---|---|
 | `--enable-automation` | Literally opts in to automation detection |
 | `--disable-extensions` | Real Chrome always has extension support |
+| `--disable-infobars` | Legacy automation-suppression flag; unnecessary for CDP control and less human-shaped |
 
-### Anti-automation flags we add
+### Low-noise flags we add
 
 | Flag | Purpose |
 |---|---|
-| `--disable-blink-features=AutomationControlled` | Removes the automation-controlled blink feature → `navigator.webdriver` is a native `false` |
-| `--disable-features=IsolateOrigins,site-per-process,TranslateUI` | Disables isolation/UI WAFs fingerprint on |
-| `--no-pings`, `--disable-component-update`, `--disable-session-crashed-bubble`, `--disable-search-engine-choice-screen`, `--homepage=about:blank` | Suppress automation-ish background behavior + UI |
+| `--remote-allow-origins=*` | Matches nodriver/zendriver's CDP launch posture |
+| `--disable-features=IsolateOrigins,site-per-process` | Matches nodriver/zendriver's target/frame access posture without enabling extra CDP domains |
+| `--no-first-run`, `--no-service-autorun`, `--no-default-browser-check`, `--no-pings`, `--password-store=basic`, `--homepage=about:blank` | Low-noise first-run/profile hygiene used by nodriver/zendriver |
+| `--disable-breakpad`, `--disable-dev-shm-usage`, `--disable-session-crashed-bubble`, `--disable-search-engine-choice-screen` | Stability/UI hygiene with minimal fingerprint cost |
 
-Plus the safe noise-reducers (`--disable-background-networking`,
-`--disable-breakpad`, `--disable-dev-shm-usage`, `--no-first-run`, …).
+We intentionally avoid broad background-networking, renderer-throttling, and
+IPC flags in the human-parity path. `AutomationControlled` is only added for
+launched sessions, where Chrome otherwise reports `navigator.webdriver === true`
+under CDP control; attached/headful Docker sessions omit it.
 
 ## UA / platform / Client-Hints consistency
 
@@ -155,13 +159,14 @@ differences that survive every JS patch:
 - Missing / non-default screen, media, and input-related properties.
 - The managed-challenge score is simply lower.
 
-Concretely, against **managed Cloudflare Turnstile** with a real sitekey
-(verified server-side via `siteverify`):
+Concretely, against **managed Cloudflare Turnstile** / full-page challenge
+canaries, headful is necessary but not sufficient:
 
 | Mode | Outcome |
 |---|---|
-| Headful | **Pass**, non-interactive (`success:true, interactive:false`) |
-| Headless | Stalls at `before-interactive`; no token |
+| Host/container headful | Best baseline, but still depends on IP reputation, profile warmth, sandbox/container posture, and launch surface |
+| Docker headful from this host | Currently stalls at `Just a moment…` for VoidCrawl, nodriver, and bare Chrome alike |
+| Headless | Usually stalls; no token |
 
 ```python
 import os
@@ -256,6 +261,14 @@ those are installed. Targets are operator-supplied; none are committed here.
 
 ## Overriding the defaults
 
+`BrowserConfig.stealth=True` now means "human-first, low-CDP-safe stealth".
+Launched sessions keep UA/Client-Hints, locale, and viewport coherence, but
+page-world injection knobs (`StealthConfig.use_builtin_stealth`, `bypass_csp`,
+and `inject_js`) are ignored on the default path because they add observable
+pre-navigation CDP mutations. Attached sessions default to preserving the
+existing browser fingerprint; use launched sessions or explicit page APIs for
+deliberate instrumentation.
+
 Every default flag is overridable by the caller — useful to force a GPU
 backend, disable acceleration, add a proxy bypass, etc. Caller args are merged
 by **switch key**, so a caller value *replaces* the matching default (we don't
@@ -302,8 +315,9 @@ moment that element is inserted, regardless of network.
 | Akamai WAF (BusinessWire) | chromiumoxide defaults (`--enable-automation`) | 403 |
 | Akamai WAF (BusinessWire) | + heavy JS spoofing + fake UA | 403 |
 | Akamai WAF (BusinessWire) | `disable_default_args` + clean flags + real UA | **Success** |
-| Managed Cloudflare Turnstile (real sitekey) | headful, hardware GPU, consistent UA, no JS injection | **Pass** (`siteverify success:true`) |
-| Managed Cloudflare Turnstile | headless | Gated (`before-interactive`) |
+| Managed Cloudflare / Turnstile gates | headful, hardware GPU, consistent UA, no JS injection, minimal CDP | Best available posture; final result depends on profile/IP/environment |
+| Docker Cloudflare canary from this host | VoidCrawl, nodriver, and bare Chrome | All challenged (`Just a moment…`) |
+| Managed Cloudflare / Turnstile gates | headless | Usually gated |
 
 The lesson, twice over: **the flags + a consistent real browser matter more
 than JS patches — and a wrong JS patch is worse than none.**

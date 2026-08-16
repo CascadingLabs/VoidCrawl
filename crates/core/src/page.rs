@@ -32,8 +32,9 @@ use chromiumoxide::{
                 DispatchMouseEventType, MouseButton,
             },
             network::{
-                Cookie, CookieParam, DeleteCookiesParams, EventRequestWillBeSent,
-                EventResponseReceived, Headers, ResourceType, SetExtraHttpHeadersParams,
+                Cookie, CookieParam, DeleteCookiesParams, EnableParams as NetworkEnableParams,
+                EventRequestWillBeSent, EventResponseReceived, Headers, ResourceType,
+                SetExtraHttpHeadersParams,
             },
             page::{
                 AddScriptToEvaluateOnNewDocumentParams, CaptureScreenshotFormat,
@@ -42,7 +43,7 @@ use chromiumoxide::{
             },
             target::GetTargetsParams,
         },
-        js_protocol::runtime::{CallFunctionOnParams, EvaluateParams},
+        js_protocol::runtime::{CallFunctionOnParams, EvaluateParams, ExecutionContextId},
     },
     page::ScreenshotParams,
 };
@@ -115,6 +116,33 @@ pub struct PageResponse {
     /// the set (mirrors `AntibotVerdict::corpus_version`). `None` iff
     /// `endpoints` is `None` (capture was not requested).
     pub endpoint_sanitizer_version: Option<&'static str>,
+}
+
+/// Per-tab CDP instrumentation state.
+///
+/// Tabs start in a human-first, low-CDP state. Calling network-heavy helpers
+/// lazily enables the required CDP domains on that tab and flips these flags;
+/// use this state to route sensitive challenge traversal away from tabs that
+/// have already escalated into instrumentation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "state snapshot intentionally exposes independent routing flags"
+)]
+pub struct TabInstrumentationState {
+    /// `true` while the tab has not enabled higher-signal CDP domains.
+    pub low_cdp:                bool,
+    /// `true` after `Network.enable` has been sent for this target.
+    pub network_enabled:        bool,
+    /// `true` after `Runtime.enable` has been sent for frame-scoped JS.
+    /// `eval_js` uses one-shot `Runtime.evaluate` without enabling the Runtime
+    /// domain.
+    pub runtime_enabled:        bool,
+    /// Reserved for future isolated utility-world escalation tracking.
+    pub utility_world_enabled:  bool,
+    /// `true` if VoidCrawl applied UA/viewport pre-navigation stealth to this
+    /// tab.
+    pub pre_navigation_stealth: bool,
 }
 
 /// Version of the endpoint-sanitization rules ([`safe_endpoint`]). Bump on any
@@ -578,27 +606,30 @@ const DOCUMENT_SNAPSHOT_JS: &str = r#"
 /// Thin wrapper over `chromiumoxide::Page` exposing a clean async API.
 #[derive(Debug)]
 pub struct Page {
-    inner:             CdpPage,
-    interrupts:        Arc<InterruptRegistry>,
+    inner:                  CdpPage,
+    interrupts:             Arc<InterruptRegistry>,
     /// `true` between [`Page::arm_download`] / a `download_to_dir` in flight
     /// and the matching reset. The pool checks this on release to reset an
     /// abandoned download behavior cheaply (no CDP call on the common path).
-    download_armed:    AtomicBool,
+    download_armed:         AtomicBool,
     /// Last virtual cursor position (CSS px), so a humanized move starts from
     /// where the pointer actually is. Defaults to the top-left.
-    cursor:            Mutex<(f64, f64)>,
+    cursor:                 Mutex<(f64, f64)>,
     /// Shared with every other `Page` from the same `BrowserSession`.
     /// Headless Chrome only reliably composites frames for the foregrounded
     /// tab, so `screenshot()` holds this while it brings itself to front and
     /// captures — serializing just that instant across tabs on one browser,
     /// not the tabs' navigation/JS work.
-    capture_lock:      Arc<AsyncMutex<()>>,
+    capture_lock:           Arc<AsyncMutex<()>>,
     /// The viewport/device override currently in effect via
     /// [`Page::set_viewport`], or `None` when using the session's launch-time
     /// default. `screenshot()`'s one-shot `viewport` option snapshots and
     /// restores this so a temporary override never leaks to later calls on the
     /// same page.
-    viewport_override: Mutex<Option<Viewport>>,
+    viewport_override:      Mutex<Option<Viewport>>,
+    network_enabled:        AtomicBool,
+    runtime_enabled:        AtomicBool,
+    pre_navigation_stealth: AtomicBool,
 }
 
 impl Page {
@@ -614,6 +645,9 @@ impl Page {
             interrupts,
             download_armed: AtomicBool::new(false),
             cursor: Mutex::new((0.0, 0.0)),
+            network_enabled: AtomicBool::new(false),
+            runtime_enabled: AtomicBool::new(false),
+            pre_navigation_stealth: AtomicBool::new(false),
             capture_lock,
             viewport_override: Mutex::new(None),
         }
@@ -729,8 +763,70 @@ impl Page {
         self.inner.target_id().inner().clone()
     }
 
+    /// Snapshot this tab's instrumentation state for routing/debugging.
+    pub fn instrumentation_state(&self) -> TabInstrumentationState {
+        let network_enabled = self.network_enabled.load(Ordering::Relaxed);
+        let runtime_enabled = self.runtime_enabled.load(Ordering::Relaxed);
+        let pre_navigation_stealth = self.pre_navigation_stealth.load(Ordering::Relaxed);
+        TabInstrumentationState {
+            low_cdp: !(network_enabled || runtime_enabled),
+            network_enabled,
+            runtime_enabled,
+            utility_world_enabled: false,
+            pre_navigation_stealth,
+        }
+    }
+
+    async fn ensure_network_enabled(&self) -> Result<()> {
+        if !self.network_enabled.load(Ordering::Relaxed) {
+            self.inner
+                .execute(NetworkEnableParams::default())
+                .await
+                .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+            self.network_enabled.store(true, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    async fn ensure_runtime_enabled(&self) -> Result<()> {
+        if !self.runtime_enabled.load(Ordering::Relaxed) {
+            self.inner
+                .enable_runtime()
+                .await
+                .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+            self.runtime_enabled.store(true, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    async fn frame_execution_context_with_runtime(
+        &self,
+        frame_id: FrameId,
+        frame_url_pattern: &str,
+    ) -> Result<ExecutionContextId> {
+        self.ensure_runtime_enabled().await?;
+        for attempt in 0..20 {
+            if let Some(context_id) = self
+                .inner
+                .frame_execution_context(frame_id.clone())
+                .await
+                .map_err(|e| VoidCrawlError::JsEvalError(e.to_string()))?
+            {
+                return Ok(context_id);
+            }
+            if attempt < 19 {
+                time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+        Err(VoidCrawlError::FrameNotFound(format!(
+            "{frame_url_pattern:?}: matched frame has no scriptable execution context \
+             (sandboxed without allow-scripts, cross-process, or not yet loaded)"
+        )))
+    }
+
     /// Apply stealth settings to this page.
     pub(crate) async fn apply_stealth(&self, cfg: &StealthConfig) -> Result<()> {
+        self.pre_navigation_stealth.store(true, Ordering::Relaxed);
         // 1. Built-in stealth (patches navigator.webdriver etc.)
         if cfg.use_builtin_stealth {
             if let Some(ua) = &cfg.user_agent {
@@ -882,6 +978,7 @@ impl Page {
         capture_endpoints: bool,
     ) -> Result<PageResponse> {
         self.ensure_active().await?;
+        self.ensure_network_enabled().await?;
         let started = Instant::now();
         // Subscribe to ALL event streams BEFORE navigation so no events slip
         // through the gap between goto() and the listener setup.
@@ -1041,6 +1138,7 @@ impl Page {
     ///
     /// This is fully async and event-driven — **no polling**.
     pub async fn wait_for_network_idle(&self, timeout: Duration) -> Result<Option<String>> {
+        self.ensure_network_enabled().await?;
         let mut events = self
             .inner
             .event_listener::<EventLifecycleEvent>()
@@ -1085,7 +1183,7 @@ impl Page {
             .map_err(|e| VoidCrawlError::Other(format!("selector encode: {e}")))?;
         let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
         let js = format!(
-            "() => new Promise((resolve, reject) => {{\
+            "new Promise((resolve, reject) => {{\
               const sel = {sel_lit};\
               if (document.querySelector(sel)) return resolve(true);\
               const root = document.documentElement || document.body;\
@@ -1103,7 +1201,13 @@ impl Page {
               }}, {timeout_ms});\
             }})"
         );
-        match self.inner.evaluate_function(js).await {
+        let params = EvaluateParams::builder()
+            .expression(js)
+            .return_by_value(true)
+            .await_promise(true)
+            .build()
+            .map_err(VoidCrawlError::JsEvalError)?;
+        match self.inner.evaluate_expression(params).await {
             Ok(_) => Ok(()),
             Err(e) => {
                 let msg = e.to_string();
@@ -1200,17 +1304,8 @@ impl Page {
     ) -> Result<Value> {
         self.ensure_active().await?;
         let frame_id = self.resolve_frame(frame_url_pattern).await?;
-        let context_id = self
-            .inner
-            .frame_execution_context(frame_id)
-            .await
-            .map_err(|e| VoidCrawlError::JsEvalError(e.to_string()))?
-            .ok_or_else(|| {
-                VoidCrawlError::FrameNotFound(format!(
-                    "{frame_url_pattern:?}: matched frame has no scriptable execution \
-                     context (sandboxed without allow-scripts, or not yet loaded)"
-                ))
-            })?;
+        let context_id =
+            self.frame_execution_context_with_runtime(frame_id, frame_url_pattern).await?;
         let params = EvaluateParams::builder()
             .expression(expression)
             .context_id(context_id)
@@ -2474,6 +2569,7 @@ impl Page {
     /// Set extra HTTP headers for all subsequent requests from this page.
     pub async fn set_headers(&self, headers: HashMap<String, String>) -> Result<()> {
         self.ensure_active().await?;
+        self.ensure_network_enabled().await?;
         let json_val =
             serde_json::to_value(&headers).map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
         let params = SetExtraHttpHeadersParams::new(Headers::new(json_val));

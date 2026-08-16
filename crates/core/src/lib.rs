@@ -48,7 +48,8 @@ pub use managed_profile::{
     default_profile_root,
 };
 pub use page::{
-    Bbox, DownloadCapture, DownloadOutcome, Page, PageResponse, ScreenshotOptions, ScreenshotOutput,
+    Bbox, DownloadCapture, DownloadOutcome, Page, PageResponse, ScreenshotOptions,
+    ScreenshotOutput, TabInstrumentationState,
 };
 pub use pool::{BrowserPool, PoolConfig, PooledTab};
 pub use profile::{

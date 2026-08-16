@@ -38,8 +38,9 @@ use void_crawl_core::{
     DispatchMouseEventType, DownloadCapture, DownloadOutcome, InterruptInfo, InterruptRequest,
     MAX_PROFILE_SPLIT_COPIES, ManagedProfileSnapshot, MouseButton, Page, PageResponse, PoolConfig,
     PooledTab, ProfileHandle, ProfileInfo, ProfileRegistry, ResponseCapture, ResponseCaptureLimits,
-    ScanConfig, ScanReport, ScrollTarget, SelectorEntry, SelectorKind, StealthConfig, Verdict,
-    Viewport, acquire_profile, list_profiles, scan_bytes, scan_path, viewport as viewport_mod,
+    ScanConfig, ScanReport, ScrollTarget, SelectorEntry, SelectorKind, StealthConfig,
+    TabInstrumentationState, Verdict, Viewport, acquire_profile, list_profiles, scan_bytes,
+    scan_path, viewport as viewport_mod,
 };
 
 // ── Error conversion ────────────────────────────────────────────────────
@@ -864,6 +865,52 @@ impl PyResponseExpectation {
     }
 }
 
+/// Per-tab CDP instrumentation state for routing sensitive vs instrumented
+/// work.
+#[pyclass(name = "TabInstrumentationState", frozen)]
+#[derive(Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Python state snapshot mirrors core routing flags"
+)]
+pub struct PyTabInstrumentationState {
+    #[pyo3(get)]
+    pub low_cdp:                bool,
+    #[pyo3(get)]
+    pub network_enabled:        bool,
+    #[pyo3(get)]
+    pub runtime_enabled:        bool,
+    #[pyo3(get)]
+    pub utility_world_enabled:  bool,
+    #[pyo3(get)]
+    pub pre_navigation_stealth: bool,
+}
+
+#[pymethods]
+impl PyTabInstrumentationState {
+    fn __repr__(&self) -> String {
+        format!(
+            "TabInstrumentationState(low_cdp={}, network_enabled={}, runtime_enabled={}, utility_world_enabled={}, pre_navigation_stealth={})",
+            self.low_cdp,
+            self.network_enabled,
+            self.runtime_enabled,
+            self.utility_world_enabled,
+            self.pre_navigation_stealth,
+        )
+    }
+}
+
+impl From<TabInstrumentationState> for PyTabInstrumentationState {
+    fn from(state: TabInstrumentationState) -> Self {
+        Self {
+            low_cdp:                state.low_cdp,
+            network_enabled:        state.network_enabled,
+            runtime_enabled:        state.runtime_enabled,
+            utility_world_enabled:  state.utility_world_enabled,
+            pre_navigation_stealth: state.pre_navigation_stealth,
+        }
+    }
+}
 // ── DownloadOutcome ─────────────────────────────────────────────────────
 
 /// Python-visible result of `Page.download()` / `PooledTab.download()`.
@@ -1263,6 +1310,21 @@ impl PyPage {
                 .cloned()
                 .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
             Ok(page.target_id())
+        })
+    }
+
+    /// Return this tab's CDP instrumentation state for routing/debugging.
+    fn instrumentation_state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let page = inner
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| PyRuntimeError::new_err("page is closed"))?;
+            let state = page.instrumentation_state();
+            inner.lock().await.replace(page);
+            Ok(PyTabInstrumentationState::from(state))
         })
     }
 
@@ -2772,6 +2834,16 @@ impl PyPooledTab {
         with_pooled_page!(self, py, |page| page.url())
     }
 
+    /// Return this tab's CDP instrumentation state for routing/debugging.
+    fn instrumentation_state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page_map!(
+            self,
+            py,
+            |page| async move { Ok::<_, void_crawl_core::VoidCrawlError>(page.instrumentation_state()) },
+            |state| PyTabInstrumentationState::from(state)
+        )
+    }
+
     fn evaluate_js<'py>(&self, py: Python<'py>, expression: String) -> PyResult<Bound<'py, PyAny>> {
         with_pooled_page_map!(self, py, |page| page.evaluate_js(&expression), |val| PyJsonValue(
             val
@@ -4269,6 +4341,8 @@ fn _ext(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPageResponse>()?;
     m.add_class::<PyCapturedResponse>()?;
     m.add_class::<PyResponseExpectation>()?;
+
+    m.add_class::<PyTabInstrumentationState>()?;
     m.add_class::<PyAntibotVerdict>()?;
     m.add_class::<PyDownloadOutcome>()?;
     m.add_class::<PyDownloadCapture>()?;

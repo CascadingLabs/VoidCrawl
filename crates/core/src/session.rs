@@ -30,11 +30,11 @@ use crate::{
 /// (non-remote) session.
 ///
 /// Two groups:
-/// 1. **Anti-automation hygiene** — re-adds the safe flags we want after
-///    `disable_default_args()` (which strips chromiumoxide's
+/// 1. **Nodriver-like launch hygiene** — re-adds only the low-noise flags we
+///    want after `disable_default_args()` (which strips chromiumoxide's
 ///    `--enable-automation` / `--disable-extensions`, both instant WAF
-///    giveaways), plus the zendriver/nodriver flags known to pass real bot
-///    walls.
+///    giveaways). Avoid broad background/network/render throttling suppression:
+///    it improves crawler throughput but is less human-shaped.
 /// 2. **Hardware GPU / WebGL** — new headless disables the GPU and falls back
 ///    to SwiftShader software WebGL, which `WEBGL_debug_renderer_info` reports
 ///    as "SwiftShader" — a strong bot signal Cloudflare Turnstile weighs. These
@@ -52,10 +52,9 @@ use crate::{
 /// These are merged *before* caller `extra_args`; a caller value for the same
 /// switch replaces the default (see [`assemble_chrome_args`]).
 pub(crate) const DEFAULT_CHROME_ARGS: &[&str] = &[
-    // ── Anti-automation core ────────────────────────────────────────
-    "disable-blink-features=AutomationControlled",
-    "disable-infobars",
-    "disable-features=IsolateOrigins,site-per-process,TranslateUI",
+    // ── Nodriver-like anti-automation core ──────────────────────────
+    "remote-allow-origins=*",
+    "disable-features=IsolateOrigins,site-per-process",
     // NOTE: `Page::evaluate_js_in_frame` needs cross-origin frames to stay
     // in-process. The flag above covers ordinary cross-origin frames, but
     // Chrome *field-trial*-isolates a few origins (notably google.com, hence
@@ -64,31 +63,14 @@ pub(crate) const DEFAULT_CHROME_ARGS: &[&str] = &[
     // `extra_args=["disable-site-isolation-trials"]` — rather than a global
     // default, so the browser's isolation posture is unchanged for callers who
     // don't need it.
-    // ── Safe defaults from chromiumoxide we keep ────────────────────
-    "disable-background-networking",
-    "disable-background-timer-throttling",
-    "disable-backgrounding-occluded-windows",
+    // ── Low-noise nodriver profile hygiene ──────────────────────────
     "disable-breakpad",
-    "disable-client-side-phishing-detection",
-    "disable-component-extensions-with-background-pages",
-    "disable-default-apps",
     "disable-dev-shm-usage",
-    "disable-hang-monitor",
-    "disable-ipc-flooding-protection",
-    "disable-popup-blocking",
-    "disable-prompt-on-repost",
-    "disable-renderer-backgrounding",
-    "disable-sync",
-    "force-color-profile=srgb",
-    "metrics-recording-only",
     "no-first-run",
-    "password-store=basic",
-    "use-mock-keychain",
-    // ── Extra zendriver flags ───────────────────────────────────────
     "no-service-autorun",
     "no-default-browser-check",
     "no-pings",
-    "disable-component-update",
+    "password-store=basic",
     "disable-session-crashed-bubble",
     "disable-search-engine-choice-screen",
     "homepage=about:blank",
@@ -517,7 +499,15 @@ impl BrowserSession {
                 // default). Lets the PyO3/Python client override any default
                 // deterministically via `BrowserConfig(extra_args=...)`. See
                 // `assemble_chrome_args` and its unit tests.
-                for a in assemble_chrome_args(&extra_args) {
+                let mut final_args = assemble_chrome_args(&extra_args);
+                if !final_args.iter().any(|a| switch_key(a) == "disable-blink-features") {
+                    // Launched Chrome reports `navigator.webdriver === true`
+                    // when controlled over CDP unless AutomationControlled is
+                    // disabled. Keep this out of Docker/attached Chrome, but
+                    // apply it to launched sessions before first navigation.
+                    final_args.push("disable-blink-features=AutomationControlled".into());
+                }
+                for a in final_args {
                     builder = builder.arg(a);
                 }
 
@@ -565,7 +555,9 @@ impl BrowserSession {
             Page::new(cdp_page, Arc::clone(&self.capture_lock), Arc::clone(&self.interrupts))
         }; // browser lock released before navigation
 
-        page.apply_stealth(&self.stealth).await?;
+        if let Some(stealth) = self.stealth_for_session() {
+            page.apply_stealth(&stealth).await?;
+        }
         page.navigate(url).await?;
         Ok(page)
     }
@@ -581,8 +573,27 @@ impl BrowserSession {
                 .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
             Page::new(cdp_page, Arc::clone(&self.capture_lock), Arc::clone(&self.interrupts))
         };
-        page.apply_stealth(&self.stealth).await?;
+        if let Some(stealth) = self.stealth_for_session() {
+            page.apply_stealth(&stealth).await?;
+        }
         Ok(page)
+    }
+
+    fn stealth_for_session(&self) -> Option<StealthConfig> {
+        if self.attached {
+            // Remote/headful Chrome already has native UA, window, and language
+            // state. Avoid pre-navigation mutations and keep the CDP footprint
+            // close to nodriver/a human operator.
+            return None;
+        }
+
+        let mut cfg = self.stealth.clone();
+        // Launched headless still needs UA/viewport coherence, but broad
+        // page-world instrumentation is a higher-signal automation tell.
+        cfg.use_builtin_stealth = false;
+        cfg.bypass_csp = false;
+        cfg.inject_js = None;
+        Some(cfg)
     }
 
     /// Open a new tab **in its own browser window**, apply stealth settings,
@@ -624,7 +635,6 @@ impl BrowserSession {
         page.navigate(url).await?;
         Ok(page)
     }
-
     /// List all open pages.
     pub async fn pages(&self) -> Result<Vec<Page>> {
         self.check_alive()?;
@@ -833,18 +843,31 @@ mod tests {
     }
 
     /// Hardware-GPU defaults are present (so headless doesn't fall back to
-    /// SwiftShader), alongside the anti-automation core. Forms are un-prefixed.
+    /// SwiftShader), alongside the low-noise nodriver launch core. Forms are
+    /// un-prefixed.
     #[test]
-    fn defaults_enable_hardware_gpu_and_antiautomation() {
+    fn defaults_enable_hardware_gpu_and_nodriver_core() {
         let args = assemble_chrome_args(&[]);
         for expected in [
+            "remote-allow-origins=*",
+            "no-service-autorun",
+            "no-pings",
+            "password-store=basic",
             "use-angle=vulkan",
             "enable-gpu",
             "ignore-gpu-blocklist",
             "disable-gpu-sandbox",
-            "disable-blink-features=AutomationControlled",
         ] {
             assert!(args.iter().any(|a| a == expected), "missing default flag: {expected}");
+        }
+        for removed in [
+            "disable-blink-features=AutomationControlled",
+            "disable-infobars",
+            "disable-background-networking",
+            "disable-renderer-backgrounding",
+            "disable-ipc-flooding-protection",
+        ] {
+            assert!(!args.iter().any(|a| a == removed), "human defaults should omit {removed}");
         }
     }
 
@@ -882,7 +905,7 @@ mod tests {
     fn override_is_in_place_and_leaves_other_defaults() {
         let args = assemble_chrome_args(&["--use-angle=gl".to_string()]);
         assert!(args.iter().any(|a| a == "enable-gpu"));
-        assert!(args.iter().any(|a| a == "disable-blink-features=AutomationControlled"));
+        assert!(args.iter().any(|a| a == "remote-allow-origins=*"));
     }
 
     /// No `extra_args` => exactly the defaults, unchanged order.

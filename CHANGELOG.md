@@ -30,7 +30,6 @@
 ### Fix
 
 - preserve browser and page handles across concurrent or cancelled Python operations and report profile lease ownership diagnostics.
-
 ## 0.3.7 (2026-06-21)
 
 ### Fix

@@ -69,7 +69,6 @@ impl CdpMode {
         matches!(self, Self::Minimal)
     }
 }
-
 #[derive(Debug, Clone)]
 pub struct BrowserConfig {
     /// Determines whether to run headless version of the browser. Defaults to
@@ -390,7 +389,6 @@ impl BrowserConfigBuilder {
         self.cdp_mode = mode;
         self
     }
-
     pub fn build(self) -> std::result::Result<BrowserConfig, String> {
         let executable = if let Some(e) = self.executable {
             e

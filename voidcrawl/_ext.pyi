@@ -90,7 +90,6 @@ class ResponseExpectation:
     ) -> bool: ...
     @property
     def value(self) -> Any: ...
-
 class DownloadOutcome:
     """Result of :meth:`Page.download` / :meth:`PooledTab.download`.
 
@@ -197,6 +196,9 @@ class PooledTab:
         ...
     async def url(self) -> str | None:
         """Return the current page URL, or ``None``."""
+        ...
+    async def instrumentation_state(self) -> TabInstrumentationState:
+        """Return this tab's CDP instrumentation state."""
         ...
     async def evaluate_js(self, expression: str) -> object:
         """Evaluate a JavaScript *expression* and return the result.
@@ -739,6 +741,9 @@ class Page:
         ...
     async def url(self) -> str | None:
         """Return the current page URL, or ``None``."""
+        ...
+    async def instrumentation_state(self) -> TabInstrumentationState:
+        """Return this tab's CDP instrumentation state."""
         ...
     async def evaluate_js(self, expression: str) -> object:
         """Evaluate a JavaScript *expression* and return the result."""
