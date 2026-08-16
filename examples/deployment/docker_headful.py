@@ -1,21 +1,22 @@
 """Use voidcrawl with Chrome running headful inside Docker.
 
-This example connects to Chrome instances running in the Docker headful
-container (Sway + wayvnc + GPU-accelerated Chrome). You can watch
-everything Chrome does by opening a VNC client to localhost:5900.
+This example connects to Chrome instances running in the rootless Docker
+headful container (Sway + GPU-accelerated Chrome). Open a short-lived local
+noVNC lease only when you need to inspect a browser.
 
 Setup (run this first in a separate terminal):
 
-    ./docker/run-headful.sh          # auto-detects your GPU
-    # or: ./docker/run-headful.sh --gpu amd
+    VIEWER_MODE=local ./docker/run-headful.sh -d  # auto-detects your GPU
+    # or: VIEWER_MODE=local ./docker/run-headful.sh --gpu amd -d
+    ./docker/viewer.sh open --browser 1 --ttl 15m
 
 Then run this script:
 
-    python examples/docker_headful.py
+    uv run python examples/deployment/docker_headful.py
 
 Watch Chrome live in your browser:
-    Open http://localhost:6080 and click Connect.
-    (Or use a VNC client on localhost:5900 for lower latency.)
+    Open the tokenized URL printed by docker/viewer.sh. The lease expires
+    automatically; run docker/viewer.sh close to end it early.
 
 What you'll see:
     - Chrome navigating to qscrape.dev/l2/news (Mountainhome Herald)
@@ -71,7 +72,7 @@ async def main() -> None:
             print(f"Article cards in DOM: {article_count}")
 
         # ── Parallel fetch ───────────────────────────────────────────
-        print("\nParallel fetch (watch both tabs in VNC!)...")
+        print("\nParallel fetch (inspect a browser with a noVNC lease)...")
 
         async def fetch(url: str) -> tuple[str, int]:
             async with pool.acquire() as tab:
@@ -89,7 +90,7 @@ async def main() -> None:
             print(f"  {title}: {length:,} chars")
 
     print("\nDone! The Docker container is still running.")
-    print("Connect VNC to localhost:5900 to see the Chrome windows.")
+    print("Use docker/viewer.sh open for a short-lived local noVNC view.")
     stop_cmd = "docker compose -f docker/docker-compose.headful.yml --profile amd down"
     print(f"Stop with: {stop_cmd}")
 

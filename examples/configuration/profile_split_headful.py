@@ -2,7 +2,7 @@
 
 With no arguments this forks your installed native Chrome ``Default`` profile:
 
-    uv run python examples/profile_split_headful.py
+    uv run python examples/configuration/profile_split_headful.py
 
 Select another discovered profile name or an explicit profile-directory path
 with ``--source``. Close regular Chrome before running so its on-disk databases

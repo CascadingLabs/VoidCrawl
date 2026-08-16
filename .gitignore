@@ -55,4 +55,9 @@ TODO.md
 Thumbs.db
 ralph-loop.local.md
 output/
+
+# Personal browser workflows — public examples are curated under examples/.
+/examples/development/
+
+# Screenshot output from the examples.
 examples/screenshots/

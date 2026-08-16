@@ -9,7 +9,7 @@ Setup (run this first in a separate terminal):
 
 Then run this script:
 
-    uv run python examples/docker_headless.py
+    uv run python examples/deployment/docker_headless.py
 
 Three connection patterns are shown:
 
@@ -99,7 +99,7 @@ async def demo_from_env() -> None:
 
         export CHROME_WS_URLS="http://localhost:9222,http://localhost:9223"
         export CHROME_NO_SANDBOX=1
-        uv run python examples/docker_headless.py
+        uv run python examples/deployment/docker_headless.py
     """
     print("\n── Pattern 2: PoolConfig.from_env() ─────────────────────────")
     # Simulate what the Docker entrypoint sets up.

@@ -41,8 +41,8 @@
 //! `DatadomeBlock`, and so on. Keep the two reconciled rather than forked.
 //!
 //! The signature patterns are first-party, authored against the vendor list in
-//! the MIT-licensed `albinstman/antibot-print` corpus (see `docs/antibot.md`
-//! and `crates/core/CORPUS.md`). We hand-pick the vendors we actually meet
+//! the MIT-licensed `albinstman/antibot-print` corpus (see
+//! `crates/core/CORPUS.md`). We hand-pick the vendors we actually meet
 //! rather than vendoring the full foreign corpus, so the ruleset stays small,
 //! readable, and ours to test.
 

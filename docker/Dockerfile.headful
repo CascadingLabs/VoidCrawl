@@ -1,46 +1,20 @@
-# Runtime — Sway + wayvnc + Chrome headful + GPU drivers
+# Runtime — rootless Sway + on-demand noVNC + headful Chrome
 FROM debian:sid-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# ── GPU drivers for all vendors + Sway + wayvnc + Chrome deps ───────────
-# Install sway + wayvnc first — let apt resolve the Mesa dependency tree
-# without us pinning conflicting versions.
+# GPU drivers for all vendors + Sway + wayvnc. Let apt resolve the Mesa tree
+# rather than pinning conflicting individual packages.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    sway swaybg wayvnc \
-    && rm -rf /var/lib/apt/lists/*
-
-# GPU drivers (AMD/Intel via Mesa, NVIDIA EGL injected at runtime)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    mesa-vulkan-drivers \
-    && rm -rf /var/lib/apt/lists/*
-
-# Chrome deps + infra. dbus: Chrome stalls on autolaunch without a bus.
-# Fonts: a near-empty font set causes fallback stalls and is a fingerprint
-# tell (real desktops have dozens of families).
-RUN apt-get update && apt-get install -y --no-install-recommends \
+    sway swaybg wayvnc mesa-vulkan-drivers \
     dbus \
-    fonts-liberation \
-    fonts-dejavu-core \
-    fonts-noto-core \
-    fonts-noto-color-emoji \
-    libnss3 \
-    libatk-bridge2.0-0 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxrandr2 \
-    libasound2t64 \
-    libpangocairo-1.0-0 \
-    libgtk-3-0t64 \
-    libxkbcommon0 \
-    supervisor \
-    curl \
-    ca-certificates \
-    gnupg \
-    procps \
+    fonts-liberation fonts-dejavu-core fonts-noto-core fonts-noto-color-emoji \
+    libnss3 libatk-bridge2.0-0 libxcomposite1 libxdamage1 libxrandr2 \
+    libasound2t64 libpangocairo-1.0-0 libgtk-3-0t64 libxkbcommon0 \
+    supervisor curl ca-certificates gnupg procps \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Install Google Chrome stable ─────────────────────────────────────────
+# Google Chrome stable.
 RUN curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
       | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg && \
     echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] \
@@ -50,60 +24,58 @@ RUN curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
     apt-get install -y --no-install-recommends google-chrome-stable && \
     rm -rf /var/lib/apt/lists/*
 
-# ── Install noVNC (browser-based VNC client) ─────────────────────────────
-# Lets you view Chrome at http://localhost:6080 in any browser.
+# noVNC is only served while a viewer lease is active.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     novnc python3-websockify && \
     rm -rf /var/lib/apt/lists/* && \
     ln -sf /usr/share/novnc/vnc.html /usr/share/novnc/index.html
 
+# The image does not need root after packages and immutable tooling are installed.
+RUN groupadd --gid 10001 voidcrawl && \
+    useradd --uid 10001 --gid 10001 --create-home --home-dir /home/voidcrawl \
+      --shell /usr/sbin/nologin voidcrawl
+
 WORKDIR /app
 
-# ── Sway + supervisord configs ───────────────────────────────────────────
-COPY docker/config/sway-headful /etc/sway/config
-COPY docker/config/supervisord-headful.conf /etc/supervisor/conf.d/supervisord.conf
 COPY docker/entrypoint-headful.sh /usr/local/bin/entrypoint.sh
+COPY docker/viewerctl.sh /usr/local/bin/viewerctl
 COPY docker/check-outputs.sh /usr/local/bin/check-outputs.sh
-COPY docker/ensure-dns.sh /usr/local/bin/ensure-dns.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/check-outputs.sh /usr/local/bin/ensure-dns.sh
+RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/viewerctl \
+     /usr/local/bin/check-outputs.sh
 
-# Create runtime dirs
-RUN mkdir -p /tmp/xdg-runtime /tmp/chrome-profile-1 /tmp/chrome-profile-2
-
-# ── Environment ──────────────────────────────────────────────────────────
-ENV XDG_RUNTIME_DIR=/tmp/xdg-runtime \
+# All generated configuration, sockets, logs, D-Bus state, profiles, and
+# Supervisor state live under RUNTIME_DIR. The entrypoint creates it as UID 10001.
+ENV HOME=/home/voidcrawl \
+   RUNTIME_DIR=/tmp/voidcrawl \
+   XDG_RUNTIME_DIR=/tmp/voidcrawl/xdg \
     WLR_BACKENDS=headless \
     WLR_LIBINPUT_NO_DEVICES=1 \
     WLR_NO_HARDWARE_CURSORS=1 \
     LIBSEAT_BACKEND=noop \
     XDG_SESSION_TYPE=wayland \
-    # CDP ports (avoid conflicts with native Chrome on 9222/9223)
-    CDP_PORT_1=19222 \
-    CDP_PORT_2=19223 \
-    CHROME_WS_URLS="http://localhost:19222,http://localhost:19223" \
     BROWSER_COUNT=2 \
+    CDP_PORT_BASE=19222 \
+    VNC_PORT_BASE=5900 \
     TABS_PER_BROWSER=4 \
     TAB_MAX_USES=50 \
     TAB_MAX_IDLE_SECS=60 \
-    CHROME_NO_SANDBOX=1 \
-    VOIDCRAWL_DNS_SERVERS="" \
-    # VNC defaults — one wayvnc+noVNC pair per Chrome output
-    VNC_PORT=5900 \
-    VNC_PORT_2=5901 \
-    NOVNC_PORT=6080 \
-    NOVNC_PORT_2=6081 \
+   # Chrome's sandbox is the default. Set to 1 only for a runtime that cannot
+   # grant the namespace syscalls in docker/seccomp-chrome.json.
+   CHROME_NO_SANDBOX=0 \
     VNC_WIDTH=1920 \
-    VNC_HEIGHT=1080
+    VNC_HEIGHT=1080 \
+    VIEWER_MODE=disabled \
+    VIEWER_NOVNC_PORT=6080 \
+    VIEWER_TTL=15m \
+    VIEWER_MAX_FPS=30
 
-EXPOSE 19222 19223 5900 5901 6080 6081
+# CDP is reachable through host networking in docker-compose.headful.yml.
+# Do not expose VNC/noVNC: noVNC binds loopback only during an active lease.
 
-# Healthcheck proves more than "the CDP socket bound": both CDP endpoints
-# answer AND each Chrome is on its own output (check-outputs.sh) — the
-# occlusion regression keeps /json/version green, so CDP-only was blind to it.
-# start-period covers sway bringup + window routing onto the second output.
+# Healthcheck proves each configured CDP endpoint answers and each Chrome owns
+# a separate output; this catches the occlusion regression that CDP alone misses.
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \
-    CMD curl -sf "http://localhost:${CDP_PORT_1}/json/version" \
-        && curl -sf "http://localhost:${CDP_PORT_2}/json/version" \
-        && /usr/local/bin/check-outputs.sh
+    CMD /usr/local/bin/check-outputs.sh
 
+USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
