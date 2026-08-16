@@ -133,7 +133,9 @@ def docker_up(
         click.echo(f"  GPU profile : {profile}{detected}")
         click.echo(f"  Resolution  : {res}")
         click.echo("  Viewer      : disabled (set VIEWER_MODE=local to enable)")
-        click.echo("                then use docker/viewer.sh open --browser <n> --ttl 15m")
+        click.echo(
+            "                then use docker/viewer.sh open --browser <n> --ttl 15m"
+        )
         click.echo("  CDP         : localhost:19222, localhost:19223")
         click.echo("")
 

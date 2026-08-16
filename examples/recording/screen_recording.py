@@ -6,7 +6,7 @@ a ceiling rather than a guarantee, and a page in its own browser window records
 concurrently instead of holding the browser's capture lock.
 
 Run with:
-    uv run python examples/screen_recording.py
+    uv run python examples/recording/screen_recording.py
 """
 
 import asyncio

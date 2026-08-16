@@ -3,7 +3,7 @@ presets, custom dimensions, arbitrary bbox crops, viewport-only capture,
 and scroll-then-crop — all exercised against real websites over a 4-tab
 pool, to prove the feature under real concurrency, not just unit tests.
 
-Run: .venv/bin/python examples/viewport_stress_test.py
+Run: .venv/bin/python examples/advanced/viewport_stress_test.py
 """
 
 import asyncio

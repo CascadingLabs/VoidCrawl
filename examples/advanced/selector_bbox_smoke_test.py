@@ -12,7 +12,7 @@ mobile-hidden nav duplicates) that happens to exercise every selector kind
 this ticket added, including a real-world global_id disambiguation case
 that isn't a made-up fixture.
 
-Run: .venv/bin/python examples/selector_bbox_smoke_test.py
+Run: .venv/bin/python examples/advanced/selector_bbox_smoke_test.py
 """
 
 import asyncio

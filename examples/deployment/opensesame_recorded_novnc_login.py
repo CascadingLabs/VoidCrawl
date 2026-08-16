@@ -9,7 +9,7 @@ Docker headful/noVNC example::
 
     ./docker/run-headful.sh -d
     ffmpeg -version
-    uv run python examples/opensesame_recorded_novnc_login.py \
+    uv run python examples/deployment/opensesame_recorded_novnc_login.py \
         --docker-headful \
         --docker-version-url http://127.0.0.1:19222/json/version \
         --url "$AUTHORIZED_LOGIN_URL"
@@ -19,7 +19,7 @@ Set ``AUTHORIZED_LOGIN_URL`` to a real, authorized login URL before running;
 
 With an OpenSesame actor command::
 
-    uv run python examples/opensesame_recorded_novnc_login.py \
+    uv run python examples/deployment/opensesame_recorded_novnc_login.py \
         --docker-headful --url "$AUTHORIZED_LOGIN_URL" \
         --opensesame-command "python /path/to/opensesame_actor.py"
 

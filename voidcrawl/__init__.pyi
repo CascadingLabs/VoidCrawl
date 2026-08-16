@@ -80,6 +80,9 @@ from voidcrawl._ext import (
     SessionInterrupted as SessionInterrupted,
 )
 from voidcrawl._ext import (
+    TabInstrumentationState as TabInstrumentationState,
+)
+from voidcrawl._ext import (
     VoidCrawlError as VoidCrawlError,
 )
 from voidcrawl._ext import (

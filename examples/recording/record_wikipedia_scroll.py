@@ -2,7 +2,7 @@
 
 Run from a build that includes the screen-recording API:
     ./build.sh
-    uv run python examples/record_wikipedia_scroll.py
+    uv run python examples/recording/record_wikipedia_scroll.py
 
 Writes a playable H.264 MP4 to ``output/wikipedia-recording/viewport.mp4``.
 The build requires ``ffmpeg`` on ``PATH``; ``./build.sh`` enables the MP4

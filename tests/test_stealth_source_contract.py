@@ -36,8 +36,11 @@ def test_attached_pages_refresh_targets_before_listing() -> None:
         "pub async fn websocket_url",
         maxsplit=1,
     )[0]
-    assert "if self.attached" in pages_body
-    assert "browser.fetch_targets().await" in pages_body
+    # Collapse whitespace: rustfmt is free to break the builder chain across
+    # lines, and this contract is about the call happening, not its layout.
+    flattened = re.sub(r"\s+", "", pages_body)
+    assert "ifself.attached" in flattened
+    assert "browser.fetch_targets().await" in flattened
 
 
 def test_benchmark_wraps_voidcrawl_startup_in_timeout() -> None:

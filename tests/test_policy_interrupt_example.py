@@ -11,7 +11,9 @@ from urllib.parse import unquote
 
 import pytest
 
-EXAMPLE = Path(__file__).parents[1] / "examples" / "policy_interrupt_mock.py"
+EXAMPLE = (
+    Path(__file__).parents[1] / "examples" / "advanced" / "policy_interrupt_mock.py"
+)
 
 
 def load_example() -> Any:

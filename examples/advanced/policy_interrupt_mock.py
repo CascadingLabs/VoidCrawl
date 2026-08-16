@@ -8,9 +8,9 @@ mocks. They do not detect, solve, or bypass either kind of challenge.
 
 Run after ``uv run maturin develop``::
 
-    uv run python examples/policy_interrupt_mock.py --scenario payment
-    uv run python examples/policy_interrupt_mock.py --scenario login
-    uv run python examples/policy_interrupt_mock.py --scenario recaptcha
+    uv run python examples/advanced/policy_interrupt_mock.py --scenario payment
+    uv run python examples/advanced/policy_interrupt_mock.py --scenario login
+    uv run python examples/advanced/policy_interrupt_mock.py --scenario recaptcha
 
 Set ``QSCRAPE_URL`` to use a controlled local QScrape deployment. The default
 is its public L2 e-shop test page. The browser opens headfully so an operator

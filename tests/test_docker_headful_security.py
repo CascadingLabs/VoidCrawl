@@ -59,9 +59,7 @@ def _generate_supervisor_config(
 
 def _chrome_command(config: str) -> list[str]:
     line = next(
-        line
-        for line in config.splitlines()
-        if line.startswith("command=google-chrome")
+        line for line in config.splitlines() if line.startswith("command=google-chrome")
     )
     return shlex.split(line.removeprefix("command="))
 

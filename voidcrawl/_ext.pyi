@@ -90,6 +90,26 @@ class ResponseExpectation:
     ) -> bool: ...
     @property
     def value(self) -> Any: ...
+
+class TabInstrumentationState:
+    """Per-tab CDP instrumentation state for routing sensitive work.
+
+    Attributes:
+        low_cdp: ``True`` while the tab has not enabled higher-signal CDP domains.
+        network_enabled: ``True`` after ``Network.enable`` has been sent.
+        runtime_enabled: ``True`` after ``Runtime.enable`` has been sent for
+            frame-scoped JavaScript.
+        utility_world_enabled: Reserved for future isolated-world tracking.
+        pre_navigation_stealth: ``True`` if VoidCrawl applied UA/viewport
+            pre-navigation stealth to this tab.
+    """
+
+    low_cdp: bool
+    network_enabled: bool
+    runtime_enabled: bool
+    utility_world_enabled: bool
+    pre_navigation_stealth: bool
+
 class DownloadOutcome:
     """Result of :meth:`Page.download` / :meth:`PooledTab.download`.
 

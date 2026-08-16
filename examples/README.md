@@ -34,6 +34,7 @@ public sites may need a network connection and can change as those sites change.
 | [`response_capture.py`](pooling/response_capture.py) | Capture action-triggered responses without page-world hooks. |
 | [`concurrent_resource_tabs.py`](pooling/concurrent_resource_tabs.py) | Reuse pooled tabs for concurrent resource extraction. |
 | [`network_logging.py`](pooling/network_logging.py) | Observe network activity and inspect resource requests. |
+| [`wikipedia_concurrent_fetch.py`](pooling/wikipedia_concurrent_fetch.py) | Fetch many pages concurrently through one shared pool. |
 
 ## Configuration and profiles
 
@@ -50,6 +51,24 @@ public sites may need a network connection and can change as those sites change.
 | --- | --- |
 | [`docker_headless.py`](deployment/docker_headless.py) | Connect a pool to headless Chrome in Docker. |
 | [`docker_headful.py`](deployment/docker_headful.py) | Connect a pool to headful Docker Chrome with VNC/noVNC. |
+| [`docker_policy_interrupt.py`](deployment/docker_policy_interrupt.py) | Hand a policy interrupt to a human operator against Docker Chrome. |
+| [`opensesame_recorded_novnc_login.py`](deployment/opensesame_recorded_novnc_login.py) | Record an operator-driven noVNC login for later replay. |
+
+## Recording
+
+| Example | Demonstrates |
+| --- | --- |
+| [`screen_recording.py`](recording/screen_recording.py) | Record a session to video and inspect frame statistics. |
+| [`record_wikipedia_scroll.py`](recording/record_wikipedia_scroll.py) | Record a scripted scroll and report effective FPS. |
+| [`record_masked_login.py`](recording/record_masked_login.py) | Black-cover a credential field for the whole recording. |
+| [`record_masked_localhost.py`](recording/record_masked_localhost.py) | Mask a selector region against a local fixture site. |
+
+## Login fixtures
+
+| Example | Demonstrates |
+| --- | --- |
+| [`demo.py`](jwt_login_demo/demo.py) | Drive a JWT login flow end to end. |
+| [`login_site.py`](jwt_login_demo/login_site.py) | Local JWT login fixture the demo runs against. |
 
 ## Advanced browser boundaries
 
@@ -59,6 +78,9 @@ public sites may need a network connection and can change as those sites change.
 | [`antibot_detection.py`](advanced/antibot_detection.py) | Classify anti-bot/CDN responses and active challenges. |
 | [`cross_origin_iframe_eval.py`](advanced/cross_origin_iframe_eval.py) | Evaluate JavaScript in a cross-origin frame. |
 | [`turnstile_checkbox_ax.py`](advanced/turnstile_checkbox_ax.py) | Reach a closed-shadow, cross-origin Turnstile checkbox through AX. |
+| [`policy_interrupt_mock.py`](advanced/policy_interrupt_mock.py) | Exercise the interrupt lifecycle against a mocked policy gate. |
+| [`selector_bbox_smoke_test.py`](advanced/selector_bbox_smoke_test.py) | Resolve a screenshot bounding box from every selector kind. |
+| [`viewport_stress_test.py`](advanced/viewport_stress_test.py) | Drive variable CDP viewports and device presets under load. |
 
 ## Local development
 

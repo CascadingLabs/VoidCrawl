@@ -2,7 +2,7 @@
 
 Run from the repository root after ``./build.sh``::
 
-    uv run python examples/record_masked_localhost.py
+    uv run python examples/recording/record_masked_localhost.py
 
 The fixture moves the password field after recording starts. The selector mask
 tracks that movement; the username field and explanatory text remain visible.

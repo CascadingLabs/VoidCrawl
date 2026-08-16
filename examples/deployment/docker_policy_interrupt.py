@@ -9,7 +9,7 @@ Start the rootless headful container and open its short-lived viewer:
 Then set the selected browser's CDP WebSocket URL and run this example:
 
     VOIDCRAWL_WS_URL=ws://127.0.0.1:19222/devtools/browser/... \
-        uv run python examples/docker_policy_interrupt.py
+        uv run python examples/deployment/docker_policy_interrupt.py
 
 The browser remains in the interrupted state while the operator uses noVNC.
 Type ``resolved`` into this process only after completing an authorized step.

@@ -1,7 +1,7 @@
 """Record a real login and black out the password field in every frame.
 
     ./build.sh
-    uv run --with pillow python examples/record_masked_login.py
+    uv run --with pillow python examples/recording/record_masked_login.py
 
 Writes ``output/masked-login/viewport.mp4`` and then *proves* the redaction by
 reading frames back off disk: the masked rectangle must be black — including
