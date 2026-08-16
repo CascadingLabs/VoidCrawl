@@ -11,7 +11,7 @@ pub mod sessions;
 pub mod state;
 pub mod tools;
 
-pub const VERSION: &str = "0.4.2";
+pub const VERSION: &str = "0.5.0";
 
 pub use server::VoidCrawlServer;
 pub use state::AppState;

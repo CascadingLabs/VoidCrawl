@@ -1,7 +1,7 @@
 # Dependency CVE gate — be proactive instead of waiting on Dependabot.
 # Scanners live in CascadingLabs/.github (reusable workflows); update them once,
 # every repo inherits the change. See that repo's .github/workflows/cve-*.yml.
-# VoidCrawl is polyglot: Python (uv.lock) + Rust (Cargo.lock) + JS (bun.lock).
+# VoidCrawl is polyglot: Python (uv.lock) + Rust (Cargo.lock).
 
 name: Security (CVE)
 
@@ -24,7 +24,6 @@ jobs:
     uses: CascadingLabs/.github/.github/workflows/cve-python.yml@main
   rust:
     uses: CascadingLabs/.github/.github/workflows/cve-rust.yml@main
-  js:
-    uses: CascadingLabs/.github/.github/workflows/cve-js.yml@main
-    with:
-      package-manager: bun
+  # No `js:` job: VoidCrawl ships no package.json or bun.lock, so the JS gate
+  # had nothing to audit and failed the whole workflow on every run. Re-add it
+  # if a JS lockfile is ever introduced.
