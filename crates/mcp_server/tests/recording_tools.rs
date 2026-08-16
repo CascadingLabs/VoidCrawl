@@ -357,7 +357,7 @@ async fn a_fixed_bbox_mask_needs_no_dom_and_is_reported_untracked() {
     .await
     .expect("start failed");
 
-    sleep(Duration::from_millis(1000)).await;
+    sleep(Duration::from_secs(1)).await;
 
     let result =
         recording::session_stop(&server, SessionRecordStopArgs { session_id: SID.to_string() })
@@ -464,7 +464,7 @@ async fn a_mask_applies_inside_a_cropped_region() {
     .await
     .expect("start failed");
 
-    sleep(Duration::from_millis(1000)).await;
+    sleep(Duration::from_secs(1)).await;
 
     let result =
         recording::session_stop(&server, SessionRecordStopArgs { session_id: SID.to_string() })

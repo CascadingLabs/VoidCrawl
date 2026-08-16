@@ -54,8 +54,13 @@ async def main() -> None:
             recording = await handle.stop()
 
     region = recording.regions[0]
-    print(f"captured {recording.frames_captured} frames in {recording.duration_ms:.0f} ms")
-    print(f"effective FPS: {recording.effective_fps():.1f}; dropped: {recording.frames_dropped}")
+    print(
+        f"captured {recording.frames_captured} frames in {recording.duration_ms:.0f} ms"
+    )
+    print(
+        f"effective FPS: {recording.effective_fps():.1f}; "
+        f"dropped: {recording.frames_dropped}"
+    )
     print(f"video: {region.outputs[0]}")
 
 

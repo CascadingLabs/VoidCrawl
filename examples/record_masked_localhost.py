@@ -56,11 +56,15 @@ async def main() -> None:
         region = recording.regions[0]
         mask = recording.masks[0]
         print(f"URL: {url}")
-        print(f"frames: {recording.frames_captured}, effective fps: {recording.effective_fps():.1f}")
+        print(
+            f"frames: {recording.frames_captured}, "
+            f"effective fps: {recording.effective_fps():.1f}"
+        )
         print(f"region: {region.label}, bbox: {region.bbox}")
         print(
             f"mask: {mask.label}, bbox: {mask.bbox}, tracked: {mask.tracked}, "
-            f"unresolved ticks: {mask.unresolved_ticks}, stale frames: {mask.stale_frames}"
+            f"unresolved ticks: {mask.unresolved_ticks}, "
+            f"stale frames: {mask.stale_frames}"
         )
         print(f"frames: {OUTPUT / region.label}")
     finally:

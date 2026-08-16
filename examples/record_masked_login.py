@@ -29,7 +29,8 @@ URL = "https://the-internet.herokuapp.com/login"
 OUTPUT_DIR = Path("output/masked-login")
 RECT_JS = (
     "(() => { const r = document.querySelector({sel!r}).getBoundingClientRect();"
-    " return [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)]; })()"
+    " return [Math.round(r.x), Math.round(r.y), "
+    "Math.round(r.width), Math.round(r.height)]; })()"
 )
 
 
@@ -39,7 +40,9 @@ def rect_js(selector: str) -> str:
 
 def black_fraction(image: Image.Image) -> float:
     rgb = image.tobytes()
-    black = sum(1 for i in range(0, len(rgb), 3) if rgb[i] == rgb[i + 1] == rgb[i + 2] == 0)
+    black = sum(
+        1 for i in range(0, len(rgb), 3) if rgb[i] == rgb[i + 1] == rgb[i + 2] == 0
+    )
     return black / (len(rgb) / 3)
 
 
@@ -77,8 +80,10 @@ async def main() -> None:
 
     mask = recording.masks[0]
     print(f"{recording.frames_captured} frames in {recording.duration_ms:.0f} ms")
-    print(f"mask {mask.label}: bbox={mask.bbox} tracked={mask.tracked} "
-          f"unresolved_ticks={mask.unresolved_ticks} stale_frames={mask.stale_frames}")
+    print(
+        f"mask {mask.label}: bbox={mask.bbox} tracked={mask.tracked} "
+        f"unresolved_ticks={mask.unresolved_ticks} stale_frames={mask.stale_frames}"
+    )
     print(f"password field moved to {moved}")
     print(f"video: {recording.regions[0].outputs[0]}")
 
@@ -88,7 +93,9 @@ async def main() -> None:
     last = Image.open(frames[-1]).convert("RGB")
 
     x, y, w, h = mask.bbox
-    assert first.getpixel((x + w // 2, y + h // 2)) == (0, 0, 0), "password field was not covered"
+    assert first.getpixel((x + w // 2, y + h // 2)) == (0, 0, 0), (
+        "password field was not covered"
+    )
 
     # The username field, one row up, must survive — a mask that blacked out
     # the whole frame would also pass the assertion above.
@@ -102,8 +109,11 @@ async def main() -> None:
     after = last.getpixel((mx + mw // 2, my + mh // 2))
     assert after == (0, 0, 0), f"the mask did not follow the scroll: {after}"
 
-    print(f"OK — covered at {mask.bbox} in {frames[0].name} and at {moved} in {frames[-1].name}; "
-          f"username px={control}, {covered:.1%} of the frame black")
+    print(
+        f"OK — covered at {mask.bbox} in {frames[0].name} "
+        f"and at {moved} in {frames[-1].name}; "
+        f"username px={control}, {covered:.1%} of the frame black"
+    )
 
 
 if __name__ == "__main__":
