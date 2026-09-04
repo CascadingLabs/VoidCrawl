@@ -2,10 +2,10 @@
 //! sessions.
 //!
 //! The pool creates tabs **lazily** on first `acquire()` and recycles them on
-//! `release()`. Tabs are returned to the ready queue with no CDP call — the
-//! next caller's `navigate(url)` overwrites prior content, giving near-instant
-//! reuse. Hard recycling (close + reopen) kicks in after `tab_max_uses`, and
-//! idle eviction cleans up stale tabs.
+//! `release()`. Release clears the live document before a tab re-enters the
+//! ready queue while intentionally retaining shared profile/origin state.
+//! Hard recycling (close + reopen) kicks in after `tab_max_uses`, and idle
+//! eviction cleans up stale tabs.
 //!
 //! `warmup()` is **optional** — calling it pre-creates tabs for faster first
 //! acquires, but the pool works correctly without it.
@@ -21,13 +21,16 @@ use std::{
 };
 
 use futures::future;
+use serde::Serialize;
 use tokio::{
-    sync::{Mutex, Semaphore},
+    runtime::Handle,
+    sync::{Mutex, OwnedSemaphorePermit, Semaphore},
     task::JoinHandle,
     time::{sleep, timeout},
 };
 
 use crate::{
+    context_isolation::BrowserStateBinding,
     error::{Result, VoidCrawlError},
     page::Page,
     session::BrowserSession,
@@ -88,6 +91,31 @@ pub struct PooledTab {
     /// Index into `BrowserPool::sessions` identifying which browser owns this
     /// tab.
     pub(crate) browser_idx: usize,
+    /// Checkout ownership. Dropping an unreleased tab restores pool capacity.
+    permit:                 Option<OwnedSemaphorePermit>,
+}
+
+impl PooledTab {
+    /// Pooled tabs are reusable shared-profile pages, never isolated contexts.
+    #[must_use]
+    pub const fn state_binding(&self) -> BrowserStateBinding {
+        self.page.state_binding()
+    }
+}
+
+impl Drop for PooledTab {
+    fn drop(&mut self) {
+        if self.permit.is_none() {
+            return;
+        }
+        let Ok(runtime) = Handle::try_current() else {
+            return;
+        };
+        let page = self.page.clone_handle();
+        runtime.spawn(async move {
+            let _ = page.close().await;
+        });
+    }
 }
 
 impl fmt::Debug for PooledTab {
@@ -97,8 +125,35 @@ impl fmt::Debug for PooledTab {
             .field("use_count", &self.use_count)
             .field("last_used", &self.last_used)
             .field("browser_idx", &self.browser_idx)
+            .field("checked_out", &self.permit.is_some())
             .finish()
     }
+}
+
+/// Stable cleanup strategy used when returning a pooled tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PoolReleaseStrategy {
+    /// Clear the live document and abandoned download behavior, while
+    /// deliberately retaining browser-profile and page instrumentation state.
+    BlankDocumentAndReuseSharedState,
+    /// The tab could not be reset safely and was disposed instead of reused.
+    DisposeTabAfterResetFailure,
+}
+
+/// Observable result of returning a shared-state tab to the pool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[expect(clippy::struct_excessive_bools, reason = "independent cleanup facts are explicit")]
+pub struct PoolReleaseReport {
+    pub state_binding:           BrowserStateBinding,
+    pub strategy:                PoolReleaseStrategy,
+    pub cleanup_complete:        bool,
+    pub tab_reused:              bool,
+    pub document_cleared:        bool,
+    pub download_behavior_reset: bool,
+    /// Cookies, HTTP cache, local/session storage, IndexedDB, service workers,
+    /// permissions, headers, viewport, and init scripts remain shared.
+    pub shared_state_retained:   bool,
 }
 
 /// A pool of reusable browser tabs spread across one or more Chrome sessions.
@@ -127,7 +182,7 @@ impl fmt::Debug for PooledTab {
 /// ```
 pub struct BrowserPool {
     sessions:      Vec<BrowserSession>,
-    ready:         Mutex<VecDeque<PooledTab>>,
+    ready:         Arc<Mutex<VecDeque<PooledTab>>>,
     semaphore:     Arc<Semaphore>,
     config:        PoolConfig,
     /// Round-robin counter for distributing new tabs across sessions.
@@ -156,7 +211,7 @@ impl BrowserPool {
         let total_tabs = config.browsers * config.tabs_per_browser;
         Self {
             sessions,
-            ready: Mutex::new(VecDeque::with_capacity(total_tabs)),
+            ready: Arc::new(Mutex::new(VecDeque::with_capacity(total_tabs))),
             // Permits = max concurrency. Tabs created lazily within this limit.
             semaphore: Arc::new(Semaphore::new(total_tabs)),
             config,
@@ -189,7 +244,7 @@ impl BrowserPool {
             env::var("TAB_MAX_IDLE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
         let acquire_timeout_secs: u64 =
             env::var("ACQUIRE_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
-        let no_sandbox = env::var("CHROME_NO_SANDBOX").ok().is_some_and(|v| v == "1");
+        let no_sandbox = env::var("CHROME_NO_SANDBOX").is_ok_and(|v| v == "1");
         let headless = env::var("CHROME_HEADLESS").ok().is_none_or(|v| v != "0");
         let viewport_width: Option<u32> =
             env::var("VIEWPORT_WIDTH").ok().and_then(|v| v.parse().ok());
@@ -280,7 +335,13 @@ impl BrowserPool {
     async fn create_tab(&self) -> Result<PooledTab> {
         let idx = self.next_browser_idx();
         let page = self.sessions[idx].new_blank_page().await?;
-        Ok(PooledTab { page, use_count: 0, last_used: Instant::now(), browser_idx: idx })
+        Ok(PooledTab {
+            page,
+            use_count: 0,
+            last_used: Instant::now(),
+            browser_idx: idx,
+            permit: None,
+        })
     }
 
     /// Optionally pre-open tabs across all sessions and fill the ready queue.
@@ -303,6 +364,7 @@ impl BrowserPool {
                         use_count: 0,
                         last_used: Instant::now(),
                         browser_idx: idx,
+                        permit: None,
                     })
                 });
             }
@@ -359,13 +421,13 @@ impl BrowserPool {
         let wait_start = Instant::now();
         let permit = if self.config.acquire_timeout_secs == 0 {
             // No timeout — wait indefinitely (legacy behaviour).
-            self.semaphore
-                .acquire()
+            Arc::clone(&self.semaphore)
+                .acquire_owned()
                 .await
                 .map_err(|_| VoidCrawlError::Other("pool semaphore closed".into()))?
         } else {
             let deadline = Duration::from_secs(self.config.acquire_timeout_secs);
-            match timeout(deadline, self.semaphore.acquire()).await {
+            match timeout(deadline, Arc::clone(&self.semaphore).acquire_owned()).await {
                 Ok(Ok(permit)) => permit,
                 Ok(Err(_)) => {
                     return Err(VoidCrawlError::Other("pool semaphore closed".into()));
@@ -383,10 +445,6 @@ impl BrowserPool {
         // and any lazy `create_tab()` round-trip, so tab-creation latency is
         // never misreported as contention.
         let waited_ms = u64::try_from(wait_start.elapsed().as_millis()).unwrap_or(u64::MAX);
-        // Don't auto-return the permit on drop — release() will add it back
-        // on the success path. Error paths below must add_permits(1) manually.
-        permit.forget();
-
         // Try the ready queue first (fast path: reuse an existing tab)
         let maybe_tab = {
             let mut ready = self.ready.lock().await;
@@ -396,13 +454,7 @@ impl BrowserPool {
         let tab = match maybe_tab {
             Some(tab) => tab,
             // No idle tab — create one on demand (lazy growth)
-            None => match self.create_tab().await {
-                Ok(tab) => tab,
-                Err(e) => {
-                    self.semaphore.add_permits(1);
-                    return Err(e);
-                }
-            },
+            None => self.create_tab().await?,
         };
 
         // Hard recycle if this tab is worn out
@@ -412,44 +464,93 @@ impl BrowserPool {
             match self.sessions[browser_idx].new_blank_page().await {
                 Ok(page) => {
                     return Ok((
-                        PooledTab { page, use_count: 0, last_used: Instant::now(), browser_idx },
+                        PooledTab {
+                            page,
+                            use_count: 0,
+                            last_used: Instant::now(),
+                            browser_idx,
+                            permit: Some(permit),
+                        },
                         waited_ms,
                     ));
                 }
-                Err(e) => {
-                    self.semaphore.add_permits(1);
-                    return Err(e);
-                }
+                Err(e) => return Err(e),
             }
         }
 
         // No about:blank cleanup — the caller's navigate(url) will replace
         // the prior page content, and stealth scripts persist across navigations.
         // This saves 50-200ms of CDP round-trip per reused tab.
+        let mut tab = tab;
+        tab.permit = Some(permit);
         Ok((tab, waited_ms))
     }
 
-    /// Return a tab to the pool after use.
+    /// Return a tab to the pool, discarding the observable cleanup report.
     ///
-    /// Instant return — no CDP round-trip on the common path. The next caller's
-    /// `navigate(url)` overwrites prior page content; stealth scripts persist
-    /// across navigations.
+    /// Compatibility wrapper around [`release_checked`](Self::release_checked).
+    pub async fn release(&self, tab: PooledTab) {
+        let _ = self.release_checked(tab).await;
+    }
+
+    /// Return a tab and report whether it was safe to reuse.
     ///
-    /// The one exception: if a download was armed on this tab and never
-    /// completed (`arm_download` without a matching `wait`), we reset the CDP
-    /// download behavior before recycling so the next caller doesn't inherit an
-    /// `allowAndName` pointing at a since-deleted quarantine dir. This costs
-    /// one CDP call only on the rare armed-but-abandoned path.
-    pub async fn release(&self, mut tab: PooledTab) {
+    /// The live document and abandoned download behavior are reset. Origin and
+    /// browser-profile state is intentionally retained: pooled tabs are a
+    /// shared scraping primitive, not an isolation boundary. If either reset
+    /// fails, the tab is closed and is never handed to the next caller; the
+    /// semaphore permit is still restored so capacity can grow lazily again.
+    pub async fn release_checked(&self, mut tab: PooledTab) -> PoolReleaseReport {
         tab.use_count += 1;
         tab.last_used = Instant::now();
+        let state_binding = tab.state_binding();
+        let ready = Arc::clone(&self.ready);
+        let permit = tab.permit.take();
 
-        if tab.page.is_download_armed() {
-            tab.page.reset_download_behavior().await;
-        }
+        // Cleanup owns the checked-out slot in a detached task. Cancelling the
+        // caller's await therefore cannot drop the tab before restoring pool
+        // capacity. The permit guard also restores capacity if cleanup panics
+        // or the runtime drops the task before its first poll.
+        let worker = tokio::spawn(async move {
+            let _permit = permit;
+            let download_behavior_reset = if tab.page.is_download_armed() {
+                tab.page.reset_download_behavior_checked().await.is_ok()
+            } else {
+                true
+            };
+            let document_cleared = tab.page.navigate("about:blank").await.is_ok();
+            let cleanup_complete = download_behavior_reset && document_cleared;
 
-        self.ready.lock().await.push_back(tab);
-        self.semaphore.add_permits(1);
+            if cleanup_complete {
+                ready.lock().await.push_back(tab);
+            } else {
+                let _ = tab.page.close().await;
+            }
+
+            PoolReleaseReport {
+                state_binding,
+                strategy: if cleanup_complete {
+                    PoolReleaseStrategy::BlankDocumentAndReuseSharedState
+                } else {
+                    PoolReleaseStrategy::DisposeTabAfterResetFailure
+                },
+                cleanup_complete,
+                tab_reused: cleanup_complete,
+                document_cleared,
+                download_behavior_reset,
+                shared_state_retained: true,
+            }
+        });
+
+        worker.await.unwrap_or(PoolReleaseReport {
+            state_binding,
+            strategy: PoolReleaseStrategy::DisposeTabAfterResetFailure,
+            cleanup_complete: false,
+            tab_reused: false,
+            document_cleared: false,
+            download_behavior_reset: false,
+            shared_state_retained: true,
+        })
     }
 
     /// Close idle tabs that have exceeded `tab_max_idle_secs` and open fresh
@@ -500,6 +601,7 @@ impl BrowserPool {
                             use_count: 0,
                             last_used: Instant::now(),
                             browser_idx,
+                            permit: None,
                         }),
                         Err(e) => Err(e),
                     }
@@ -605,20 +707,20 @@ impl BrowserPool {
         let tab_futs: Vec<_> =
             tabs.into_iter().map(|tab| async move { tab.page.close().await }).collect();
         for result in future::join_all(tab_futs).await {
-            if let Err(e) = result {
-                if first_err.is_none() {
-                    first_err = Some(e);
-                }
+            if let Err(e) = result
+                && first_err.is_none()
+            {
+                first_err = Some(e);
             }
         }
 
         // Close all browser sessions in parallel
         let session_futs: Vec<_> = self.sessions.iter().map(BrowserSession::close).collect();
         for result in future::join_all(session_futs).await {
-            if let Err(e) = result {
-                if first_err.is_none() {
-                    first_err = Some(e);
-                }
+            if let Err(e) = result
+                && first_err.is_none()
+            {
+                first_err = Some(e);
             }
         }
 

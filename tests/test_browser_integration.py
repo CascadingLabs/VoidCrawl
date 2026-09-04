@@ -140,6 +140,189 @@ def network_fixture_url(unused_tcp_port: int) -> Iterator[str]:
 
 class TestPageLifecycleAndResponses:
     @pytest.mark.asyncio
+    async def test_bounded_dom_and_accessibility_snapshots(
+        self, network_fixture_url: str
+    ) -> None:
+        async with (
+            BrowserSession(BrowserConfig()) as browser,
+            browser.page(network_fixture_url) as page,
+        ):
+            dom = await page.rendered_dom_snapshot(max_bytes=128)
+            ax = await page.accessibility_snapshot(max_nodes=1)
+
+        assert dom.state == "truncated"
+        assert dom.retained_bytes == 128
+        assert len(dom.bytes()) == 128
+        assert dom.epoch is not None
+        assert "network fixture" not in repr(dom)
+
+        assert ax.state == "truncated"
+        assert ax.nodes_retained == 1
+        assert ax.nodes_observed >= 1
+        assert ax.frame_scope == "top_level"
+        assert "network fixture" not in repr(ax)
+
+    @pytest.mark.asyncio
+    async def test_visual_and_layout_snapshots_include_capture_metadata(
+        self, network_fixture_url: str
+    ) -> None:
+        async with (
+            BrowserSession(BrowserConfig()) as browser,
+            browser.page(network_fixture_url) as page,
+        ):
+            layout = await page.layout_snapshot()
+            visual = await page.visual_snapshot(full_page=False)
+
+        assert layout.epoch is not None
+        assert layout.layout_viewport[2] > 0
+        assert layout.content_size[2] > 0
+        assert layout.device_scale_factor is not None
+        assert visual.epoch == layout.epoch
+        assert visual.region == "viewport"
+        assert visual.format == "png"
+        assert visual.image_size[0] > 0
+        assert visual.complete is True
+        assert visual.retained_bytes == len(visual.bytes())
+        assert visual.bytes().startswith(b"\x89PNG")
+        assert "network fixture" not in repr(visual)
+
+    @pytest.mark.asyncio
+    async def test_isolated_context_disposal_removes_origin_state(
+        self, network_fixture_url: str
+    ) -> None:
+        async with BrowserSession(BrowserConfig()) as browser:
+            assert await browser.state_binding() == "shared_browser_profile"
+            isolated = await browser.new_isolated_context()
+            page = isolated.page()
+            assert await page.state_binding() == "isolated_browser_context"
+            await page.goto(network_fixture_url)
+            await page.evaluate_js(
+                "document.cookie='isolated=secret; path=/'; "
+                "localStorage.setItem('isolated', 'secret')"
+            )
+            report = await isolated.dispose()
+            assert report.cleanup_complete is True
+            assert report.disposal_state == "disposed"
+
+            clean = await browser.new_isolated_context()
+            clean_page = clean.page()
+            await clean_page.goto(network_fixture_url)
+            state = await clean_page.evaluate_js(
+                "({cookie: document.cookie, local: localStorage.getItem('isolated')})"
+            )
+            assert state == {"cookie": "", "local": None}
+            assert (await clean.dispose()).cleanup_complete is True
+
+    @pytest.mark.asyncio
+    async def test_isolated_context_manager_disposes_on_error(
+        self, network_fixture_url: str
+    ) -> None:
+        async with BrowserSession(BrowserConfig()) as browser:
+            context = await browser.new_isolated_context()
+
+            async def failed_capture() -> None:
+                async with context:
+                    page = context.page()
+                    await page.goto(network_fixture_url)
+                    await page.evaluate_js("localStorage.setItem('leak', 'no')")
+                    raise RuntimeError("capture failed")
+
+            with pytest.raises(RuntimeError, match="capture failed"):
+                await failed_capture()
+
+            clean = await browser.new_isolated_context()
+            page = clean.page()
+            await page.goto(network_fixture_url)
+            assert await page.evaluate_js("localStorage.getItem('leak')") is None
+            assert (await clean.dispose()).cleanup_complete is True
+
+    @pytest.mark.asyncio
+    async def test_navigation_capture_returns_source_and_safe_resource_graph(
+        self, network_fixture_url: str
+    ) -> None:
+        async with BrowserSession(BrowserConfig()) as browser, browser.page() as page:
+            capture = await page.arm_navigation_capture(max_duration=5.0)
+            await page.navigate(network_fixture_url)
+            await asyncio.sleep(0.1)
+            report = await capture.finish()
+
+        assert report.termination == "finished"
+        assert report.source_status == 200
+        assert report.source_body_state == "available"
+        source_body = report.source_body()
+        assert source_body is not None
+        assert b"VoidCrawl network fixture" in source_body
+        assert report.resource_count >= 3
+        assert report.cleanup_complete is True
+        assert report.network_extra_info == "unavailable_in_current_client"
+        assert all("url" not in resource for resource in report.resources())
+        assert any(
+            "url" in resource for resource in report.resources(include_urls=True)
+        )
+        assert "VoidCrawl network fixture" not in repr(report)
+
+    @pytest.mark.asyncio
+    async def test_observation_scope_captures_prearmed_lifecycle_markers(self) -> None:
+        async with BrowserSession(BrowserConfig()) as browser, browser.page() as page:
+            scope = await page.arm_observation(
+                collect_network=False,
+                collect_console=True,
+                collect_exceptions=False,
+                max_events=8,
+                max_diagnostic_bytes=8,
+                max_duration=5.0,
+            )
+            await page.evaluate_js("console.log('observation-marker')")
+            await asyncio.sleep(0.01)
+            report = await scope.finish()
+            with pytest.raises(ValueError, match="at least one"):
+                await page.arm_observation(
+                    collect_network=False,
+                    collect_console=False,
+                    collect_exceptions=False,
+                )
+
+        assert report["termination"] == "finished"
+        assert report["cleanup_complete"] is True
+        assert any(event["kind"] == "console_api_called" for event in report["events"])
+        assert report["diagnostic_bytes_retained"] == 8
+        assert report["diagnostic_bytes_dropped"] > 0
+        assert report["diagnostics"][0]["truncated"] is True
+        assert "text" not in report["diagnostics"][0]
+        assert report["accounting"]["bytes"]["retained"] == {
+            "status": "known",
+            "value": 8,
+        }
+
+    @pytest.mark.asyncio
+    async def test_environment_snapshot_reports_effective_provider_facts(
+        self, network_fixture_url: str
+    ) -> None:
+        async with (
+            BrowserSession(BrowserConfig()) as browser,
+            browser.page(network_fixture_url) as page,
+        ):
+            snapshot = await page.environment_snapshot()
+
+        assert snapshot["controller"]["name"] == "void_crawl_core"
+        assert snapshot["renderer"]["product"]
+        assert snapshot["mode"] == {"status": "known", "value": "headless"}
+        assert snapshot["rendering"]["viewport"]["status"] == "known"
+        assert snapshot["rendering"]["device_scale_factor"]["status"] == "known"
+        assert snapshot["rendering"]["user_agent"]["status"] == "known"
+        assert snapshot["capabilities"]["rendered_dom"] == {"status": "supported"}
+
+        serialized = repr(snapshot)
+        for forbidden in (
+            "user_data_dir",
+            "profile_path",
+            "ws_url",
+            "request_headers",
+            "cookie_values",
+        ):
+            assert forbidden not in serialized
+
+    @pytest.mark.asyncio
     async def test_blank_page_init_script_runs_before_navigation(
         self, network_fixture_url: str
     ) -> None:
@@ -290,6 +473,9 @@ class TestPageLifecycleAndResponses:
         ):
             with pytest.raises(NavigationTimeoutError) as raised:
                 await page.goto(f"{network_fixture_url}busy", timeout=0.2)
+            assert str(raised.value) == "navigation timed out"
+            assert raised.value.code == "voidcrawl.navigation.timeout"
+            assert raised.value.category == "timeout"
             assert raised.value.url.endswith("/busy")
             assert raised.value.wait_phase == "networkidle"
             assert raised.value.timeout == 0.2

@@ -145,10 +145,16 @@ fn schedule_expiry_cleanup(
         if !expired {
             return;
         }
-        if let Some(handle) = sessions.remove(&session_id).await {
-            if let Err(error) = close_handle(handle).await {
-                tracing::warn!(%error, %session_id, %interrupt_id, "failed to close expired interrupt session");
-            }
+        if let Some(handle) = sessions.remove(&session_id).await
+            && let Err(error) = close_handle(handle).await
+        {
+            tracing::warn!(
+                code = %error.code(),
+                category = error.category().as_str(),
+                %session_id,
+                %interrupt_id,
+                "failed to close expired interrupt session"
+            );
         }
     });
 }

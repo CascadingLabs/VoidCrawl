@@ -2,7 +2,7 @@
 //! `screenshot()`.
 //!
 //! Kwargs mirror `screenshot()`'s wherever the concept carries over
-//! (`viewport_*`, `scroll_*`, `bbox`, the Yosoi selector fields), so the two
+//! (`viewport_*`, `scroll_*`, `bbox`, and browser target fields), so the two
 //! read the same at a call site. Two deliberate differences, both forced by
 //! the underlying CDP screencast and documented on
 //! [`void_crawl_core::recording`]:
@@ -21,8 +21,8 @@ use pyo3::{
 use pyo3_async_runtimes::tokio::future_into_py;
 use tokio::sync::Mutex;
 use void_crawl_core::{
-    Encoding, FrameFormat, MaskSpec, Page, Recording, RecordingHandle, RecordingOptions,
-    ScrollTarget, SelectorEntry,
+    BrowserTarget, DocumentEpoch, Encoding, FrameFormat, MaskSpec, Page, Recording,
+    RecordingHandle, RecordingOptions, ScrollTarget,
 };
 
 use crate::{resolve_selector_args, resolve_viewport_args, to_py_err};
@@ -130,32 +130,52 @@ impl PyMaskReport {
 #[pyclass(name = "Recording", module = "voidcrawl._ext", frozen)]
 #[derive(Debug)]
 pub struct PyRecording {
+    #[pyo3(get)]
+    pub started_at_unix_ms:      Option<u64>,
+    #[pyo3(get)]
+    pub document_epoch:          Option<u64>,
     /// One entry per requested region; a single ``"viewport"`` region when
     /// neither ``bbox`` nor ``selectors`` was given.
     #[pyo3(get)]
-    pub regions:            Vec<Py<PyRecordedRegion>>,
+    pub regions:                 Vec<Py<PyRecordedRegion>>,
     /// One entry per requested mask. Empty means nothing was asked to be
     /// covered — not that there was nothing worth covering.
     #[pyo3(get)]
-    pub masks:              Vec<Py<PyMaskReport>>,
+    pub masks:                   Vec<Py<PyMaskReport>>,
     /// ``"jpeg"`` or ``"png"``.
     #[pyo3(get)]
-    pub format:             String,
+    pub format:                  String,
     #[pyo3(get)]
-    pub duration_ms:        f64,
+    pub duration_ms:             f64,
     #[pyo3(get)]
-    pub frames_captured:    usize,
+    pub frames_captured:         usize,
     /// Frames Chrome delivered that the fps ceiling or frame cap discarded.
     /// Large next to a small ``frames_captured`` means ``fps`` was binding.
     #[pyo3(get)]
-    pub frames_dropped:     usize,
+    pub frames_dropped:          usize,
     #[pyo3(get)]
-    pub device_pixel_ratio: f64,
+    pub frames_dropped_by_rate:  usize,
+    #[pyo3(get)]
+    pub frames_dropped_by_limit: usize,
+    #[pyo3(get)]
+    pub frame_decode_failures:   usize,
+    #[pyo3(get)]
+    pub frame_ack_failures:      usize,
+    #[pyo3(get)]
+    pub stream_disconnected:     bool,
+    #[pyo3(get)]
+    pub complete:                bool,
+    #[pyo3(get)]
+    pub frame_size_pixels:       Option<(u32, u32)>,
+    #[pyo3(get)]
+    pub capture_viewport_css:    Option<(f64, f64)>,
+    #[pyo3(get)]
+    pub device_pixel_ratio:      f64,
     /// Whether this recording pinned its tab to the foreground and held the
     /// browser's capture lock. ``False`` means it ran concurrently with the
     /// rest of the browser — see ``foreground`` in :meth:`Page.record`.
     #[pyo3(get)]
-    pub foregrounded:       bool,
+    pub foregrounded:            bool,
 }
 
 #[pymethods]
@@ -231,6 +251,11 @@ impl PyRecordingHandle {
 
 /// Convert a core [`Recording`] into its Python mirror.
 pub(crate) fn into_py_recording(py: Python<'_>, rec: Recording) -> PyResult<Py<PyRecording>> {
+    let started_at_unix_ms = rec.started_at_unix_ms;
+    let document_epoch = match rec.document_epoch {
+        DocumentEpoch::Known(epoch) => Some(epoch),
+        DocumentEpoch::UnavailableForAttachedPage => None,
+    };
     let mut regions = Vec::with_capacity(rec.regions.len());
     for region in rec.regions {
         let mut frames = Vec::with_capacity(region.frames.len());
@@ -270,6 +295,8 @@ pub(crate) fn into_py_recording(py: Python<'_>, rec: Recording) -> PyResult<Py<P
     Py::new(
         py,
         PyRecording {
+            started_at_unix_ms,
+            document_epoch,
             regions,
             masks,
             format: match rec.format {
@@ -279,6 +306,14 @@ pub(crate) fn into_py_recording(py: Python<'_>, rec: Recording) -> PyResult<Py<P
             duration_ms: rec.duration.as_secs_f64() * 1000.0,
             frames_captured: rec.frames_captured,
             frames_dropped: rec.frames_dropped,
+            frames_dropped_by_rate: rec.frames_dropped_by_rate,
+            frames_dropped_by_limit: rec.frames_dropped_by_limit,
+            frame_decode_failures: rec.frame_decode_failures,
+            frame_ack_failures: rec.frame_ack_failures,
+            stream_disconnected: rec.stream_disconnected,
+            complete: rec.complete,
+            frame_size_pixels: rec.frame_size_pixels,
+            capture_viewport_css: rec.capture_viewport_css,
             device_pixel_ratio: rec.device_pixel_ratio,
             foregrounded: rec.foregrounded,
         },
@@ -286,11 +321,12 @@ pub(crate) fn into_py_recording(py: Python<'_>, rec: Recording) -> PyResult<Py<P
 }
 
 /// Parse one `selectors=[...]` entry. Accepts the same field names as a
-/// Yosoi `SelectorEntry` dump (`type`/`value`/`regex`/`name`/`nth`/`x`/`y`),
-/// so `entry.model_dump()` can be passed straight through.
-fn selector_from_dict(item: &Bound<'_, PyAny>) -> PyResult<SelectorEntry> {
+/// Legacy-compatible browser target dump
+/// (`type`/`value`/`regex`/`name`/`nth`/`x`/`y`), so `entry.model_dump()` can
+/// be passed straight through.
+fn selector_from_dict(item: &Bound<'_, PyAny>) -> PyResult<BrowserTarget> {
     let dict = item.cast::<PyDict>().map_err(|_| {
-        PyValueError::new_err("each entry in `selectors` must be a dict of SelectorEntry fields")
+        PyValueError::new_err("each entry in `selectors` must be a dict of BrowserTarget fields")
     })?;
     // Non-generic on purpose: a generic `get::<T>` would tie the extracted
     // value's borrow to the helper's lifetime parameter, which the temporary
@@ -313,7 +349,7 @@ fn selector_from_dict(item: &Bound<'_, PyAny>) -> PyResult<SelectorEntry> {
             _ => Ok(None),
         }
     };
-    // `type` is the Yosoi field name; `selector_type` is accepted too so the
+    // `type` is the legacy wire field; `selector_type` is accepted too so the
     // plural form lines up with `screenshot()`'s flat kwargs.
     let kind = match get_str("type")? {
         Some(k) => Some(k),

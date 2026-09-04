@@ -129,14 +129,15 @@ pub fn scan_bytes(data: &[u8], cfg: &ScanConfig) -> ScanReport {
     }
 
     // 2. Disguised-executable check.
-    if let (Some(claimed), Some(kind)) = (cfg.claimed_mime.as_deref(), detected) {
-        if is_executable(kind) && !mime_is_executable(claimed) {
-            return flag(format!(
-                "content-type mismatch: claimed {claimed} but bytes are {} (.{})",
-                kind.mime_type(),
-                kind.extension()
-            ));
-        }
+    if let (Some(claimed), Some(kind)) = (cfg.claimed_mime.as_deref(), detected)
+        && is_executable(kind)
+        && !mime_is_executable(claimed)
+    {
+        return flag(format!(
+            "content-type mismatch: claimed {claimed} but bytes are {} (.{})",
+            kind.mime_type(),
+            kind.extension()
+        ));
     }
 
     // 3. YARA signature scan.

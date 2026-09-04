@@ -55,4 +55,5 @@ yara-x = { version = "1.7", default-features = false }
 infer = "0.16"
 
 [dev-dependencies]
+flate2 = "1"
 tempfile = "3"

@@ -12,7 +12,9 @@ use std::{
 
 use chromiumoxide::{
     browser::{Browser, BrowserConfig, CdpMode},
-    cdp::browser_protocol::target::{CreateTargetParams, TargetId},
+    cdp::browser_protocol::target::{
+        CreateBrowserContextParams, CreateTargetParams, DisposeBrowserContextParams, TargetId,
+    },
     handler::{Handler, HandlerConfig},
 };
 use rustls::crypto::ring::default_provider as ring_crypto_provider;
@@ -20,6 +22,8 @@ use serde_json::Value;
 use tokio::{sync::Mutex, task::JoinHandle, time};
 
 use crate::{
+    context_isolation::{BrowserStateBinding, IsolatedBrowserContext},
+    environment::{BrowserVisibilityMode, EnvironmentObservation, EnvironmentUnavailableReason},
     error::{Result, VoidCrawlError},
     interrupt::{InterruptInfo, InterruptRegistry, InterruptRequest},
     page::Page,
@@ -351,6 +355,8 @@ impl BrowserSessionBuilder {
 /// Use [`BrowserSessionBuilder`] or the convenience constructors to create one.
 pub struct BrowserSession {
     browser:        Arc<Mutex<Browser>>,
+    browser_mode:   EnvironmentObservation<BrowserVisibilityMode>,
+    cdp_mode:       CdpMode,
     interrupts:     Arc<InterruptRegistry>,
     _handler_task:  JoinHandle<()>,
     handler_alive:  Arc<AtomicBool>,
@@ -360,6 +366,7 @@ pub struct BrowserSession {
     /// `Browser.close` over CDP — doing so terminates the user's Chromium
     /// process, which we didn't spawn and have no business shutting down.
     attached:       bool,
+    state_binding:  BrowserStateBinding,
     /// Owns the temporary user data directory for launched browsers.
     /// `None` for remote-debug sessions (no local user data dir).
     /// Dropped after `browser` and `_handler_task`, so Chrome has already
@@ -425,6 +432,14 @@ impl BrowserSession {
         persistent_user_data_dir: Option<PathBuf>,
         cdp_mode: CdpMode,
     ) -> Result<Self> {
+        let browser_mode = browser_mode_observation(&mode);
+        let state_binding = if matches!(mode, BrowserMode::RemoteDebug { .. }) {
+            BrowserStateBinding::AttachedBrowser
+        } else if persistent_user_data_dir.is_some() {
+            BrowserStateBinding::ManagedProfile
+        } else {
+            BrowserStateBinding::SharedBrowserProfile
+        };
         let mut owned_user_data_dir: Option<tempfile::TempDir> = None;
 
         let (browser, handler) = match &mode {
@@ -529,11 +544,14 @@ impl BrowserSession {
 
         Ok(Self {
             browser: Arc::new(Mutex::new(browser)),
+            browser_mode,
+            cdp_mode,
             interrupts: InterruptRegistry::new(),
             _handler_task: handler_task,
             handler_alive: alive,
             stealth,
             attached: matches!(mode, BrowserMode::RemoteDebug { .. }),
+            state_binding,
             _user_data_dir: owned_user_data_dir,
             capture_lock: Arc::new(Mutex::new(())),
         })
@@ -552,7 +570,7 @@ impl BrowserSession {
                 .new_page("about:blank")
                 .await
                 .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
-            Page::new(cdp_page, Arc::clone(&self.capture_lock), Arc::clone(&self.interrupts))
+            self.wrap_page(cdp_page)
         }; // browser lock released before navigation
 
         if let Some(stealth) = self.stealth_for_session() {
@@ -571,12 +589,83 @@ impl BrowserSession {
                 .new_page("about:blank")
                 .await
                 .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
-            Page::new(cdp_page, Arc::clone(&self.capture_lock), Arc::clone(&self.interrupts))
+            self.wrap_page(cdp_page)
         };
         if let Some(stealth) = self.stealth_for_session() {
             page.apply_stealth(&stealth).await?;
         }
         Ok(page)
+    }
+
+    /// Create a fresh disposable Chromium browser context and one blank page.
+    ///
+    /// Unlike ordinary pages and pooled tabs, this context does not share
+    /// cookies, cache, origin storage, service workers, permissions, or
+    /// context-scoped network state with the session's default profile or
+    /// another isolated context. Dispose the returned handle rather than
+    /// attempting to reset those state families individually.
+    pub async fn new_isolated_context(&self) -> Result<IsolatedBrowserContext> {
+        self.check_alive()?;
+        let (context_id, cdp_page) = {
+            let browser = self.browser.lock().await;
+            let context_id = browser
+                .execute(CreateBrowserContextParams::builder().dispose_on_detach(true).build())
+                .await
+                .map_err(|e| VoidCrawlError::PageError(e.to_string()))?
+                .result
+                .browser_context_id;
+            let params = CreateTargetParams::builder()
+                .url("about:blank")
+                .browser_context_id(context_id.clone())
+                .build()
+                .map_err(VoidCrawlError::PageError)?;
+            match browser.new_page(params).await {
+                Ok(page) => (context_id, page),
+                Err(error) => {
+                    let _ = browser.execute(DisposeBrowserContextParams::new(context_id)).await;
+                    return Err(VoidCrawlError::PageError(error.to_string()));
+                }
+            }
+        };
+        let page =
+            self.wrap_page_with_binding(cdp_page, BrowserStateBinding::IsolatedBrowserContext);
+        if let Some(stealth) = self.stealth_for_session()
+            && let Err(error) = page.apply_stealth(&stealth).await
+        {
+            let _ = self
+                .browser
+                .lock()
+                .await
+                .execute(DisposeBrowserContextParams::new(context_id))
+                .await;
+            return Err(error);
+        }
+        Ok(IsolatedBrowserContext::new(
+            page,
+            Arc::clone(&self.browser),
+            context_id,
+            Arc::clone(&self.handler_alive),
+        ))
+    }
+
+    fn wrap_page(&self, page: chromiumoxide::Page) -> Page {
+        self.wrap_page_with_binding(page, self.state_binding)
+    }
+
+    fn wrap_page_with_binding(
+        &self,
+        page: chromiumoxide::Page,
+        state_binding: BrowserStateBinding,
+    ) -> Page {
+        Page::new(
+            page,
+            Arc::clone(&self.capture_lock),
+            Arc::clone(&self.interrupts),
+            self.browser_mode.clone(),
+            self.cdp_mode,
+            self.attached,
+            state_binding,
+        )
     }
 
     fn stealth_for_session(&self) -> Option<StealthConfig> {
@@ -628,7 +717,7 @@ impl BrowserSession {
                 .new_page(params)
                 .await
                 .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
-            Page::new(cdp_page, Arc::clone(&self.capture_lock), Arc::clone(&self.interrupts))
+            self.wrap_page(cdp_page)
         }; // browser lock released before navigation
 
         page.apply_stealth(&self.stealth).await?;
@@ -653,28 +742,14 @@ impl BrowserSession {
                 let pages =
                     browser.pages().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
                 if pages.len() >= expected_pages || attempt == 19 {
-                    return Ok(pages
-                        .into_iter()
-                        .map(|page| {
-                            Page::new(
-                                page,
-                                Arc::clone(&self.capture_lock),
-                                Arc::clone(&self.interrupts),
-                            )
-                        })
-                        .collect());
+                    return Ok(pages.into_iter().map(|page| self.wrap_page(page)).collect());
                 }
                 time::sleep(Duration::from_millis(25)).await;
             }
         }
         let cdp_pages =
             browser.pages().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
-        Ok(cdp_pages
-            .into_iter()
-            .map(|page| {
-                Page::new(page, Arc::clone(&self.capture_lock), Arc::clone(&self.interrupts))
-            })
-            .collect())
+        Ok(cdp_pages.into_iter().map(|page| self.wrap_page(page)).collect())
     }
 
     /// The browser's CDP WebSocket endpoint (`ws://…`).
@@ -707,7 +782,7 @@ impl BrowserSession {
             .get_page(TargetId::new(target_id))
             .await
             .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
-        Ok(Page::new(cdp_page, Arc::clone(&self.capture_lock), Arc::clone(&self.interrupts)))
+        Ok(self.wrap_page(cdp_page))
     }
 
     /// Mark one page as requiring explicit external review. No page action is
@@ -773,6 +848,12 @@ impl BrowserSession {
         self.attached
     }
 
+    /// Mutable-state boundary used by ordinary pages from this session.
+    #[must_use]
+    pub const fn state_binding(&self) -> BrowserStateBinding {
+        self.state_binding
+    }
+
     /// Access stealth config.
     pub fn stealth_config(&self) -> &StealthConfig {
         &self.stealth
@@ -780,6 +861,20 @@ impl BrowserSession {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
+
+fn browser_mode_observation(mode: &BrowserMode) -> EnvironmentObservation<BrowserVisibilityMode> {
+    match mode {
+        BrowserMode::Headless => {
+            EnvironmentObservation::Known { value: BrowserVisibilityMode::Headless }
+        }
+        BrowserMode::Headful => {
+            EnvironmentObservation::Known { value: BrowserVisibilityMode::Headful }
+        }
+        BrowserMode::RemoteDebug { .. } => EnvironmentObservation::Unavailable {
+            reason: EnvironmentUnavailableReason::AttachedBrowserNotControlled,
+        },
+    }
+}
 
 /// Spawn the CDP handler loop on a background tokio task.
 ///
@@ -831,7 +926,30 @@ async fn resolve_ws_url(url: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_CHROME_ARGS, assemble_chrome_args};
+    use super::{BrowserMode, DEFAULT_CHROME_ARGS, assemble_chrome_args, browser_mode_observation};
+    use crate::environment::{
+        BrowserVisibilityMode, EnvironmentObservation, EnvironmentUnavailableReason,
+    };
+
+    #[test]
+    fn launch_mode_observation_does_not_guess_for_attached_browsers() {
+        assert_eq!(
+            browser_mode_observation(&BrowserMode::Headless),
+            EnvironmentObservation::Known { value: BrowserVisibilityMode::Headless }
+        );
+        assert_eq!(
+            browser_mode_observation(&BrowserMode::Headful),
+            EnvironmentObservation::Known { value: BrowserVisibilityMode::Headful }
+        );
+        assert_eq!(
+            browser_mode_observation(&BrowserMode::RemoteDebug {
+                ws_url: "ws://secret-local-handle".into(),
+            }),
+            EnvironmentObservation::Unavailable {
+                reason: EnvironmentUnavailableReason::AttachedBrowserNotControlled,
+            }
+        );
+    }
 
     /// Flags are stored WITHOUT a leading `--` (chromiumoxide adds it; a `--`
     /// here would become the inert `----flag`). Guards the double-dash bug.

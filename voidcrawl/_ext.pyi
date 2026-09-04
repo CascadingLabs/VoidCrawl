@@ -91,6 +91,96 @@ class ResponseExpectation:
     @property
     def value(self) -> Any: ...
 
+class RenderedDomSnapshot:
+    state: str
+    unavailable_reason: str | None
+    epoch: int | None
+    frame_scope: str
+    url: str | None
+    generated_at_unix_ms: int | None
+    retained_bytes: int
+    complete_bytes: int | None
+    def bytes(self) -> bytes: ...
+
+class AccessibilitySnapshot:
+    state: str
+    unavailable_reason: str | None
+    epoch: int | None
+    frame_scope: str
+    frame_url: str | None
+    url: str | None
+    generated_at_unix_ms: int | None
+    requested_depth: int | None
+    nodes_observed: int
+    nodes_retained: int
+    retained_bytes: int
+    complete_bytes: int | None
+    def bytes(self) -> bytes: ...
+
+class LayoutSnapshot:
+    epoch: int | None
+    url: str | None
+    generated_at_unix_ms: int | None
+    layout_viewport: tuple[int, int, int, int]
+    visual_viewport: tuple[
+        float, float, float, float, float, float, float, float | None
+    ]
+    content_size: tuple[float, float, float, float]
+    device_scale_factor: float | None
+
+class VisualSnapshot:
+    epoch: int | None
+    url: str | None
+    generated_at_unix_ms: int | None
+    format: str
+    region: str
+    bbox: tuple[int, int, int, int] | None
+    target_kind: str | None
+    image_size: tuple[int, int]
+    capture_viewport: tuple[int, int]
+    device_scale_factor: float
+    retained_bytes: int
+    complete: bool
+    def bytes(self) -> bytes: ...
+
+class NavigationCaptureReport:
+    """Terminal source/resource graph report with a redacted representation."""
+
+    termination: str
+    started_at_unix_ms: int | None
+    elapsed_micros: int
+    events_admitted: int
+    resources_dropped: int
+    additional_loss_unknown: bool
+    cleanup_complete: bool
+    network_extra_info: str
+    requested_url: str | None
+    final_url: str | None
+    redirect_count: int
+    resource_count: int
+    source_status: int | None
+    source_body_state: str | None
+    source_retained_bytes: int | None
+    source_complete_bytes: int | None
+    def source_body(self) -> bytes | None: ...
+    def source_header_names(self) -> list[str]: ...
+    def resources(self, *, include_urls: bool = False) -> list[dict[str, Any]]: ...
+
+class NavigationCapture:
+    """Armed main-document source and resource-graph capture."""
+
+    async def finish(self) -> NavigationCaptureReport: ...
+    async def cancel(self) -> NavigationCaptureReport: ...
+    async def wait(self) -> NavigationCaptureReport: ...
+
+class ObservationScope:
+    """Armed, bounded CDP lifecycle observation."""
+
+    async def finish(self) -> dict[str, Any]: ...
+    async def cancel(self) -> dict[str, Any]: ...
+    async def interrupt(self) -> dict[str, Any]: ...
+    async def wait(self) -> dict[str, Any]: ...
+
 class TabInstrumentationState:
     """Per-tab CDP instrumentation state for routing sensitive work.
 
@@ -147,6 +237,15 @@ class ScanReport:
     reason: str | None
     detected_mime: str | None
     size: int
+
+class PoolReleaseReport:
+    state_binding: str
+    strategy: str
+    cleanup_complete: bool
+    tab_reused: bool
+    document_cleared: bool
+    download_behavior_reset: bool
+    shared_state_retained: bool
 
 class PooledTab:
     """A tab checked out from a :class:`~voidcrawl.BrowserPool`.
@@ -217,8 +316,12 @@ class PooledTab:
     async def url(self) -> str | None:
         """Return the current page URL, or ``None``."""
         ...
+    async def state_binding(self) -> str: ...
     async def instrumentation_state(self) -> TabInstrumentationState:
         """Return this tab's CDP instrumentation state."""
+        ...
+    async def environment_snapshot(self) -> dict[str, Any]:
+        """Return effective browser environment and capture capabilities."""
         ...
     async def evaluate_js(self, expression: str) -> object:
         """Evaluate a JavaScript *expression* and return the result.
@@ -620,7 +723,7 @@ class BrowserPool:
     ) -> _PoolParamsContext: ...
     async def warmup(self) -> None: ...
     def acquire(self) -> _AcquireContext: ...
-    async def release(self, tab: PooledTab) -> None: ...
+    async def release(self, tab: PooledTab) -> PoolReleaseReport | None: ...
     async def __aenter__(self) -> BrowserPool: ...
     async def __aexit__(
         self, exc_type: object = None, exc_val: object = None, exc_tb: object = None
@@ -673,6 +776,8 @@ class MaskReport:
 class Recording:
     """The result of :meth:`Page.record` / :meth:`RecordingHandle.stop`."""
 
+    started_at_unix_ms: int | None
+    document_epoch: int | None
     regions: list[RecordedRegion]
     """One per requested region; a single ``"viewport"`` region when neither
     ``bbox`` nor ``selectors`` was given."""
@@ -684,7 +789,15 @@ class Recording:
     duration_ms: float
     frames_captured: int
     frames_dropped: int
-    """Frames discarded by the ``fps`` ceiling or the frame cap."""
+    """Frames discarded by bounds or invalid frame data."""
+    frames_dropped_by_rate: int
+    frames_dropped_by_limit: int
+    frame_decode_failures: int
+    frame_ack_failures: int
+    stream_disconnected: bool
+    complete: bool
+    frame_size_pixels: tuple[int, int] | None
+    capture_viewport_css: tuple[float, float] | None
     device_pixel_ratio: float
     foregrounded: bool
     """Whether the recording pinned its tab to the foreground and held the
@@ -736,6 +849,28 @@ class Page:
     async def add_init_script(self, script: str) -> None:
         """Install JavaScript before each subsequent document executes."""
         ...
+    async def arm_navigation_capture(
+        self,
+        *,
+        max_events: int = 4096,
+        max_resources: int = 512,
+        max_source_bytes: int = 8388608,
+        max_duration: float = 30.0,
+    ) -> NavigationCapture:
+        """Arm main-document source and resource-graph capture before navigation."""
+        ...
+    async def arm_observation(
+        self,
+        *,
+        collect_network: bool = True,
+        collect_console: bool = True,
+        collect_exceptions: bool = True,
+        max_events: int = 2048,
+        max_diagnostic_bytes: int = 65536,
+        max_duration: float = 30.0,
+    ) -> ObservationScope:
+        """Arm bounded lifecycle markers before navigation or an action."""
+        ...
     def expect_response(
         self,
         pattern: str,
@@ -756,14 +891,34 @@ class Page:
     async def content(self) -> str:
         """Return the full page HTML."""
         ...
+    async def rendered_dom_snapshot(
+        self, max_bytes: int = 8388608
+    ) -> RenderedDomSnapshot: ...
+    async def accessibility_snapshot(
+        self,
+        depth: int | None = None,
+        max_nodes: int = 10000,
+        max_bytes: int = 8388608,
+    ) -> AccessibilitySnapshot: ...
+    async def accessibility_snapshot_in_frame(
+        self,
+        frame_url_pattern: str,
+        depth: int | None = None,
+        max_nodes: int = 10000,
+        max_bytes: int = 8388608,
+    ) -> AccessibilitySnapshot: ...
     async def title(self) -> str | None:
         """Return the document title, or ``None``."""
         ...
     async def url(self) -> str | None:
         """Return the current page URL, or ``None``."""
         ...
+    async def state_binding(self) -> str: ...
     async def instrumentation_state(self) -> TabInstrumentationState:
         """Return this tab's CDP instrumentation state."""
+        ...
+    async def environment_snapshot(self) -> dict[str, Any]:
+        """Return effective browser environment and capture capabilities."""
         ...
     async def evaluate_js(self, expression: str) -> object:
         """Evaluate a JavaScript *expression* and return the result."""
@@ -801,6 +956,26 @@ class Page:
         :meth:`evaluate_js_in_frame`.
         """
         ...
+    async def layout_snapshot(self) -> LayoutSnapshot: ...
+    async def visual_snapshot(
+        self,
+        bbox: tuple[int, int, int, int] | None = None,
+        selector_type: str | None = None,
+        selector_value: str | None = None,
+        selector_regex: str | None = None,
+        selector_name: str | None = None,
+        selector_nth: int | None = None,
+        selector_x: float | None = None,
+        selector_y: float | None = None,
+        viewport_preset: str | None = None,
+        viewport_width: int | None = None,
+        viewport_height: int | None = None,
+        viewport_device_scale_factor: float | None = None,
+        viewport_mobile: bool | None = None,
+        scroll_viewports: float | None = None,
+        scroll_pixels: int | None = None,
+        full_page: bool | None = None,
+    ) -> VisualSnapshot: ...
     async def screenshot_png(self) -> bytes:
         """Capture a full-page screenshot as PNG bytes."""
         ...
@@ -1256,6 +1431,20 @@ class InterruptInfo:
     state: str
     expires_in_ms: int
 
+class ContextCleanupReport:
+    state_binding: str
+    disposal_state: str
+    cleanup_complete: bool
+
+class IsolatedBrowserContext:
+    state_binding: str
+    def page(self) -> Page: ...
+    async def dispose(self) -> ContextCleanupReport: ...
+    async def __aenter__(self) -> IsolatedBrowserContext: ...
+    async def __aexit__(
+        self, exc_type: object = None, exc_val: object = None, exc_tb: object = None
+    ) -> bool: ...
+
 class BrowserSession:
     """Rust-side browser session (internal).
 
@@ -1278,6 +1467,8 @@ class BrowserSession:
     ) -> None: ...
     async def launch(self) -> None: ...
     async def new_page(self, url: str | None = None) -> Page: ...
+    async def new_isolated_context(self) -> IsolatedBrowserContext: ...
+    async def state_binding(self) -> str: ...
     async def new_page_in_window(self, url: str) -> Page: ...
     async def attach_page(self, target_id: str) -> Page: ...
     async def interrupt(
@@ -1395,7 +1586,10 @@ def list_device_presets() -> list[tuple[str, int, int, float, bool]]:
 # ruff: noqa: N818  — these are the public exception names, preserved for API compat
 
 class VoidCrawlError(Exception):
-    """Base class for all voidcrawl errors raised from the native extension."""
+    """Base class for native errors with stable, secret-safe dispatch fields."""
+
+    code: str
+    category: str
 
 class ManagedProfileSnapshot:
     path: str

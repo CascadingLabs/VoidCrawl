@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from voidcrawl import BrowserConfig, BrowserSession, Recording
+from voidcrawl import BrowserConfig, BrowserSession, Recording, VoidCrawlError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -61,6 +61,16 @@ class TestRecording:
             assert rec.regions[0].bbox is None
             assert rec.frames_captured > 1
             assert rec.effective_fps() <= 10.5
+            assert rec.started_at_unix_ms is not None
+            assert rec.document_epoch is not None
+            assert rec.complete is True
+            assert rec.frame_size_pixels is not None
+            assert rec.capture_viewport_css is not None
+            assert rec.frames_dropped == (
+                rec.frames_dropped_by_rate
+                + rec.frames_dropped_by_limit
+                + rec.frame_decode_failures
+            )
 
             frames = rec.regions[0].frames
             assert len(frames) == rec.frames_captured
@@ -162,11 +172,15 @@ class TestRecording:
             await page.goto(ANIMATED_URL)
             loop = asyncio.get_running_loop()
             started = loop.time()
-            with pytest.raises(RuntimeError, match=r"no visible target|not visible"):
+            with pytest.raises(
+                VoidCrawlError, match=r"no visible target|not visible"
+            ) as raised:
                 await page.record(
                     duration_secs=30,
                     selectors=[{"type": "css", "value": "#nope"}],
                 )
+            assert raised.value.code == "voidcrawl.target.element_not_visible"
+            assert raised.value.category == "unavailable"
             # Must fail up front, not after burning the full duration.
             assert loop.time() - started < 10
 

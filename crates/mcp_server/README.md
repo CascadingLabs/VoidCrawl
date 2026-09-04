@@ -81,4 +81,9 @@ is reserved for the MCP protocol.
 
 ## Protocol
 
-Transport: **stdio**. Protocol version: whatever `rmcp` 1.4 defaults to.
+Transport: **stdio**. Protocol version: whatever the pinned `rmcp` version defaults to.
+
+Tool errors include secret-safe `data.code` and `data.category` fields for
+stable dispatch. Selected compatibility errors also retain `data.exception`;
+clients should not parse human-readable messages or expect raw browser,
+selector, profile-path, URL-query, or response diagnostics on the wire.

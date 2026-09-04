@@ -10,12 +10,12 @@ use serde_json::Value;
 use void_crawl_core::VoidCrawlError;
 use voidcrawl_mcp::errors::map_err;
 
+fn mapped(err: VoidCrawlError) -> Value {
+    serde_json::to_value(map_err(err)).expect("serialise ErrorData")
+}
+
 fn data(err: VoidCrawlError) -> Value {
-    let mapped = map_err(err);
-    // ErrorData serialises to `{ code, message, data? }`. We only care
-    // about the data payload.
-    let as_json = serde_json::to_value(&mapped).expect("serialise ErrorData");
-    as_json.get("data").cloned().unwrap_or(Value::Null)
+    mapped(err).get("data").cloned().unwrap_or(Value::Null)
 }
 
 #[test]
@@ -48,14 +48,14 @@ fn profile_lease_expired_carries_timeout() {
 }
 
 #[test]
-fn profile_not_found_carries_searched_list() {
+fn profile_not_found_omits_machine_local_search_paths() {
     let d = data(VoidCrawlError::ProfileNotFound {
         name:     "Missing".into(),
         searched: vec!["/one".into(), "/two".into()],
     });
     assert_eq!(d["exception"], "ProfileNotFound");
-    assert_eq!(d["name"], "Missing");
-    assert_eq!(d["searched"], serde_json::json!(["/one", "/two"]));
+    assert!(d.get("name").is_none());
+    assert!(d.get("searched").is_none());
 }
 
 #[test]
@@ -71,7 +71,20 @@ fn interrupt_errors_carry_redacted_lifecycle_ids() {
 }
 
 #[test]
-fn plain_errors_have_no_data_payload() {
+fn every_error_carries_stable_safe_summary_data() {
     let d = data(VoidCrawlError::BrowserClosed);
-    assert_eq!(d, Value::Null);
+    assert_eq!(d["code"], "voidcrawl.browser.closed");
+    assert_eq!(d["category"], "provider_failure");
+}
+
+#[test]
+fn raw_diagnostics_do_not_cross_the_default_mcp_error_boundary() {
+    let error = mapped(VoidCrawlError::NavigationFailed(
+        "https://example.test/?access_token=secret".into(),
+    ));
+    let serialized = error.to_string();
+    assert_eq!(error["message"], "navigation failed");
+    assert_eq!(error["data"]["code"], "voidcrawl.navigation.failed");
+    assert!(!serialized.contains("access_token"));
+    assert!(!serialized.contains("secret"));
 }

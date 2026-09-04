@@ -115,13 +115,13 @@ async fn main() -> anyhow::Result<()> {
 
     for handle in sessions.drain().await {
         if let Err(e) = close_handle(handle).await {
-            tracing::warn!(error = %e, "failed to close dedicated session");
+            tracing::warn!(code = %e.code(), category = e.category().as_str(), "failed to close dedicated session");
         }
     }
-    if let Some(pool) = state.pool_if_initialized() {
-        if let Err(e) = pool.close().await {
-            tracing::warn!(error = %e, "failed to close browser pool");
-        }
+    if let Some(pool) = state.pool_if_initialized()
+        && let Err(e) = pool.close().await
+    {
+        tracing::warn!(code = %e.code(), category = e.category().as_str(), "failed to close browser pool");
     }
     // Dropping `state` releases the `Arc<PinnedProfile>` → the
     // `ProfileHandle` inside → its `fs2` advisory lock guard. Chrome

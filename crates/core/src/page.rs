@@ -6,19 +6,20 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use chromiumoxide::{
-    Page as CdpPage,
+    CdpMode, Page as CdpPage,
     cdp::{
         browser_protocol::{
             accessibility::{AxNode, AxValue, GetFullAxTreeParams, QueryAxTreeParams},
             browser::{
-                GetWindowForTargetParams, PermissionDescriptor, PermissionSetting,
-                SetDownloadBehaviorBehavior, SetDownloadBehaviorParams, SetPermissionParams,
+                GetVersionParams, GetWindowForTargetParams, PermissionDescriptor,
+                PermissionSetting, SetDownloadBehaviorBehavior, SetDownloadBehaviorParams,
+                SetPermissionParams,
             },
             dom::{BackendNodeId, GetBoxModelParams, GetDocumentParams, ResolveNodeParams},
             emulation::{
@@ -54,14 +55,61 @@ use tokio::{sync::Mutex as AsyncMutex, time};
 use crate::{
     antibot::{self, AntibotVerdict},
     ax::compact_outline,
+    context_isolation::BrowserStateBinding,
+    document_snapshot::{
+        AccessibilitySnapshot, AccessibilitySnapshotOptions, DocumentEpoch, DocumentFrameScope,
+        DocumentScope, RenderedDomSnapshot, SnapshotUnavailableReason, accessibility, rendered_dom,
+        unavailable_accessibility,
+    },
+    environment::{
+        BrowserCaptureCapabilities, BrowserEnvironmentSnapshot, BrowserVisibilityMode,
+        ControllerVersion, ENVIRONMENT_SNAPSHOT_JS, EnvironmentObservation,
+        InstrumentationSnapshot, RendererVersion, rendering_environment,
+    },
     error::{Result, VoidCrawlError},
     input::{HumanizeOptions, Rng, humanized_path},
     interrupt::InterruptRegistry,
+    navigation_capture::{NavigationCapture, NavigationCaptureOptions, ProtectedUrl},
+    observation::{ObservationOptions, ObservationScope},
     response::{ResponseCapture, ResponseCaptureLimits},
-    selector::{self, RawRect, SelectorEntry, SelectorKind, SelectorResolution},
+    selector::{self, BrowserTarget, BrowserTargetKind, RawRect, TargetResolution},
     stealth::StealthConfig,
     viewport::{ScrollTarget, Viewport},
+    visual_snapshot::{
+        ContentSizeMetrics, LayoutSnapshot, LayoutViewportMetrics, VisualCaptureRegion,
+        VisualSnapshot, VisualViewportMetrics, visual_snapshot,
+    },
 };
+
+fn validate_accessibility_options(options: AccessibilitySnapshotOptions) -> Result<()> {
+    if options.max_nodes == 0 || options.max_bytes < 2 {
+        return Err(VoidCrawlError::InvalidInput {
+            operation: "accessibility_snapshot",
+            reason:    "max_nodes must be positive and max_bytes must fit an empty JSON array",
+        });
+    }
+    if options.depth.is_some_and(|depth| depth < 0) {
+        return Err(VoidCrawlError::InvalidInput {
+            operation: "accessibility_snapshot",
+            reason:    "depth must be non-negative",
+        });
+    }
+    Ok(())
+}
+
+fn unix_millis_now() -> Option<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+}
+
+fn positive_u32(value: f64) -> u32 {
+    if !value.is_finite() || value <= 0.0 {
+        return 0;
+    }
+    format!("{value:.0}").parse().unwrap_or(0)
+}
 
 /// Wall-clock-derived seed for live humanized pointer paths. Tests seed the
 /// generator explicitly for determinism; production just wants variety.
@@ -347,14 +395,15 @@ pub struct ScreenshotOptions {
     /// With `scroll` set, coordinates are relative to wherever that scroll
     /// lands rather than the top of the document.
     pub bbox:      Option<Bbox>,
-    /// Crop to a Yosoi selector's resolved rectangle instead of an explicit
-    /// `bbox`. Mutually exclusive with `bbox`: setting both is an error.
-    /// A non-[`Resolved`](crate::selector::SelectorResolution::Resolved)
+    /// Crop to a VoidCrawl browser target's resolved rectangle instead of an
+    /// explicit `bbox`. Mutually exclusive with `bbox`: setting both is an
+    /// error.
+    /// A non-[`Resolved`](crate::selector::TargetResolution::Resolved)
     /// outcome (nothing matched, hidden/zero-area target, ambiguous match,
     /// or a non-visual kind like `jsonld`/`regex`) becomes an actionable
-    /// `Err` here — see [`Page::resolve_selector`] for a version that
+    /// `Err` here — see [`Page::resolve_target`] for a version that
     /// returns the typed outcome instead of erroring.
-    pub selector:  Option<SelectorEntry>,
+    pub selector:  Option<BrowserTarget>,
     /// Apply this viewport/device override for just this capture, then
     /// restore whatever was active before (even on error). See
     /// [`Page::set_viewport`] for a persistent version.
@@ -398,7 +447,7 @@ impl ScreenshotOptions {
         self
     }
 
-    pub fn with_selector(mut self, selector: SelectorEntry) -> Self {
+    pub fn with_selector(mut self, selector: BrowserTarget) -> Self {
         self.selector = Some(selector);
         self
     }
@@ -607,6 +656,10 @@ const DOCUMENT_SNAPSHOT_JS: &str = r#"
 #[derive(Debug)]
 pub struct Page {
     inner:                  CdpPage,
+    browser_mode:           EnvironmentObservation<BrowserVisibilityMode>,
+    cdp_mode:               CdpMode,
+    attached_browser:       bool,
+    state_binding:          BrowserStateBinding,
     interrupts:             Arc<InterruptRegistry>,
     /// `true` between [`Page::arm_download`] / a `download_to_dir` in flight
     /// and the matching reset. The pool checks this on release to reset an
@@ -630,6 +683,9 @@ pub struct Page {
     network_enabled:        AtomicBool,
     runtime_enabled:        AtomicBool,
     pre_navigation_stealth: AtomicBool,
+    document_epoch:         AtomicU64,
+    document_epoch_known:   AtomicBool,
+    document_url:           Mutex<Option<String>>,
 }
 
 impl Page {
@@ -639,15 +695,26 @@ impl Page {
         inner: CdpPage,
         capture_lock: Arc<AsyncMutex<()>>,
         interrupts: Arc<InterruptRegistry>,
+        browser_mode: EnvironmentObservation<BrowserVisibilityMode>,
+        cdp_mode: CdpMode,
+        attached_browser: bool,
+        state_binding: BrowserStateBinding,
     ) -> Self {
         Self {
             inner,
+            browser_mode,
+            cdp_mode,
+            attached_browser,
+            state_binding,
             interrupts,
             download_armed: AtomicBool::new(false),
             cursor: Mutex::new((0.0, 0.0)),
             network_enabled: AtomicBool::new(false),
             runtime_enabled: AtomicBool::new(false),
             pre_navigation_stealth: AtomicBool::new(false),
+            document_epoch: AtomicU64::new(0),
+            document_epoch_known: AtomicBool::new(!attached_browser),
+            document_url: Mutex::new(None),
             capture_lock,
             viewport_override: Mutex::new(None),
         }
@@ -668,9 +735,26 @@ impl Page {
     /// while the original `Page` stays behind its own lock. Deliberately not
     /// `Clone`: the per-page state that isn't shared (virtual cursor position,
     /// one-shot viewport override) resets on the new handle, so this is only
-    /// safe for read-only work like [`Page::resolve_selector`].
+    /// safe for read-only work like [`Page::resolve_target`].
     pub(crate) fn clone_handle(&self) -> Self {
-        Self::new(self.inner.clone(), Arc::clone(&self.capture_lock), Arc::clone(&self.interrupts))
+        let clone = Self::new(
+            self.inner.clone(),
+            Arc::clone(&self.capture_lock),
+            Arc::clone(&self.interrupts),
+            self.browser_mode.clone(),
+            self.cdp_mode,
+            self.attached_browser,
+            self.state_binding,
+        );
+        clone.document_epoch.store(self.document_epoch.load(Ordering::Relaxed), Ordering::Relaxed);
+        clone
+            .document_epoch_known
+            .store(self.document_epoch_known.load(Ordering::Relaxed), Ordering::Relaxed);
+        if let (Ok(current), Ok(mut target)) = (self.document_url.lock(), clone.document_url.lock())
+        {
+            target.clone_from(&current);
+        }
+        clone
     }
 
     /// The browser-wide capture lock this page shares with its siblings.
@@ -761,6 +845,84 @@ impl Page {
     /// [`BrowserSession::attach_page`](crate::BrowserSession::attach_page).
     pub fn target_id(&self) -> String {
         self.inner.target_id().inner().clone()
+    }
+
+    /// Mutable browser-state boundary this page belongs to.
+    #[must_use]
+    pub const fn state_binding(&self) -> BrowserStateBinding {
+        self.state_binding
+    }
+
+    fn observe_document_url(
+        &self,
+        url: Option<&str>,
+        controlled_navigation: bool,
+    ) -> Result<DocumentEpoch> {
+        let mut current = self
+            .document_url
+            .lock()
+            .map_err(|_| VoidCrawlError::Other("document URL lock poisoned".into()))?;
+        if current.as_deref() != url {
+            if self.document_epoch_known.load(Ordering::Relaxed) || controlled_navigation {
+                self.document_epoch.fetch_add(1, Ordering::Relaxed);
+                self.document_epoch_known.store(true, Ordering::Relaxed);
+            }
+            *current = url.map(str::to_string);
+        }
+        if self.document_epoch_known.load(Ordering::Relaxed) {
+            Ok(DocumentEpoch::Known(self.document_epoch.load(Ordering::Relaxed)))
+        } else {
+            Ok(DocumentEpoch::UnavailableForAttachedPage)
+        }
+    }
+
+    pub(crate) async fn top_level_document_scope(&self) -> Result<DocumentScope> {
+        let url = self.url().await?;
+        let epoch = self.observe_document_url(url.as_deref(), false)?;
+        Ok(DocumentScope {
+            epoch,
+            frame: DocumentFrameScope::TopLevel,
+            url: url.map(ProtectedUrl::new),
+        })
+    }
+
+    /// Observe the effective browser environment and active VoidCrawl capture
+    /// primitives for this page.
+    ///
+    /// Representation-affecting values are read from the page's main world;
+    /// they are not copied from requested launch configuration. The result is
+    /// owned, secret-safe provider data and contains no live CDP handles,
+    /// profile paths, cookies, credentials, or request headers.
+    pub async fn environment_snapshot(&self) -> Result<BrowserEnvironmentSnapshot> {
+        let renderer = self
+            .inner
+            .execute(GetVersionParams::default())
+            .await
+            .map(|response| RendererVersion::from(response.result))
+            .map_err(|error| VoidCrawlError::PageError(error.to_string()))?;
+        let result = self
+            .inner
+            .evaluate(ENVIRONMENT_SNAPSHOT_JS)
+            .await
+            .map_err(|error| VoidCrawlError::JsEvalError(error.to_string()))?;
+        let value = result.value().cloned().unwrap_or(Value::Null);
+        let instrumentation = InstrumentationSnapshot::for_page(
+            self.cdp_mode,
+            self.network_enabled.load(Ordering::Relaxed),
+            self.runtime_enabled.load(Ordering::Relaxed),
+            self.pre_navigation_stealth.load(Ordering::Relaxed),
+            self.attached_browser,
+        );
+        let capabilities = BrowserCaptureCapabilities::from_instrumentation(instrumentation);
+
+        Ok(BrowserEnvironmentSnapshot {
+            controller: ControllerVersion::current(),
+            renderer,
+            mode: self.browser_mode.clone(),
+            rendering: rendering_environment(&value),
+            instrumentation,
+            capabilities,
+        })
     }
 
     /// Snapshot this tab's instrumentation state for routing/debugging.
@@ -920,6 +1082,36 @@ impl Page {
         Ok(())
     }
 
+    /// Arm bounded main-document source and resource-graph capture before
+    /// navigation.
+    pub async fn arm_navigation_capture(
+        &self,
+        options: NavigationCaptureOptions,
+    ) -> Result<NavigationCapture> {
+        self.ensure_active().await?;
+        let options = options.validate()?;
+        self.ensure_network_enabled().await?;
+        NavigationCapture::arm(self.inner.clone(), options).await
+    }
+
+    /// Arm bounded, secret-safe CDP lifecycle observation before navigation.
+    ///
+    /// Requested event listeners are registered before this method returns, so
+    /// a subsequent [`Page::navigate`] cannot race the initial document
+    /// request or synchronous first-script console/runtime events. Artifact
+    /// payload collectors are deliberately separate from this lifecycle scope.
+    pub async fn arm_observation(&self, options: ObservationOptions) -> Result<ObservationScope> {
+        self.ensure_active().await?;
+        let options = options.validate()?;
+        if options.collect_network {
+            self.ensure_network_enabled().await?;
+        }
+        if options.collect_console || options.collect_exceptions {
+            self.ensure_runtime_enabled().await?;
+        }
+        ObservationScope::arm(self.inner.clone(), options).await
+    }
+
     /// Arm a passive response-body capture before performing a triggering
     /// action. Every `(name, pattern)` must be fulfilled once.
     pub async fn expect_responses(
@@ -937,6 +1129,9 @@ impl Page {
     pub async fn navigate(&self, url: &str) -> Result<()> {
         self.ensure_active().await?;
         self.inner.goto(url).await.map_err(|e| VoidCrawlError::NavigationFailed(e.to_string()))?;
+        let current =
+            self.inner.url().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
+        self.observe_document_url(current.as_deref(), true)?;
         Ok(())
     }
 
@@ -1070,19 +1265,18 @@ impl Page {
                         None => future::pending().await,
                     }
                 }, if capture_endpoints => {
-                    if let Some(event) = maybe_request {
-                        if matches!(event.r#type, Some(ResourceType::Xhr | ResourceType::Fetch)) {
-                            if let Some(ep) = safe_endpoint(&event.request.url) {
-                                // A duplicate (already counted) applies no cap
-                                // pressure; only a NEW endpoint past the cap
-                                // flips the truncated flag.
-                                if !endpoints.contains(&ep) {
-                                    if endpoints.len() < MAX_ENDPOINTS {
-                                        endpoints.insert(ep);
-                                    } else {
-                                        endpoints_truncated = true;
-                                    }
-                                }
+                    if let Some(event) = maybe_request
+                        && matches!(event.r#type, Some(ResourceType::Xhr | ResourceType::Fetch))
+                        && let Some(ep) = safe_endpoint(&event.request.url)
+                    {
+                        // A duplicate (already counted) applies no cap
+                        // pressure; only a NEW endpoint past the cap
+                        // flips the truncated flag.
+                        if !endpoints.contains(&ep) {
+                            if endpoints.len() < MAX_ENDPOINTS {
+                                endpoints.insert(ep);
+                            } else {
+                                endpoints_truncated = true;
                             }
                         }
                     }
@@ -1100,6 +1294,7 @@ impl Page {
 
         let html = self.content().await?;
         let final_url = self.url().await?.unwrap_or_default();
+        self.observe_document_url(Some(&final_url), true)?;
         let antibot = status_code.map(|c| antibot::classify(c, &headers, &html));
         Ok(PageResponse {
             html,
@@ -1229,6 +1424,23 @@ impl Page {
         self.inner.content().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))
     }
 
+    /// Capture the current rendered DOM as bounded UTF-8 bytes.
+    ///
+    /// This serializes the live DOM after page execution. It is deliberately
+    /// distinct from [`MainDocumentSource`](crate::MainDocumentSource), which
+    /// contains the browser-observed response representation.
+    pub async fn rendered_dom_snapshot(&self, max_bytes: usize) -> Result<RenderedDomSnapshot> {
+        if max_bytes == 0 {
+            return Err(VoidCrawlError::InvalidInput {
+                operation: "rendered_dom_snapshot",
+                reason:    "max_bytes must be positive",
+            });
+        }
+        let html = self.content().await?;
+        let scope = self.top_level_document_scope().await?;
+        Ok(rendered_dom(html, scope, max_bytes))
+    }
+
     /// Return the page title.
     pub async fn title(&self) -> Result<Option<String>> {
         self.inner.get_title().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))
@@ -1350,10 +1562,10 @@ impl Page {
                 .frame_url(frame_id.clone())
                 .await
                 .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
-            if let Some(url) = url {
-                if url.contains(pattern) {
-                    matched.push((frame_id, url));
-                }
+            if let Some(url) = url
+                && url.contains(pattern)
+            {
+                matched.push((frame_id, url));
             }
         }
         match matched.len() {
@@ -1477,6 +1689,102 @@ impl Page {
 
     // ── Screenshots & PDF ───────────────────────────────────────────────
 
+    /// Capture point-in-time CSS layout metrics for the current document.
+    pub async fn layout_snapshot(&self) -> Result<LayoutSnapshot> {
+        let metrics = self
+            .inner
+            .layout_metrics()
+            .await
+            .map_err(|error| VoidCrawlError::PageError(error.to_string()))?;
+        let dpr = self
+            .evaluate_js("window.devicePixelRatio")
+            .await
+            .ok()
+            .and_then(|value| value.as_f64())
+            .filter(|value| value.is_finite() && *value > 0.0);
+        let scope = self.top_level_document_scope().await?;
+        Ok(LayoutSnapshot {
+            scope,
+            generated_at_unix_ms: unix_millis_now(),
+            layout_viewport: LayoutViewportMetrics {
+                page_x:        metrics.css_layout_viewport.page_x,
+                page_y:        metrics.css_layout_viewport.page_y,
+                client_width:  metrics.css_layout_viewport.client_width,
+                client_height: metrics.css_layout_viewport.client_height,
+            },
+            visual_viewport: VisualViewportMetrics {
+                offset_x:      metrics.css_visual_viewport.offset_x,
+                offset_y:      metrics.css_visual_viewport.offset_y,
+                page_x:        metrics.css_visual_viewport.page_x,
+                page_y:        metrics.css_visual_viewport.page_y,
+                client_width:  metrics.css_visual_viewport.client_width,
+                client_height: metrics.css_visual_viewport.client_height,
+                scale:         metrics.css_visual_viewport.scale,
+                zoom:          metrics.css_visual_viewport.zoom,
+            },
+            content_size: ContentSizeMetrics {
+                x:      metrics.css_content_size.x,
+                y:      metrics.css_content_size.y,
+                width:  metrics.css_content_size.width,
+                height: metrics.css_content_size.height,
+            },
+            device_scale_factor: dpr,
+        })
+    }
+
+    /// Capture a screenshot with provider-native visual metadata.
+    ///
+    /// This method always returns owned bytes. Use [`Page::screenshot`] when a
+    /// filesystem output path is desired.
+    pub async fn visual_snapshot(&self, mut opts: ScreenshotOptions) -> Result<VisualSnapshot> {
+        if opts.path.is_some() {
+            return Err(VoidCrawlError::InvalidInput {
+                operation: "visual_snapshot",
+                reason:    "filesystem output paths are not accepted",
+            });
+        }
+        let region = if let Some(bbox) = opts.bbox {
+            VisualCaptureRegion::BoundingBox { bbox }
+        } else if let Some(target) = &opts.selector {
+            VisualCaptureRegion::BrowserTarget { target_kind: target.kind }
+        } else if opts.full_page {
+            VisualCaptureRegion::FullPage
+        } else {
+            VisualCaptureRegion::Viewport
+        };
+        let layout = self.layout_snapshot().await?;
+        let (capture_viewport, device_scale_factor) = if let Some(viewport) = &opts.viewport {
+            (
+                crate::EffectiveViewport {
+                    width_css_pixels:  viewport.width,
+                    height_css_pixels: viewport.height,
+                },
+                viewport.device_scale_factor,
+            )
+        } else {
+            (
+                crate::EffectiveViewport {
+                    width_css_pixels:  positive_u32(layout.visual_viewport.client_width),
+                    height_css_pixels: positive_u32(layout.visual_viewport.client_height),
+                },
+                layout.device_scale_factor.unwrap_or(1.0),
+            )
+        };
+        opts.path = None;
+        let bytes = match self.screenshot(opts).await? {
+            ScreenshotOutput::Bytes(bytes) => bytes,
+            ScreenshotOutput::Path(_) => {
+                return Err(VoidCrawlError::ScreenshotError(
+                    "visual snapshot unexpectedly wrote to disk".into(),
+                ));
+            }
+        };
+        let scope = self.top_level_document_scope().await?;
+        visual_snapshot(bytes, scope, region, capture_viewport, device_scale_factor).ok_or_else(
+            || VoidCrawlError::ScreenshotError("PNG dimensions were unavailable".into()),
+        )
+    }
+
     /// Capture a full-page PNG screenshot, returned as raw bytes.
     ///
     /// Backward-compatible shim around [`Page::screenshot`] with no
@@ -1559,12 +1867,15 @@ impl Page {
         let effective_bbox: Option<(Bbox, bool)> = if let Some(bbox) = opts.bbox {
             Some((bbox, true))
         } else if let Some(entry) = &opts.selector {
-            match self.resolve_selector(entry).await? {
-                SelectorResolution::Resolved { bbox } => Some((bbox, false)),
-                SelectorResolution::Empty { reason } => {
+            if !entry.supports_geometry() {
+                return Err(VoidCrawlError::UnsupportedVisualTarget);
+            }
+            match self.resolve_target(entry).await? {
+                TargetResolution::Resolved { bbox } => Some((bbox, false)),
+                TargetResolution::Empty { reason } => {
                     return Err(VoidCrawlError::ElementNotVisible(reason));
                 }
-                SelectorResolution::Ambiguous { reason, .. } => {
+                TargetResolution::Ambiguous { reason, .. } => {
                     return Err(VoidCrawlError::AmbiguousSelector(reason));
                 }
             }
@@ -1782,13 +2093,22 @@ impl Page {
     /// Does **not** navigate the page — a caller's page state (e.g. an open
     /// session sitting on the download's origin) is left intact.
     pub async fn reset_download_behavior(&self) {
-        if let Ok(params) = SetDownloadBehaviorParams::builder()
+        let _ = self.reset_download_behavior_checked().await;
+    }
+
+    pub(crate) async fn reset_download_behavior_checked(&self) -> Result<()> {
+        let params = SetDownloadBehaviorParams::builder()
             .behavior(SetDownloadBehaviorBehavior::Default)
             .build()
-        {
-            let _ = self.inner.execute(params).await;
-        }
+            .map_err(VoidCrawlError::PageError)?;
+        let result = self
+            .inner
+            .execute(params)
+            .await
+            .map(|_| ())
+            .map_err(|error| VoidCrawlError::PageError(error.to_string()));
         self.download_armed.store(false, Ordering::Relaxed);
+        result
     }
 
     async fn run_download(
@@ -1848,10 +2168,8 @@ impl Page {
 
             // Only trust the directory once the in-page driver reports the save
             // fired — the authoritative completion signal, not a heuristic.
-            if done {
-                if let Some(outcome) = settle.poll(dir, &before, max_bytes)? {
-                    return Ok(DownloadOutcome { content_type, ..outcome });
-                }
+            if done && let Some(outcome) = settle.poll(dir, &before, max_bytes)? {
+                return Ok(DownloadOutcome { content_type, ..outcome });
             }
 
             if time::Instant::now() >= deadline {
@@ -1881,14 +2199,65 @@ impl Page {
     /// whole tree. Nodes are returned verbatim from CDP (no reshaping) so
     /// callers can address into them however they like.
     pub async fn get_full_ax_tree(&self, depth: Option<i64>) -> Result<Value> {
-        let params = GetFullAxTreeParams { depth, frame_id: None };
-        let resp = self
+        let nodes = self.full_ax_nodes(depth, None).await?;
+        serde_json::to_value(&nodes).map_err(|e| VoidCrawlError::PageError(e.to_string()))
+    }
+
+    /// Capture the top-level raw accessibility tree with explicit bounds.
+    pub async fn accessibility_snapshot(
+        &self,
+        options: AccessibilitySnapshotOptions,
+    ) -> Result<AccessibilitySnapshot> {
+        validate_accessibility_options(options)?;
+        let nodes = self.full_ax_nodes(options.depth, None).await?;
+        let scope = self.top_level_document_scope().await?;
+        Ok(accessibility(&nodes, scope, options))
+    }
+
+    /// Capture one matching frame's raw accessibility tree with explicit
+    /// bounds. Missing or ambiguous frame patterns remain typed errors; a
+    /// browser that cannot expose the matched frame returns an unavailable
+    /// snapshot rather than an observed empty tree.
+    pub async fn accessibility_snapshot_in_frame(
+        &self,
+        frame_url_pattern: &str,
+        options: AccessibilitySnapshotOptions,
+    ) -> Result<AccessibilitySnapshot> {
+        validate_accessibility_options(options)?;
+        let frame_id = self.resolve_frame(frame_url_pattern).await?;
+        let frame_url = self
+            .inner
+            .frame_url(frame_id.clone())
+            .await
+            .map_err(|error| VoidCrawlError::PageError(error.to_string()))?;
+        let top = self.top_level_document_scope().await?;
+        let scope = DocumentScope {
+            epoch: top.epoch,
+            frame: DocumentFrameScope::Frame { url: frame_url.map(ProtectedUrl::new) },
+            url:   top.url,
+        };
+        match self.full_ax_nodes(options.depth, Some(frame_id)).await {
+            Ok(nodes) => Ok(accessibility(&nodes, scope, options)),
+            Err(_) => Ok(unavailable_accessibility(
+                scope,
+                options.depth,
+                SnapshotUnavailableReason::FrameUnavailable,
+            )),
+        }
+    }
+
+    async fn full_ax_nodes(
+        &self,
+        depth: Option<i64>,
+        frame_id: Option<FrameId>,
+    ) -> Result<Vec<AxNode>> {
+        let params = GetFullAxTreeParams { depth, frame_id };
+        let response = self
             .inner
             .execute(params)
             .await
-            .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
-        serde_json::to_value(&resp.result.nodes)
-            .map_err(|e| VoidCrawlError::PageError(e.to_string()))
+            .map_err(|error| VoidCrawlError::PageError(error.to_string()))?;
+        Ok(response.result.nodes)
     }
 
     /// Fetch the AX tree and render it as a compact, indented `role "name"`
@@ -1962,7 +2331,7 @@ impl Page {
         let backends: Vec<_> =
             nodes.iter().filter(|n| !n.ignored).filter_map(|n| n.backend_dom_node_id).collect();
         let backend_id = backends.get(nth).copied().ok_or_else(|| {
-            VoidCrawlError::PageError(format!(
+            VoidCrawlError::ElementNotFound(format!(
                 "no AX node with role={role:?} name={name:?} at index {nth} (found {} match(es))",
                 backends.len()
             ))
@@ -2028,48 +2397,53 @@ impl Page {
 
     // ── Selector-backed bbox resolution ──────────────────────────────────
 
-    /// Resolve a Yosoi [`SelectorEntry`] (any of its 8 kinds) to a CSS-pixel
-    /// rectangle. See the [`selector`](crate::selector) module docs for the
-    /// full design: all three outcomes — resolved, empty, ambiguous — are a
-    /// typed `Ok(...)`, not an exception; `Err` is reserved for genuine
-    /// infra failures (a bad regex/XPath pattern, a CDP call failing).
+    /// Resolve a VoidCrawl [`BrowserTarget`] to a CSS-pixel rectangle.
+    /// See the [`selector`](crate::selector) module docs for the full design:
+    /// resolved, empty, and ambiguous are typed `Ok(...)` outcomes; `Err` is
+    /// reserved for browser, JavaScript, or CDP failures.
     ///
     /// For a one-off crop, pass [`ScreenshotOptions::selector`] to
     /// [`Page::screenshot`] instead — that converts a non-`Resolved`
     /// outcome into an actionable `Err`, since a screenshot fundamentally
     /// needs a rectangle.
-    pub async fn resolve_selector(&self, entry: &SelectorEntry) -> Result<SelectorResolution> {
+    pub async fn resolve_target(&self, entry: &BrowserTarget) -> Result<TargetResolution> {
         match entry.kind {
-            SelectorKind::Jsonld => Ok(SelectorResolution::Empty {
+            BrowserTargetKind::Jsonld => Ok(TargetResolution::Empty {
                 reason: "jsonld selectors address non-visual structured data (a <script> tag \
                          has no render box); not resolved to a rectangle"
                     .into(),
             }),
-            SelectorKind::Regex => Ok(SelectorResolution::Empty {
+            BrowserTargetKind::Regex => Ok(TargetResolution::Empty {
                 reason: "regex selectors match raw HTML text, which has no canonical DOM \
                          element; not resolved to a rectangle"
                     .into(),
             }),
-            SelectorKind::Visual => Ok(self.resolve_visual_selector(entry).await?),
-            SelectorKind::Role => self.resolve_role_selector(entry).await,
-            SelectorKind::Css
-            | SelectorKind::Xpath
-            | SelectorKind::Attr
-            | SelectorKind::GlobalId => self.resolve_dom_selector(entry).await,
+            BrowserTargetKind::Visual => Ok(self.resolve_visual_selector(entry).await?),
+            BrowserTargetKind::Role => self.resolve_role_selector(entry).await,
+            BrowserTargetKind::Css
+            | BrowserTargetKind::Xpath
+            | BrowserTargetKind::Attr
+            | BrowserTargetKind::GlobalId => self.resolve_dom_selector(entry).await,
         }
+    }
+
+    /// Compatibility wrapper for the pre-CAS-321 method name.
+    #[deprecated(note = "use resolve_target")]
+    pub async fn resolve_selector(&self, entry: &BrowserTarget) -> Result<TargetResolution> {
+        self.resolve_target(entry).await
     }
 
     /// `visual`: an exact 1x1 CSS-pixel box at `(x, y)` — no invented
     /// hit-radius. `Empty` when coordinates are missing or fall outside the
     /// current viewport (`window.innerWidth`/`innerHeight`).
-    async fn resolve_visual_selector(&self, entry: &SelectorEntry) -> Result<SelectorResolution> {
+    async fn resolve_visual_selector(&self, entry: &BrowserTarget) -> Result<TargetResolution> {
         let (Some(x), Some(y)) = (entry.x, entry.y) else {
-            return Ok(SelectorResolution::Empty {
+            return Ok(TargetResolution::Empty {
                 reason: "visual selector requires both x and y".into(),
             });
         };
         if x < 0.0 || y < 0.0 {
-            return Ok(SelectorResolution::Empty {
+            return Ok(TargetResolution::Empty {
                 reason: format!("visual point ({x}, {y}) has a negative coordinate"),
             });
         }
@@ -2084,21 +2458,19 @@ impl Page {
             dims.get(1).and_then(Value::as_f64).unwrap_or(f64::INFINITY),
         );
         if x > vw || y > vh {
-            return Ok(SelectorResolution::Empty {
+            return Ok(TargetResolution::Empty {
                 reason: format!(
                     "visual point ({x}, {y}) is outside the current viewport ({vw}x{vh})"
                 ),
             });
         }
-        Ok(SelectorResolution::Resolved {
-            bbox: RawRect { x, y, width: 1.0, height: 1.0 }.to_bbox(),
-        })
+        Ok(TargetResolution::Resolved { bbox: RawRect { x, y, width: 1.0, height: 1.0 }.to_bbox() })
     }
 
     /// `role`: `Accessibility.queryAXTree` role + exact accessible-name
     /// match — the same resolution [`Page::click_by_role`] uses, so a
     /// selector that could click an element can also crop it.
-    async fn resolve_role_selector(&self, entry: &SelectorEntry) -> Result<SelectorResolution> {
+    async fn resolve_role_selector(&self, entry: &BrowserTarget) -> Result<TargetResolution> {
         let name = entry.name.as_deref();
         let nodes = self.query_ax_nodes(Some(&entry.value), name).await?;
         let backends: Vec<_> =
@@ -2106,7 +2478,7 @@ impl Page {
         let describe = || format!("role={:?} name={:?}", entry.value, name.unwrap_or(""));
 
         if backends.is_empty() {
-            return Ok(SelectorResolution::Empty {
+            return Ok(TargetResolution::Empty {
                 reason: format!("{} matched no AX nodes", describe()),
             });
         }
@@ -2150,7 +2522,7 @@ impl Page {
     /// `css` / `xpath` / `attr` / `global_id`: gather DOM candidates (see
     /// [`selector::candidates_js`]), filter to visible ones, then resolve
     /// via [`selector::pick_resolution`].
-    async fn resolve_dom_selector(&self, entry: &SelectorEntry) -> Result<SelectorResolution> {
+    async fn resolve_dom_selector(&self, entry: &BrowserTarget) -> Result<TargetResolution> {
         let candidates = selector::candidates_js(entry).ok_or_else(|| {
             VoidCrawlError::PageError(format!("{:?} has no DOM candidate step", entry.kind))
         })?;

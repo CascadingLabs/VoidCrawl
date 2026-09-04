@@ -862,6 +862,10 @@ resolved, re-probes the DOM by default so callers can confirm the wall is gone b
     }
 }
 
+#[allow(
+    clippy::unused_async_trait_impl,
+    reason = "rmcp tool_handler generates async trait methods whose bodies are synchronous"
+)]
 #[tool_handler]
 impl ServerHandler for VoidCrawlServer {
     fn get_info(&self) -> ServerInfo {

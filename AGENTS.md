@@ -46,7 +46,7 @@ void_crawl/
 - `pyo3` 0.28 + `pyo3-async-runtimes` 0.28 — Python bridge
 - `thiserror` — error types
 - `reqwest` — HTTP (for WebSocket URL resolution)
-- Rust edition 2024 / MSRV 1.86
+- Rust edition 2024 / MSRV 1.98
 
 ## Pool architecture
 - Chrome is a long-lived daemon — never launch per-request

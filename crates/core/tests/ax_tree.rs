@@ -163,8 +163,13 @@ async fn click_by_role_errors_when_no_match() {
     let page = page_with(html, &session).await;
 
     let err = page.click_by_role("button", "Missing", 0, false).await.expect_err("should error");
-    let msg = err.to_string();
-    assert!(msg.contains("Missing"), "error should name the target: {msg}");
+    assert!(
+        matches!(&err, void_crawl_core::VoidCrawlError::ElementNotFound(_)),
+        "expected element-not-found error"
+    );
+    if let void_crawl_core::VoidCrawlError::ElementNotFound(diagnostic) = &err {
+        assert!(diagnostic.contains("Missing"), "raw diagnostic should name the target");
+    }
 
     page.close().await.ok();
     session.close().await.ok();

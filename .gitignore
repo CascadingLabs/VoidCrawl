@@ -61,3 +61,4 @@ output/
 
 # Screenshot output from the examples.
 examples/screenshots/
+.voidcrawl/browser/profile/

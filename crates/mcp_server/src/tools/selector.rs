@@ -1,18 +1,14 @@
-//! Selector-backed screenshot bbox: the MCP `selector` arg type for
-//! `screenshot`/`session_screenshot`, mirroring
-//! [`void_crawl_core::SelectorEntry`] (itself a field-for-field mirror of
-//! Yosoi's `SelectorEntry` — `yosoi/models/selectors.py`) with a
-//! JSON-Schema-friendly shape for the MCP tool surface. See
-//! `void_crawl_core::selector`'s module docs for the full resolution
-//! design (CAS-252): three typed outcomes (resolved/empty/ambiguous), none
-//! of them exceptions at the core layer — `screenshot`'s `selector` option
-//! converts a non-resolved outcome into the `invalid_params` errors below.
+//! JSON-Schema-friendly MCP facade for VoidCrawl browser targets used by
+//! `screenshot` and `session_screenshot`. The wire shape remains compatible
+//! with historic selector payloads, but this module translates into the
+//! VoidCrawl-owned [`void_crawl_core::BrowserTarget`] contract; an external
+//! recipe model is not authoritative here.
 
 use schemars::JsonSchema;
 use serde::Deserialize;
-use void_crawl_core::{SelectorEntry, SelectorKind};
+use void_crawl_core::{BrowserTarget, BrowserTargetKind};
 
-/// The 8 selector strategies Yosoi can emit. See
+/// The browser target strategies accepted by the MCP facade. See
 /// `void_crawl_core::selector`'s module docs for how each kind resolves to
 /// a rectangle (or deliberately doesn't — `jsonld`/`regex` are always
 /// non-visual).
@@ -29,7 +25,7 @@ pub enum SelectorKindArg {
     Visual,
 }
 
-impl From<SelectorKindArg> for SelectorKind {
+impl From<SelectorKindArg> for BrowserTargetKind {
     fn from(kind: SelectorKindArg) -> Self {
         match kind {
             SelectorKindArg::Css => Self::Css,
@@ -44,9 +40,8 @@ impl From<SelectorKindArg> for SelectorKind {
     }
 }
 
-/// A Yosoi `SelectorEntry`, field-for-field — pass `entry.model_dump()`
-/// straight through as this arg's JSON. Which fields matter depends on
-/// `type`:
+/// Browser target input accepted as MCP JSON. The legacy flat shape is kept
+/// for wire compatibility; which fields matter depends on `type`:
 ///
 /// | type | uses |
 /// |---|---|
@@ -78,7 +73,7 @@ pub struct SelectorArg {
     pub y:     Option<f64>,
 }
 
-impl From<SelectorArg> for SelectorEntry {
+impl From<SelectorArg> for BrowserTarget {
     fn from(arg: SelectorArg) -> Self {
         Self {
             kind:  arg.kind.into(),

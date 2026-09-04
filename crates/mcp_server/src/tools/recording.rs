@@ -19,8 +19,8 @@ use rmcp::ErrorData;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use void_crawl_core::{
-    Encoding, FrameFormat, MaskSpec, Page, Recording, RecordingOptions, SelectorEntry,
-    VoidCrawlError,
+    BrowserTarget, DocumentEpoch, Encoding, FrameFormat, MaskSpec, Page, Recording,
+    RecordingOptions, VoidCrawlError,
 };
 
 use crate::{
@@ -245,29 +245,39 @@ pub struct RegionResult {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct RecordResult {
-    pub output_dir:         String,
-    pub regions:            Vec<RegionResult>,
+    pub output_dir:              String,
+    pub started_at_unix_ms:      Option<u64>,
+    pub document_epoch:          Option<u64>,
+    pub regions:                 Vec<RegionResult>,
     /// One entry per requested mask. An empty list means nothing was asked to
     /// be covered — not that there was nothing worth covering.
-    pub masks:              Vec<MaskResult>,
-    pub format:             String,
-    pub duration_ms:        f64,
-    pub frames_captured:    usize,
+    pub masks:                   Vec<MaskResult>,
+    pub format:                  String,
+    pub duration_ms:             f64,
+    pub frames_captured:         usize,
     /// Frames Chrome delivered that the fps ceiling discarded. Large next to
     /// a small `frames_captured` means `fps` was the binding constraint.
-    pub frames_dropped:     usize,
+    pub frames_dropped:          usize,
+    pub frames_dropped_by_rate:  usize,
+    pub frames_dropped_by_limit: usize,
+    pub frame_decode_failures:   usize,
+    pub frame_ack_failures:      usize,
+    pub stream_disconnected:     bool,
+    pub complete:                bool,
+    pub frame_size_pixels:       Option<(u32, u32)>,
+    pub capture_viewport_css:    Option<(f64, f64)>,
     /// Frames per second actually achieved. Well below the requested `fps` on
     /// a mostly-static page — that's expected, not a fault.
-    pub effective_fps:      f64,
-    pub device_pixel_ratio: f64,
+    pub effective_fps:           f64,
+    pub device_pixel_ratio:      f64,
     /// Whether the recording had to hold the browser's capture lock. True for
     /// a pooled tab (it shares a window with its siblings, and a backgrounded
     /// tab in a shared window stops painting entirely).
-    pub foregrounded:       bool,
+    pub foregrounded:            bool,
     /// Set when frames were captured but encoding them failed — e.g. no
     /// ffmpeg on PATH. The frames on disk are still usable.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub encode_error:       Option<String>,
+    pub encode_error:            Option<String>,
 }
 
 /// Cap on how long any one recording may run, whatever the caller asks for.
@@ -358,7 +368,7 @@ fn build_options(
         opts = opts.with_bbox((*b).into());
     }
     for selector in selectors {
-        let entry: SelectorEntry = selector.into();
+        let entry: BrowserTarget = selector.into();
         opts = opts.with_selector(entry);
     }
     for mask in masks {
@@ -554,6 +564,11 @@ fn to_result(rec: &Recording, output_dir: &Path, encode_error: Option<String>) -
 
     RecordResult {
         output_dir: output_dir.display().to_string(),
+        started_at_unix_ms: rec.started_at_unix_ms,
+        document_epoch: match rec.document_epoch {
+            DocumentEpoch::Known(epoch) => Some(epoch),
+            DocumentEpoch::UnavailableForAttachedPage => None,
+        },
         regions,
         masks,
         format: match rec.format {
@@ -563,6 +578,14 @@ fn to_result(rec: &Recording, output_dir: &Path, encode_error: Option<String>) -
         duration_ms: rec.duration.as_secs_f64() * 1000.0,
         frames_captured: rec.frames_captured,
         frames_dropped: rec.frames_dropped,
+        frames_dropped_by_rate: rec.frames_dropped_by_rate,
+        frames_dropped_by_limit: rec.frames_dropped_by_limit,
+        frame_decode_failures: rec.frame_decode_failures,
+        frame_ack_failures: rec.frame_ack_failures,
+        stream_disconnected: rec.stream_disconnected,
+        complete: rec.complete,
+        frame_size_pixels: rec.frame_size_pixels,
+        capture_viewport_css: rec.capture_viewport_css,
         effective_fps: rec.effective_fps(),
         device_pixel_ratio: rec.device_pixel_ratio,
         foregrounded: rec.foregrounded,

@@ -42,7 +42,7 @@ jobs:
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          toolchain: stable
+          toolchain: "1.98.0"
           components: clippy
 
       - name: Install nightly Rust toolchain (for rustfmt)
@@ -55,10 +55,10 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: cargo check
-        run: cargo +stable check --workspace --all-targets
+        run: cargo check --workspace --all-targets
 
       - name: cargo clippy
-        run: cargo +stable clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: cargo fmt
         run: cargo +nightly fmt --all -- --check
@@ -79,7 +79,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          toolchain: stable
+          toolchain: "1.98.0"
 
       - name: Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -418,7 +418,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          toolchain: stable
+          toolchain: "1.98.0"
 
       - name: Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2

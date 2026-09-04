@@ -17,7 +17,7 @@ cd VoidCrawl
 
 | Tool | Version | Install |
 |------|---------|---------|
-| Rust | >= 1.86 | [rustup.rs](https://rustup.rs) |
+| Rust | >= 1.98 | [rustup.rs](https://rustup.rs) |
 | Python | >= 3.10 | System or [mise](https://mise.jdx.dev) |
 | Chrome/Chromium | Any recent | System package manager |
 | maturin | >= 1.7 | `cargo install maturin` |
@@ -117,7 +117,7 @@ cargo fmt --check
 ```
 
 - Follow standard Rust conventions (`rustfmt` defaults)
-- Clippy config lives in `clippy.toml` -enforces cognitive complexity thresholds, MSRV 1.86
+- Clippy config lives in `clippy.toml` -enforces cognitive complexity thresholds, MSRV 1.98
 - `print!`/`println!` are disallowed -use `tracing` instead
 - Use `thiserror` for error types -every new error variant goes in `error.rs`
 - Map chromiumoxide errors to `VoidCrawlError` at the boundary, not deep inside methods

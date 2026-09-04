@@ -24,21 +24,29 @@ use pyo3::{
 use pyo3_async_runtimes::tokio::future_into_py;
 
 mod recording;
+mod snapshots;
 
 use recording::{
     PyFrame, PyMaskReport, PyRecordedRegion, PyRecording, PyRecordingHandle,
     build_recording_options, into_py_recording,
 };
 use serde_json::Value;
+use snapshots::{
+    PyAccessibilitySnapshot, PyLayoutSnapshot, PyRenderedDomSnapshot, PyVisualSnapshot,
+};
 use tokio::{sync::Mutex, task::spawn_blocking};
 use void_crawl_core::{
-    AntibotEvidence, AntibotVerdict, BrowserMode, BrowserPool, BrowserSession, CapturedResponse,
-    CdpMode, CookieParam, DEFAULT_MAX_BYTES, DEFAULT_MAX_RESPONSE_BYTES,
-    DEFAULT_MAX_TOTAL_RESPONSE_BYTES, DeleteCookiesParams, DispatchKeyEventType,
-    DispatchMouseEventType, DownloadCapture, DownloadOutcome, InterruptInfo, InterruptRequest,
-    MAX_PROFILE_SPLIT_COPIES, ManagedProfileSnapshot, MouseButton, Page, PageResponse, PoolConfig,
-    PooledTab, ProfileHandle, ProfileInfo, ProfileRegistry, ResponseCapture, ResponseCaptureLimits,
-    ScanConfig, ScanReport, ScrollTarget, SelectorEntry, SelectorKind, StealthConfig,
+    AccessibilitySnapshotOptions, AntibotEvidence, AntibotVerdict, BrowserMode, BrowserPool,
+    BrowserSession, BrowserStateBinding, BrowserTarget, BrowserTargetKind, CapturedResponse,
+    CdpMode, ContextCleanupReport, ContextDisposalState, CookieParam, DEFAULT_MAX_BYTES,
+    DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_MAX_TOTAL_RESPONSE_BYTES, DeleteCookiesParams,
+    DispatchKeyEventType, DispatchMouseEventType, DownloadCapture, DownloadOutcome, InterruptInfo,
+    InterruptRequest, IsolatedBrowserContext, MAX_PROFILE_SPLIT_COPIES, ManagedProfileSnapshot,
+    MouseButton, NavigationCapture, NavigationCaptureOptions, NavigationCaptureReport,
+    NavigationCaptureTermination, NetworkExtraInfoState, ObservationOptions, ObservationScope,
+    Page, PageResponse, PoolConfig, PoolReleaseReport, PoolReleaseStrategy, PooledTab,
+    ProfileHandle, ProfileInfo, ProfileRegistry, ResourceOutcome, ResponseCapture,
+    ResponseCaptureLimits, ScanConfig, ScanReport, ScrollTarget, StealthConfig,
     TabInstrumentationState, Verdict, Viewport, acquire_profile, list_profiles, scan_bytes,
     scan_path, viewport as viewport_mod,
 };
@@ -98,13 +106,10 @@ pub(crate) fn resolve_viewport_args(
     }
 }
 
-/// Resolve the raw `selector_*` kwargs `PyPage`/`PyPooledTab`'s
-/// `screenshot()` accept into a `SelectorEntry` — a Yosoi `SelectorEntry`,
-/// field-for-field (`yosoi/models/selectors.py`), so a caller can pass
-/// `entry.model_dump()` values straight through as kwargs. This module is
-/// the raw substrate and does no validation beyond parsing `selector_type`;
-/// build a validated model on the Python side if you want enum/mutual-
-/// exclusivity checking before it crosses into Rust.
+/// Resolve the raw `selector_*` kwargs accepted by Python screenshots into a
+/// VoidCrawl-owned `BrowserTarget`. The flat kwargs remain compatible with
+/// historic callers, while higher-level recipe types translate at their own
+/// adapter boundary.
 pub(crate) fn resolve_selector_args(
     kind: Option<&str>,
     value: Option<String>,
@@ -113,16 +118,16 @@ pub(crate) fn resolve_selector_args(
     nth: Option<u32>,
     x: Option<f64>,
     y: Option<f64>,
-) -> PyResult<SelectorEntry> {
+) -> PyResult<BrowserTarget> {
     let kind = match kind {
-        Some("css") => SelectorKind::Css,
-        Some("xpath") => SelectorKind::Xpath,
-        Some("regex") => SelectorKind::Regex,
-        Some("jsonld") => SelectorKind::Jsonld,
-        Some("attr") => SelectorKind::Attr,
-        Some("global_id") => SelectorKind::GlobalId,
-        Some("role") => SelectorKind::Role,
-        Some("visual") => SelectorKind::Visual,
+        Some("css") => BrowserTargetKind::Css,
+        Some("xpath") => BrowserTargetKind::Xpath,
+        Some("regex") => BrowserTargetKind::Regex,
+        Some("jsonld") => BrowserTargetKind::Jsonld,
+        Some("attr") => BrowserTargetKind::Attr,
+        Some("global_id") => BrowserTargetKind::GlobalId,
+        Some("role") => BrowserTargetKind::Role,
+        Some("visual") => BrowserTargetKind::Visual,
         Some(other) => {
             return Err(PyValueError::new_err(format!(
                 "unknown selector_type {other:?}; expected one of css, xpath, regex, jsonld, \
@@ -131,7 +136,7 @@ pub(crate) fn resolve_selector_args(
         }
         None => return Err(PyValueError::new_err("selector_type is required")),
     };
-    Ok(SelectorEntry { kind, value: value.unwrap_or_default(), regex, name, nth, x, y })
+    Ok(BrowserTarget { kind, value: value.unwrap_or_default(), regex, name, nth, x, y })
 }
 
 /// Build a `ScreenshotOptions` from the raw kwargs `PyPage`/`PyPooledTab`'s
@@ -205,36 +210,69 @@ fn build_screenshot_options(
     Ok(opts)
 }
 
+fn safe_exception_url(url: &str) -> String {
+    let head = url.split(['?', '#']).next().unwrap_or_default();
+    let Some((scheme, rest)) = head.split_once("://") else {
+        return "<unavailable>".into();
+    };
+    let (authority, path) = rest.split_once('/').map_or((rest, ""), |(host, path)| (host, path));
+    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    format!("{scheme}://{host}/{}", path.trim_start_matches('/'))
+}
+
+#[cfg(test)]
+mod error_boundary_tests {
+    use super::safe_exception_url;
+
+    #[test]
+    fn exception_url_omits_credentials_query_and_fragment() {
+        assert_eq!(
+            safe_exception_url(
+                "https://user:secret@example.test/path?access_token=secret#fragment"
+            ),
+            "https://example.test/path"
+        );
+        assert_eq!(safe_exception_url("not a URL"), "<unavailable>");
+    }
+}
+
 #[allow(clippy::needless_pass_by_value)] // used as fn pointer in map_err(to_py_err)
 pub(crate) fn to_py_err(e: void_crawl_core::VoidCrawlError) -> PyErr {
-    match e {
+    let summary = e.safe_summary();
+    let message = summary.message;
+    let py_err = match e {
+        void_crawl_core::VoidCrawlError::InvalidInput { operation, reason } => {
+            let err = PyValueError::new_err(message);
+            Python::attach(|py| {
+                let value = err.value(py);
+                let _ = value.setattr("operation", operation);
+                let _ = value.setattr("reason", reason);
+            });
+            err
+        }
         void_crawl_core::VoidCrawlError::NavigationTimeout {
             ref url,
             ref wait_phase,
             timeout_secs,
             elapsed_secs,
         } => {
-            let err = NavigationTimeoutError::new_err(e.to_string());
+            let err = NavigationTimeoutError::new_err(message);
             Python::attach(|py| {
                 let value = err.value(py);
-                let _ = value.setattr("url", url);
+                let _ = value.setattr("url", safe_exception_url(url));
                 let _ = value.setattr("wait_phase", wait_phase);
                 let _ = value.setattr("timeout", timeout_secs);
                 let _ = value.setattr("elapsed", elapsed_secs);
             });
             err
         }
-        void_crawl_core::VoidCrawlError::NavigationFailed(_) => {
-            NavigationError::new_err(e.to_string())
-        }
-        void_crawl_core::VoidCrawlError::BrowserClosed => {
-            BrowserClosedError::new_err(e.to_string())
-        }
+        void_crawl_core::VoidCrawlError::NavigationFailed(_) => NavigationError::new_err(message),
+        void_crawl_core::VoidCrawlError::BrowserClosed => BrowserClosedError::new_err(message),
         void_crawl_core::VoidCrawlError::ResponseTimeout { .. } => {
-            ResponseTimeoutError::new_err(e.to_string())
+            ResponseTimeoutError::new_err(message)
         }
         void_crawl_core::VoidCrawlError::ProfileBusy { ref name, pid, acquired_at } => {
-            let err = ProfileBusy::new_err(e.to_string());
+            let err = ProfileBusy::new_err(message);
             Python::attach(|py| {
                 let value = err.value(py);
                 let _ = value.setattr("profile", name);
@@ -244,38 +282,44 @@ pub(crate) fn to_py_err(e: void_crawl_core::VoidCrawlError) -> PyErr {
             err
         }
         void_crawl_core::VoidCrawlError::ProfileLeaseExpired { .. } => {
-            ProfileLeaseExpired::new_err(e.to_string())
+            ProfileLeaseExpired::new_err(message)
         }
         void_crawl_core::VoidCrawlError::ChromeProfileBusy { .. } => {
-            ChromeProfileBusy::new_err(e.to_string())
+            ChromeProfileBusy::new_err(message)
         }
         void_crawl_core::VoidCrawlError::ProfileNotFound { .. } => {
-            ProfileNotFound::new_err(e.to_string())
+            ProfileNotFound::new_err(message)
         }
         void_crawl_core::VoidCrawlError::CaptchaDetected { .. } => {
-            CaptchaDetected::new_err(e.to_string())
+            CaptchaDetected::new_err(message)
         }
         void_crawl_core::VoidCrawlError::AntibotChallenge { .. } => {
-            AntibotChallenge::new_err(e.to_string())
+            AntibotChallenge::new_err(message)
         }
         void_crawl_core::VoidCrawlError::SessionInterrupted { ref interrupt_id } => {
-            let err = SessionInterrupted::new_err(e.to_string());
+            let err = SessionInterrupted::new_err(message);
             Python::attach(|py| {
                 let _ = err.value(py).setattr("interrupt_id", interrupt_id);
             });
             err
         }
         void_crawl_core::VoidCrawlError::InterruptExpired { .. } => {
-            InterruptExpired::new_err(e.to_string())
+            InterruptExpired::new_err(message)
         }
         void_crawl_core::VoidCrawlError::InterruptTerminal { .. } => {
-            InterruptTerminal::new_err(e.to_string())
+            InterruptTerminal::new_err(message)
         }
         void_crawl_core::VoidCrawlError::InterruptNotFound { .. } => {
-            InterruptNotFound::new_err(e.to_string())
+            InterruptNotFound::new_err(message)
         }
-        _ => PyRuntimeError::new_err(e.to_string()),
-    }
+        _ => VoidCrawlError::new_err(message),
+    };
+    Python::attach(|py| {
+        let value = py_err.value(py);
+        let _ = value.setattr("code", summary.code.as_str());
+        let _ = value.setattr("category", summary.category.as_str());
+    });
+    py_err
 }
 
 /// Wrapper so `Vec<u8>` converts to Python `bytes` instead of `list[int]`.
@@ -354,6 +398,15 @@ fn json_to_py(py: Python<'_>, val: Value) -> PyResult<Bound<'_, PyAny>> {
             Ok(dict.into_any())
         }
     }
+}
+
+async fn environment_snapshot_value(page: &Page) -> void_crawl_core::Result<Value> {
+    let snapshot = page.environment_snapshot().await?;
+    serde_json::to_value(snapshot).map_err(|error| {
+        void_crawl_core::VoidCrawlError::Other(format!(
+            "serialize browser environment snapshot: {error}"
+        ))
+    })
 }
 
 // ── AntibotVerdict ──────────────────────────────────────────────────────
@@ -865,6 +918,325 @@ impl PyResponseExpectation {
     }
 }
 
+fn navigation_termination_name(termination: NavigationCaptureTermination) -> &'static str {
+    match termination {
+        NavigationCaptureTermination::Finished => "finished",
+        NavigationCaptureTermination::Cancelled => "cancelled",
+        NavigationCaptureTermination::DeadlineReached => "deadline_reached",
+        NavigationCaptureTermination::EventLimitReached => "event_limit_reached",
+        NavigationCaptureTermination::ProviderDisconnected => "provider_disconnected",
+    }
+}
+
+fn resource_outcome_value(outcome: ResourceOutcome) -> Value {
+    match outcome {
+        ResourceOutcome::Pending => serde_json::json!({ "status": "pending" }),
+        ResourceOutcome::ResponseReceived => {
+            serde_json::json!({ "status": "response_received" })
+        }
+        ResourceOutcome::Redirected => serde_json::json!({ "status": "redirected" }),
+        ResourceOutcome::Complete => serde_json::json!({ "status": "complete" }),
+        ResourceOutcome::Failed { cancelled, blocked } => serde_json::json!({
+            "status": "failed",
+            "cancelled": cancelled,
+            "blocked": blocked,
+        }),
+    }
+}
+
+/// Python-visible terminal browser navigation capture.
+#[pyclass(name = "NavigationCaptureReport", frozen)]
+pub struct PyNavigationCaptureReport {
+    report: NavigationCaptureReport,
+}
+
+impl fmt::Debug for PyNavigationCaptureReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NavigationCaptureReport")
+            .field("termination", &self.report.termination)
+            .field("resources", &self.report.resources.len())
+            .field("redirects", &self.report.redirects.len())
+            .field(
+                "source_bytes",
+                &self.report.main_document.as_ref().map(|source| source.retained_bytes),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+#[pymethods]
+impl PyNavigationCaptureReport {
+    #[getter]
+    fn termination(&self) -> &'static str {
+        navigation_termination_name(self.report.termination)
+    }
+
+    #[getter]
+    fn started_at_unix_ms(&self) -> Option<u64> {
+        self.report.started_at_unix_ms
+    }
+
+    #[getter]
+    fn elapsed_micros(&self) -> u64 {
+        self.report.elapsed_micros
+    }
+
+    #[getter]
+    fn events_admitted(&self) -> u64 {
+        self.report.events_admitted
+    }
+
+    #[getter]
+    fn resources_dropped(&self) -> u64 {
+        self.report.resources_dropped
+    }
+
+    #[getter]
+    fn additional_loss_unknown(&self) -> bool {
+        self.report.additional_loss_unknown
+    }
+
+    #[getter]
+    fn cleanup_complete(&self) -> bool {
+        self.report.cleanup_complete
+    }
+
+    #[getter]
+    fn network_extra_info(&self) -> &'static str {
+        match self.report.network_extra_info {
+            NetworkExtraInfoState::UnavailableInCurrentClient => "unavailable_in_current_client",
+        }
+    }
+
+    #[getter]
+    fn requested_url(&self) -> Option<String> {
+        self.report.requested_url.as_ref().map(|url| url.as_str().to_string())
+    }
+
+    #[getter]
+    fn final_url(&self) -> Option<String> {
+        self.report.final_url.as_ref().map(|url| url.as_str().to_string())
+    }
+
+    #[getter]
+    fn redirect_count(&self) -> usize {
+        self.report.redirects.len()
+    }
+
+    #[getter]
+    fn resource_count(&self) -> usize {
+        self.report.resources.len()
+    }
+
+    #[getter]
+    fn source_status(&self) -> Option<u16> {
+        self.report.main_document.as_ref().and_then(|source| source.status)
+    }
+
+    #[getter]
+    fn source_body_state(&self) -> Option<&'static str> {
+        self.report.main_document.as_ref().map(|source| source.body_state.as_str())
+    }
+
+    #[getter]
+    fn source_retained_bytes(&self) -> Option<usize> {
+        self.report.main_document.as_ref().map(|source| source.retained_bytes)
+    }
+
+    #[getter]
+    fn source_complete_bytes(&self) -> Option<usize> {
+        self.report.main_document.as_ref().and_then(|source| source.complete_bytes)
+    }
+
+    fn source_body<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyBytes>> {
+        self.report.main_document.as_ref().map(|source| PyBytes::new(py, source.body()))
+    }
+
+    fn source_header_names(&self) -> Vec<String> {
+        self.report
+            .main_document
+            .as_ref()
+            .map(|source| source.headers.as_slice().iter().map(|(name, _)| name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    #[pyo3(signature = (*, include_urls=false))]
+    fn resources<'py>(&self, py: Python<'py>, include_urls: bool) -> PyResult<Bound<'py, PyAny>> {
+        let resources = self
+            .report
+            .resources
+            .iter()
+            .map(|resource| {
+                let mut value = serde_json::json!({
+                    "id": resource.id.0,
+                    "redirect_from": resource.redirect_from.map(|id| id.0),
+                    "frame": resource.frame.map(|id| id.0),
+                    "loader": resource.loader.map(|id| id.0),
+                    "resource_type": resource.resource_type,
+                    "status": resource.status,
+                    "mime_type": resource.mime_type,
+                    "from_cache": resource.from_cache,
+                    "from_service_worker": resource.from_service_worker,
+                    "encoded_data_length": resource.encoded_data_length,
+                    "outcome": resource_outcome_value(resource.outcome),
+                });
+                if include_urls {
+                    value["url"] = Value::String(resource.url.as_str().to_string());
+                }
+                value
+            })
+            .collect();
+        json_to_py(py, Value::Array(resources))
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "NavigationCaptureReport(termination={:?}, resources={}, redirects={}, source_bytes={:?})",
+            navigation_termination_name(self.report.termination),
+            self.report.resources.len(),
+            self.report.redirects.len(),
+            self.report.main_document.as_ref().map(|source| source.retained_bytes),
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum NavigationCaptureAction {
+    Finish,
+    Cancel,
+    Wait,
+}
+
+/// Armed main-document source and resource-graph capture.
+#[pyclass(name = "NavigationCapture")]
+pub struct PyNavigationCapture {
+    inner: Arc<Mutex<Option<NavigationCapture>>>,
+}
+
+impl fmt::Debug for PyNavigationCapture {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("NavigationCapture").finish_non_exhaustive()
+    }
+}
+
+impl PyNavigationCapture {
+    fn new(capture: NavigationCapture) -> Self {
+        Self { inner: Arc::new(Mutex::new(Some(capture))) }
+    }
+
+    fn consume<'py>(
+        &self,
+        py: Python<'py>,
+        action: NavigationCaptureAction,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let capture =
+                inner.lock().await.take().ok_or_else(|| {
+                    PyRuntimeError::new_err("navigation capture already consumed")
+                })?;
+            let report = match action {
+                NavigationCaptureAction::Finish => capture.finish().await,
+                NavigationCaptureAction::Cancel => capture.cancel().await,
+                NavigationCaptureAction::Wait => capture.wait().await,
+            }
+            .map_err(to_py_err)?;
+            Python::attach(|py| Py::new(py, PyNavigationCaptureReport { report }))
+        })
+    }
+}
+
+#[pymethods]
+impl PyNavigationCapture {
+    fn finish<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.consume(py, NavigationCaptureAction::Finish)
+    }
+
+    fn cancel<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.consume(py, NavigationCaptureAction::Cancel)
+    }
+
+    fn wait<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.consume(py, NavigationCaptureAction::Wait)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ObservationStopAction {
+    Finish,
+    Cancel,
+    Interrupt,
+    Wait,
+}
+
+/// Armed, bounded CDP lifecycle observation.
+#[pyclass(name = "ObservationScope")]
+pub struct PyObservationScope {
+    inner: Arc<Mutex<Option<ObservationScope>>>,
+}
+
+impl fmt::Debug for PyObservationScope {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("ObservationScope").finish_non_exhaustive()
+    }
+}
+
+impl PyObservationScope {
+    fn new(scope: ObservationScope) -> Self {
+        Self { inner: Arc::new(Mutex::new(Some(scope))) }
+    }
+
+    fn consume<'py>(
+        &self,
+        py: Python<'py>,
+        action: ObservationStopAction,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let scope = inner
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| PyRuntimeError::new_err("observation scope already consumed"))?;
+            let report = match action {
+                ObservationStopAction::Finish => scope.finish().await,
+                ObservationStopAction::Cancel => scope.cancel().await,
+                ObservationStopAction::Interrupt => scope.interrupt().await,
+                ObservationStopAction::Wait => scope.wait().await,
+            }
+            .map_err(to_py_err)?;
+            let value = serde_json::to_value(report).map_err(|error| {
+                PyRuntimeError::new_err(format!("serialize observation report: {error}"))
+            })?;
+            Ok(PyJsonValue(value))
+        })
+    }
+}
+
+#[pymethods]
+impl PyObservationScope {
+    /// Stop normally and return the terminal report.
+    fn finish<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.consume(py, ObservationStopAction::Finish)
+    }
+
+    /// Stop as an explicit caller cancellation and return the terminal report.
+    fn cancel<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.consume(py, ObservationStopAction::Cancel)
+    }
+
+    /// Stop as an explicit interruption and return the terminal report.
+    fn interrupt<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.consume(py, ObservationStopAction::Interrupt)
+    }
+
+    /// Wait for the deadline, event limit, or provider disconnect.
+    fn wait<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.consume(py, ObservationStopAction::Wait)
+    }
+}
+
 /// Per-tab CDP instrumentation state for routing sensitive vs instrumented
 /// work.
 #[pyclass(name = "TabInstrumentationState", frozen)]
@@ -1130,6 +1502,15 @@ async fn do_launch(
     Ok(())
 }
 
+fn state_binding_name(binding: BrowserStateBinding) -> &'static str {
+    match binding {
+        BrowserStateBinding::SharedBrowserProfile => "shared_browser_profile",
+        BrowserStateBinding::IsolatedBrowserContext => "isolated_browser_context",
+        BrowserStateBinding::ManagedProfile => "managed_profile",
+        BrowserStateBinding::AttachedBrowser => "attached_browser",
+    }
+}
+
 // ── PyPage ──────────────────────────────────────────────────────────────
 
 /// A browser page / tab.
@@ -1148,7 +1529,11 @@ impl fmt::Debug for PyPage {
 
 impl PyPage {
     fn new(page: Page) -> Self {
-        Self { inner: Arc::new(Mutex::new(Some(Arc::new(page)))) }
+        Self::from_arc(Arc::new(page))
+    }
+
+    fn from_arc(page: Arc<Page>) -> Self {
+        Self { inner: Arc::new(Mutex::new(Some(page))) }
     }
 }
 
@@ -1198,6 +1583,76 @@ impl PyPage {
     /// Install JavaScript before each subsequent document executes.
     fn add_init_script<'py>(&self, py: Python<'py>, script: String) -> PyResult<Bound<'py, PyAny>> {
         with_page!(self, py, |page| page.add_init_script(&script))
+    }
+
+    /// Arm bounded main-document source and resource-graph capture.
+    #[pyo3(signature = (*, max_events=4096, max_resources=512, max_source_bytes=8_388_608, max_duration=30.0))]
+    fn arm_navigation_capture<'py>(
+        &self,
+        py: Python<'py>,
+        max_events: usize,
+        max_resources: usize,
+        max_source_bytes: usize,
+        max_duration: f64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if max_events == 0 || max_resources == 0 || max_source_bytes == 0 {
+            return Err(PyValueError::new_err(
+                "event, resource, and source-byte limits must be greater than zero",
+            ));
+        }
+        let max_duration = Duration::try_from_secs_f64(max_duration).map_err(|_| {
+            PyValueError::new_err("max_duration must be finite and greater than zero")
+        })?;
+        if max_duration.is_zero() {
+            return Err(PyValueError::new_err("max_duration must be greater than zero"));
+        }
+        let options =
+            NavigationCaptureOptions { max_events, max_resources, max_source_bytes, max_duration };
+        with_page_map!(self, py, |page| page.arm_navigation_capture(options), |capture| {
+            PyNavigationCapture::new(capture)
+        })
+    }
+
+    /// Arm bounded CDP lifecycle markers before navigation or another action.
+    #[pyo3(signature = (*, collect_network=true, collect_console=true, collect_exceptions=true, max_events=2048, max_diagnostic_bytes=65_536, max_duration=30.0))]
+    #[expect(clippy::too_many_arguments, reason = "Python keyword surface mirrors bounded options")]
+    fn arm_observation<'py>(
+        &self,
+        py: Python<'py>,
+        collect_network: bool,
+        collect_console: bool,
+        collect_exceptions: bool,
+        max_events: usize,
+        max_diagnostic_bytes: usize,
+        max_duration: f64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if !(collect_network || collect_console || collect_exceptions) {
+            return Err(PyValueError::new_err(
+                "at least one observation collector must be enabled",
+            ));
+        }
+        if max_events == 0 || max_diagnostic_bytes == 0 {
+            return Err(PyValueError::new_err(
+                "max_events and max_diagnostic_bytes must be greater than zero",
+            ));
+        }
+        let max_duration = Duration::try_from_secs_f64(max_duration).map_err(|_| {
+            PyValueError::new_err("max_duration must be finite and greater than zero")
+        })?;
+        if max_duration.is_zero() {
+            return Err(PyValueError::new_err("max_duration must be greater than zero"));
+        }
+        let options = ObservationOptions {
+            collect_network,
+            collect_console,
+            collect_exceptions,
+            max_events,
+            max_diagnostic_bytes,
+            max_duration,
+        };
+        with_page_map!(self, py, |page| page.arm_observation(options), |scope| {
+            PyObservationScope::new(scope)
+        })
     }
 
     /// Arm one passive response expectation before a triggering action.
@@ -1286,6 +1741,52 @@ impl PyPage {
         with_page!(self, py, |page| page.content())
     }
 
+    /// Capture bounded rendered-DOM bytes with document scope metadata.
+    #[pyo3(signature = (max_bytes=8_388_608))]
+    fn rendered_dom_snapshot<'py>(
+        &self,
+        py: Python<'py>,
+        max_bytes: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        with_page_map!(self, py, |page| page.rendered_dom_snapshot(max_bytes), |snapshot| {
+            PyRenderedDomSnapshot::from(snapshot)
+        })
+    }
+
+    /// Capture bounded raw accessibility-tree bytes for the top-level frame.
+    #[pyo3(signature = (depth=None, max_nodes=10_000, max_bytes=8_388_608))]
+    fn accessibility_snapshot<'py>(
+        &self,
+        py: Python<'py>,
+        depth: Option<i64>,
+        max_nodes: usize,
+        max_bytes: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let options = AccessibilitySnapshotOptions { depth, max_nodes, max_bytes };
+        with_page_map!(self, py, |page| page.accessibility_snapshot(options), |snapshot| {
+            PyAccessibilitySnapshot::from(snapshot)
+        })
+    }
+
+    /// Capture bounded raw accessibility-tree bytes for one matching frame.
+    #[pyo3(signature = (frame_url_pattern, depth=None, max_nodes=10_000, max_bytes=8_388_608))]
+    fn accessibility_snapshot_in_frame<'py>(
+        &self,
+        py: Python<'py>,
+        frame_url_pattern: String,
+        depth: Option<i64>,
+        max_nodes: usize,
+        max_bytes: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let options = AccessibilitySnapshotOptions { depth, max_nodes, max_bytes };
+        with_page_map!(
+            self,
+            py,
+            |page| page.accessibility_snapshot_in_frame(&frame_url_pattern, options),
+            |snapshot| PyAccessibilitySnapshot::from(snapshot)
+        )
+    }
+
     /// Get the page title.
     fn title<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         with_page!(self, py, |page| page.title())
@@ -1313,6 +1814,13 @@ impl PyPage {
         })
     }
 
+    /// Mutable browser-state boundary this page belongs to.
+    fn state_binding<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        with_page_map!(self, py, |page| async { Ok(page.state_binding()) }, |binding| {
+            state_binding_name(binding).to_string()
+        })
+    }
+
     /// Return this tab's CDP instrumentation state for routing/debugging.
     fn instrumentation_state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
@@ -1328,6 +1836,13 @@ impl PyPage {
         })
     }
 
+    /// Observe effective browser environment and active capture primitives.
+    fn environment_snapshot<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        with_page_map!(self, py, |page| environment_snapshot_value(page), |value| PyJsonValue(
+            value
+        ))
+    }
+
     /// Evaluate a JavaScript expression and return the result as a native
     /// Python object.
     ///
@@ -1338,7 +1853,7 @@ impl PyPage {
     }
 
     /// Alias for :meth:`evaluate_js` — short form used by MCP tooling and
-    /// internal Yosoi callers.
+    /// internal automation callers.
     fn eval_js<'py>(&self, py: Python<'py>, expression: String) -> PyResult<Bound<'py, PyAny>> {
         self.evaluate_js(py, expression)
     }
@@ -1394,6 +1909,13 @@ impl PyPage {
         ))
     }
 
+    /// Capture CSS layout/visual viewport and content-size metrics.
+    fn layout_snapshot<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        with_page_map!(self, py, |page| page.layout_snapshot(), |snapshot| {
+            PyLayoutSnapshot::from(snapshot)
+        })
+    }
+
     /// Take a PNG screenshot, returned as Python bytes.
     fn screenshot_png<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         with_page_map!(self, py, |page| page.screenshot_png(), |bytes| PyBytesResult(bytes))
@@ -1409,7 +1931,7 @@ impl PyPage {
     ///         With ``scroll_viewports``/``scroll_pixels`` set, ``x``/``y``
     ///         are relative to wherever that scroll lands. Mutually
     ///         exclusive with ``selector_type``.
-    ///     selector_type: Crop to a Yosoi selector's resolved rectangle
+    ///     selector_type: Crop to a browser target's resolved rectangle
     ///         instead of an explicit ``bbox`` — one of ``"css"``,
     ///         ``"xpath"``, ``"regex"``, ``"jsonld"``, ``"attr"``,
     ///         ``"global_id"``, ``"role"``, ``"visual"``. Mutually
@@ -1512,6 +2034,60 @@ impl PyPage {
         })
     }
 
+    /// Capture PNG bytes paired with provider-native visual metadata.
+    #[pyo3(signature = (
+        bbox=None,
+        selector_type=None, selector_value=None, selector_regex=None, selector_name=None,
+        selector_nth=None, selector_x=None, selector_y=None,
+        viewport_preset=None, viewport_width=None, viewport_height=None,
+        viewport_device_scale_factor=None, viewport_mobile=None,
+        scroll_viewports=None, scroll_pixels=None, full_page=None,
+    ))]
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+    fn visual_snapshot<'py>(
+        &self,
+        py: Python<'py>,
+        bbox: Option<(u32, u32, u32, u32)>,
+        selector_type: Option<String>,
+        selector_value: Option<String>,
+        selector_regex: Option<String>,
+        selector_name: Option<String>,
+        selector_nth: Option<u32>,
+        selector_x: Option<f64>,
+        selector_y: Option<f64>,
+        viewport_preset: Option<String>,
+        viewport_width: Option<u32>,
+        viewport_height: Option<u32>,
+        viewport_device_scale_factor: Option<f64>,
+        viewport_mobile: Option<bool>,
+        scroll_viewports: Option<f64>,
+        scroll_pixels: Option<i64>,
+        full_page: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = build_screenshot_options(
+            None,
+            bbox,
+            selector_type.as_deref(),
+            selector_value,
+            selector_regex,
+            selector_name,
+            selector_nth,
+            selector_x,
+            selector_y,
+            viewport_preset.as_deref(),
+            viewport_width,
+            viewport_height,
+            viewport_device_scale_factor,
+            viewport_mobile,
+            scroll_viewports,
+            scroll_pixels,
+            full_page,
+        )?;
+        with_page_map!(self, py, |page| page.visual_snapshot(opts), |snapshot| {
+            PyVisualSnapshot::from(snapshot)
+        })
+    }
+
     /// Record this page for ``duration_secs`` and return a
     /// :class:`Recording`.
     ///
@@ -1532,7 +2108,7 @@ impl PyPage {
     ///
     /// Args:
     ///     duration_secs: How long to record (default 30).
-    ///     selectors: List of Yosoi ``SelectorEntry``-shaped dicts to crop
+    ///     selectors: List of ``BrowserTarget``-shaped dicts to crop
     ///         to, one region each. Mutually exclusive with ``bbox``.
     ///     bbox: ``(x, y, width, height)`` in CSS pixels, **viewport
     ///         relative** (unlike :meth:`screenshot`'s page-relative bbox,
@@ -2285,6 +2861,110 @@ impl From<InterruptInfo> for PyInterruptInfo {
     }
 }
 
+// ── Isolated browser context ────────────────────────────────────────────
+
+#[pyclass(name = "ContextCleanupReport", frozen)]
+#[derive(Debug)]
+pub struct PyContextCleanupReport {
+    #[pyo3(get)]
+    state_binding:    String,
+    #[pyo3(get)]
+    disposal_state:   String,
+    #[pyo3(get)]
+    cleanup_complete: bool,
+}
+
+impl From<ContextCleanupReport> for PyContextCleanupReport {
+    fn from(report: ContextCleanupReport) -> Self {
+        let disposal_state = match report.disposal_state {
+            ContextDisposalState::Disposed => "disposed",
+            ContextDisposalState::ProviderDisconnected => "provider_disconnected",
+            ContextDisposalState::ProviderRejected => "provider_rejected",
+        };
+        Self {
+            state_binding:    state_binding_name(report.state_binding).to_string(),
+            disposal_state:   disposal_state.to_string(),
+            cleanup_complete: report.cleanup_complete,
+        }
+    }
+}
+
+/// Disposable Chromium browser context with a single initial page.
+#[pyclass(name = "IsolatedBrowserContext")]
+pub struct PyIsolatedBrowserContext {
+    inner: Arc<Mutex<Option<IsolatedBrowserContext>>>,
+    page:  Arc<Page>,
+}
+
+impl fmt::Debug for PyIsolatedBrowserContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IsolatedBrowserContext").finish_non_exhaustive()
+    }
+}
+
+impl PyIsolatedBrowserContext {
+    fn new(context: IsolatedBrowserContext) -> Self {
+        let page = context.page_handle();
+        Self { inner: Arc::new(Mutex::new(Some(context))), page }
+    }
+}
+
+#[pymethods]
+impl PyIsolatedBrowserContext {
+    /// Page owned by this context. It becomes unusable after disposal.
+    fn page(&self) -> PyPage {
+        PyPage::from_arc(Arc::clone(&self.page))
+    }
+
+    #[getter]
+    fn state_binding(&self) -> &'static str {
+        state_binding_name(self.page.state_binding())
+    }
+
+    /// Dispose all pages and mutable state in this context.
+    fn dispose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let context =
+                inner.lock().await.take().ok_or_else(|| {
+                    PyRuntimeError::new_err("isolated context is already disposed")
+                })?;
+            Ok(PyContextCleanupReport::from(context.dispose().await))
+        })
+    }
+
+    fn __aenter__<'py>(slf: Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let slf_ref = slf.into_any().unbind();
+        future_into_py(py, async move { Ok(slf_ref) })
+    }
+
+    #[pyo3(signature = (exc_type=None, _exc_val=None, _exc_tb=None))]
+    #[expect(clippy::needless_pass_by_value, reason = "PyO3 extracts exception arguments by value")]
+    fn __aexit__<'py>(
+        &self,
+        py: Python<'py>,
+        exc_type: Option<Bound<'py, PyAny>>,
+        _exc_val: Option<Bound<'py, PyAny>>,
+        _exc_tb: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let had_exception = exc_type.is_some();
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let context = inner.lock().await.take();
+            if let Some(context) = context {
+                let report = context.dispose().await;
+                if !report.cleanup_complete && !had_exception {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "isolated context cleanup failed: {:?}",
+                        report.disposal_state
+                    )));
+                }
+            }
+            Ok(false)
+        })
+    }
+}
+
 // ── PyBrowserSession ────────────────────────────────────────────────────
 
 /// Browser session that wraps a Chromium instance via CDP.
@@ -2431,6 +3111,33 @@ impl PyBrowserSession {
             }
             .map_err(to_py_err)?;
             Ok(PyPage::new(page))
+        })
+    }
+
+    /// Create a fresh disposable Chromium browser context.
+    fn new_isolated_context<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let session = inner.lock().await.as_ref().cloned().ok_or_else(|| {
+                PyRuntimeError::new_err(
+                    "browser not launched — use `async with` or call launch() first",
+                )
+            })?;
+            let context = session.new_isolated_context().await.map_err(to_py_err)?;
+            Ok(PyIsolatedBrowserContext::new(context))
+        })
+    }
+
+    /// Mutable-state boundary used by ordinary pages from this session.
+    fn state_binding<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let session = inner.lock().await.as_ref().cloned().ok_or_else(|| {
+                PyRuntimeError::new_err(
+                    "browser not launched — use `async with` or call launch() first",
+                )
+            })?;
+            Ok(state_binding_name(session.state_binding()).to_string())
         })
     }
 
@@ -2834,6 +3541,16 @@ impl PyPooledTab {
         with_pooled_page!(self, py, |page| page.url())
     }
 
+    /// Mutable browser-state boundary. Pooled tabs are never isolated.
+    fn state_binding<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page_map!(
+            self,
+            py,
+            |page| async move { Ok::<_, void_crawl_core::VoidCrawlError>(page.state_binding()) },
+            |binding| state_binding_name(binding).to_string()
+        )
+    }
+
     /// Return this tab's CDP instrumentation state for routing/debugging.
     fn instrumentation_state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         with_pooled_page_map!(
@@ -2842,6 +3559,13 @@ impl PyPooledTab {
             |page| async move { Ok::<_, void_crawl_core::VoidCrawlError>(page.instrumentation_state()) },
             |state| PyTabInstrumentationState::from(state)
         )
+    }
+
+    /// Observe effective browser environment and active capture primitives.
+    fn environment_snapshot<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        with_pooled_page_map!(self, py, |page| environment_snapshot_value(page), |value| {
+            PyJsonValue(value)
+        })
     }
 
     fn evaluate_js<'py>(&self, py: Python<'py>, expression: String) -> PyResult<Bound<'py, PyAny>> {
@@ -3512,6 +4236,46 @@ impl PyPoolContext {
 
 // ── PyBrowserPool ──────────────────────────────────────────────────────
 
+#[pyclass(name = "PoolReleaseReport", frozen)]
+#[derive(Debug)]
+#[expect(clippy::struct_excessive_bools, reason = "mirrors explicit core cleanup facts")]
+pub struct PyPoolReleaseReport {
+    #[pyo3(get)]
+    state_binding:           String,
+    #[pyo3(get)]
+    strategy:                String,
+    #[pyo3(get)]
+    cleanup_complete:        bool,
+    #[pyo3(get)]
+    tab_reused:              bool,
+    #[pyo3(get)]
+    document_cleared:        bool,
+    #[pyo3(get)]
+    download_behavior_reset: bool,
+    #[pyo3(get)]
+    shared_state_retained:   bool,
+}
+
+impl From<PoolReleaseReport> for PyPoolReleaseReport {
+    fn from(report: PoolReleaseReport) -> Self {
+        let strategy = match report.strategy {
+            PoolReleaseStrategy::BlankDocumentAndReuseSharedState => {
+                "blank_document_and_reuse_shared_state"
+            }
+            PoolReleaseStrategy::DisposeTabAfterResetFailure => "dispose_tab_after_reset_failure",
+        };
+        Self {
+            state_binding:           state_binding_name(report.state_binding).to_string(),
+            strategy:                strategy.to_string(),
+            cleanup_complete:        report.cleanup_complete,
+            tab_reused:              report.tab_reused,
+            document_cleared:        report.document_cleared,
+            download_behavior_reset: report.download_behavior_reset,
+            shared_state_retained:   report.shared_state_retained,
+        }
+    }
+}
+
 /// Pool of reusable browser tabs across one or more Chrome sessions.
 ///
 /// Supports async context manager protocol (`async with`).
@@ -3635,10 +4399,13 @@ impl PyBrowserPool {
             }
             let pooled_tab = guard.take();
             drop(guard);
-            if let Some(pooled_tab) = pooled_tab {
-                pool.release(pooled_tab).await;
-            }
-            Ok(())
+            let report = match pooled_tab {
+                Some(pooled_tab) => {
+                    Some(PyPoolReleaseReport::from(pool.release_checked(pooled_tab).await))
+                }
+                None => None,
+            };
+            Ok(report)
         })
     }
 
@@ -3981,12 +4748,11 @@ struct ProfileSplitPreparation {
 
 impl Drop for ProfileSplitPreparation {
     fn drop(&mut self) {
-        if self.armed {
-            if let Ok(mut state) = self.state.lock() {
-                if matches!(*state, ProfileSplitState::Preparing) {
-                    *state = ProfileSplitState::Ready;
-                }
-            }
+        if self.armed
+            && let Ok(mut state) = self.state.lock()
+            && matches!(*state, ProfileSplitState::Preparing)
+        {
+            *state = ProfileSplitState::Ready;
         }
     }
 }
@@ -4332,8 +5098,11 @@ fn py_scan_bytes(
 #[pymodule]
 fn _ext(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBrowserSession>()?;
+    m.add_class::<PyIsolatedBrowserContext>()?;
+    m.add_class::<PyContextCleanupReport>()?;
     m.add_class::<PyPage>()?;
     m.add_class::<PyBrowserPool>()?;
+    m.add_class::<PyPoolReleaseReport>()?;
     m.add_class::<PyPooledTab>()?;
     m.add_class::<PyAcquireContext>()?;
     m.add_class::<PyPoolContext>()?;
@@ -4341,6 +5110,13 @@ fn _ext(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPageResponse>()?;
     m.add_class::<PyCapturedResponse>()?;
     m.add_class::<PyResponseExpectation>()?;
+    m.add_class::<PyObservationScope>()?;
+    m.add_class::<PyNavigationCapture>()?;
+    m.add_class::<PyNavigationCaptureReport>()?;
+    m.add_class::<PyRenderedDomSnapshot>()?;
+    m.add_class::<PyAccessibilitySnapshot>()?;
+    m.add_class::<PyLayoutSnapshot>()?;
+    m.add_class::<PyVisualSnapshot>()?;
 
     m.add_class::<PyTabInstrumentationState>()?;
     m.add_class::<PyAntibotVerdict>()?;

@@ -180,6 +180,17 @@ async fn records_a_session_and_writes_frames_to_disk() {
     assert_eq!(result.regions[0].label, "viewport");
     assert_eq!(result.regions[0].frame_count, result.frames_captured);
     assert_eq!(result.format, "jpeg");
+    assert!(result.started_at_unix_ms.is_some());
+    assert!(result.document_epoch.is_some());
+    assert!(result.complete);
+    assert!(result.frame_size_pixels.is_some());
+    assert!(result.capture_viewport_css.is_some());
+    assert_eq!(
+        result.frames_dropped,
+        result.frames_dropped_by_rate
+            + result.frames_dropped_by_limit
+            + result.frame_decode_failures
+    );
 
     // The response promises paths, not inline frames — so the paths must
     // actually resolve to files on disk.

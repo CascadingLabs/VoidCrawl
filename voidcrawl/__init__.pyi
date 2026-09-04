@@ -5,6 +5,9 @@ from __future__ import annotations
 from typing import Literal
 
 from voidcrawl._ext import (
+    AccessibilitySnapshot as AccessibilitySnapshot,
+)
+from voidcrawl._ext import (
     AntibotChallenge as AntibotChallenge,
 )
 from voidcrawl._ext import (
@@ -23,6 +26,9 @@ from voidcrawl._ext import (
     ChromeProfileBusy as ChromeProfileBusy,
 )
 from voidcrawl._ext import (
+    ContextCleanupReport as ContextCleanupReport,
+)
+from voidcrawl._ext import (
     Frame as Frame,
 )
 from voidcrawl._ext import (
@@ -35,10 +41,25 @@ from voidcrawl._ext import (
     InterruptTerminal as InterruptTerminal,
 )
 from voidcrawl._ext import (
+    IsolatedBrowserContext as IsolatedBrowserContext,
+)
+from voidcrawl._ext import (
+    LayoutSnapshot as LayoutSnapshot,
+)
+from voidcrawl._ext import (
+    NavigationCapture as NavigationCapture,
+)
+from voidcrawl._ext import (
+    NavigationCaptureReport as NavigationCaptureReport,
+)
+from voidcrawl._ext import (
     NavigationError as NavigationError,
 )
 from voidcrawl._ext import (
     NavigationTimeoutError as NavigationTimeoutError,
+)
+from voidcrawl._ext import (
+    ObservationScope as ObservationScope,
 )
 from voidcrawl._ext import (
     Page as Page,
@@ -48,6 +69,9 @@ from voidcrawl._ext import (
 )
 from voidcrawl._ext import (
     PooledTab as PooledTab,
+)
+from voidcrawl._ext import (
+    PoolReleaseReport as PoolReleaseReport,
 )
 from voidcrawl._ext import (
     ProfileBusy as ProfileBusy,
@@ -71,6 +95,9 @@ from voidcrawl._ext import (
     RecordingHandle as RecordingHandle,
 )
 from voidcrawl._ext import (
+    RenderedDomSnapshot as RenderedDomSnapshot,
+)
+from voidcrawl._ext import (
     ResponseExpectation as ResponseExpectation,
 )
 from voidcrawl._ext import (
@@ -81,6 +108,9 @@ from voidcrawl._ext import (
 )
 from voidcrawl._ext import (
     TabInstrumentationState as TabInstrumentationState,
+)
+from voidcrawl._ext import (
+    VisualSnapshot as VisualSnapshot,
 )
 from voidcrawl._ext import (
     VoidCrawlError as VoidCrawlError,
@@ -143,6 +173,7 @@ from voidcrawl.schema import (
 Selector = Text
 
 __all__ = [
+    "AccessibilitySnapshot",
     "AntibotChallenge",
     "AntibotVerdict",
     "Attr",
@@ -153,20 +184,27 @@ __all__ = [
     "CaptchaDetected",
     "CapturedResponse",
     "ChromeProfileBusy",
+    "ContextCleanupReport",
     "Frame",
     "InterruptExpired",
     "InterruptNotFound",
     "InterruptRef",
     "InterruptRequest",
     "InterruptTerminal",
+    "IsolatedBrowserContext",
     "JsTab",
+    "LayoutSnapshot",
     "ManagedProfileSnapshot",
     "ManagedProfileSplit",
+    "NavigationCapture",
+    "NavigationCaptureReport",
     "NavigationError",
     "NavigationTimeoutError",
+    "ObservationScope",
     "Page",
     "PageResponse",
     "PoolConfig",
+    "PoolReleaseReport",
     "PooledTab",
     "ProfileBusy",
     "ProfileHandle",
@@ -176,6 +214,7 @@ __all__ = [
     "RecordedRegion",
     "Recording",
     "RecordingHandle",
+    "RenderedDomSnapshot",
     "ResponseExpectation",
     "ResponseTimeoutError",
     "ScaleProfile",
@@ -186,6 +225,7 @@ __all__ = [
     "Tab",
     "TabInstrumentationState",
     "Text",
+    "VisualSnapshot",
     "VoidCrawlError",
     "acquire_profile",
     "list_profiles",
@@ -287,6 +327,8 @@ class BrowserSession:
         self, exc_type: object, exc_val: object, exc_tb: object
     ) -> bool: ...
     async def new_page(self, url: str | None = None) -> Page: ...
+    async def new_isolated_context(self) -> IsolatedBrowserContext: ...
+    async def state_binding(self) -> str: ...
     async def new_page_in_window(self, url: str) -> Page: ...
     def page(self, url: str | None = None) -> _PageContext: ...
     async def attach_page(self, target_id: str) -> Page: ...

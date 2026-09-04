@@ -4,7 +4,7 @@
 //!
 //! This is the moving-picture counterpart to [`Page::screenshot`], and the
 //! options deliberately mirror [`ScreenshotOptions`](crate::ScreenshotOptions)
-//! — same `viewport`, same `scroll`, same `bbox`, the same Yosoi selector
+//! — same `viewport`, same `scroll`, same `bbox`, the same browser target
 //! crop — so a caller who can screenshot a region can record it by changing
 //! one call.
 //!
@@ -96,8 +96,8 @@
 //! [`Recording::masks`] reports exactly.
 //!
 //! A [`MaskSpec`] is either a literal [`Bbox`] — for a caller that already
-//! knows its rectangles and wants no DOM work at all — or a [`SelectorEntry`]
-//! to resolve into one, via the same [`Page::resolve_selector`] the crop
+//! knows its rectangles and wants no DOM work at all — or a [`BrowserTarget`]
+//! to resolve into one, via the same [`Page::resolve_target`] the crop
 //! regions use.
 //!
 //! Unlike regions, selector masks **track**: they are re-resolved on a timer
@@ -131,7 +131,7 @@ use std::{
     io::Cursor,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
@@ -155,11 +155,19 @@ use tokio::{
 };
 
 use crate::{
+    DocumentEpoch,
     error::{Result, VoidCrawlError},
     page::{Bbox, Page},
-    selector::{SelectorEntry, SelectorResolution},
+    selector::{BrowserTarget, TargetResolution},
     viewport::{ScrollTarget, Viewport},
 };
+
+fn unix_millis_now() -> Option<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+}
 
 /// Default frame-rate ceiling: enough to read a UI interaction back, cheap
 /// enough that a 30s recording stays in the low hundreds of frames.
@@ -179,7 +187,7 @@ pub const DEFAULT_QUALITY: u8 = 80;
 /// [`RecordingOptions::mask_pad`] to 0 for an exact rectangle.
 pub const DEFAULT_MASK_PAD: u32 = 2;
 /// Ceiling on how often tracked masks are re-resolved. Each tick costs one
-/// `Page::resolve_selector` round-trip per tracked mask, so this stays well
+/// `Page::resolve_target` round-trip per tracked mask, so this stays well
 /// below the frame rate: it bounds how far an element can move between a
 /// resolve and the frame that uses it, and the current∪previous union covers
 /// the gap.
@@ -262,12 +270,12 @@ pub enum MaskRegion {
     /// A literal viewport-relative rectangle in CSS pixels. Never tracked:
     /// what the caller gave is what gets covered.
     Fixed(Bbox),
-    /// Resolved to a rectangle through [`Page::resolve_selector`], and by
+    /// Resolved to a rectangle through [`Page::resolve_target`], and by
     /// default re-resolved while recording. A selector that resolves to
     /// nothing, is ambiguous, or is inherently non-visual (`jsonld`/`regex`)
     /// fails the recording before any frame is captured — an unresolvable
     /// mask must never be silently skipped.
-    Selector(SelectorEntry),
+    Selector(BrowserTarget),
 }
 
 /// One rectangle to paint black in every frame.
@@ -291,7 +299,7 @@ impl MaskSpec {
     }
 
     /// Mask whatever a selector resolves to, re-resolving while recording.
-    pub fn selector(entry: SelectorEntry) -> Self {
+    pub fn selector(entry: BrowserTarget) -> Self {
         Self { region: MaskRegion::Selector(entry), track: true, label: None }
     }
 
@@ -360,7 +368,7 @@ pub struct RecordingOptions {
     /// inherently non-visual (`jsonld`/`regex`) fails the whole recording
     /// before any frame is captured, rather than silently yielding an empty
     /// region.
-    pub selectors:    Vec<SelectorEntry>,
+    pub selectors:    Vec<BrowserTarget>,
     /// Rectangles to paint solid black in every frame, before cropping,
     /// writing, or encoding. Orthogonal to `bbox`/`selectors`: masks are not
     /// crops, and combining them is normal — crop to the form, mask the
@@ -463,12 +471,12 @@ impl RecordingOptions {
     }
 
     /// Add one more region to record. Call repeatedly for several regions.
-    pub fn with_selector(mut self, selector: SelectorEntry) -> Self {
+    pub fn with_selector(mut self, selector: BrowserTarget) -> Self {
         self.selectors.push(selector);
         self
     }
 
-    pub fn with_selectors(mut self, selectors: impl IntoIterator<Item = SelectorEntry>) -> Self {
+    pub fn with_selectors(mut self, selectors: impl IntoIterator<Item = BrowserTarget>) -> Self {
         self.selectors.extend(selectors);
         self
     }
@@ -609,32 +617,50 @@ pub struct RecordedRegion {
 /// The result of a recording.
 #[derive(Debug, Clone, Serialize)]
 pub struct Recording {
+    /// Wall-clock correlation captured when the screencast started.
+    pub started_at_unix_ms:      Option<u64>,
+    /// Document epoch being shown when recording started.
+    pub document_epoch:          DocumentEpoch,
     /// One entry per requested region; exactly one (`"viewport"`) when
     /// neither `bbox` nor `selectors` was given.
-    pub regions:            Vec<RecordedRegion>,
+    pub regions:                 Vec<RecordedRegion>,
     /// One entry per requested mask, in the order they were given. Empty when
     /// no masks were requested — and an empty list is not a statement that
     /// the recording contains nothing sensitive, only that nothing was asked
     /// to be covered.
-    pub masks:              Vec<MaskReport>,
-    pub format:             FrameFormat,
+    pub masks:                   Vec<MaskReport>,
+    pub format:                  FrameFormat,
     /// Wall-clock span from screencast start to stop.
-    pub duration:           Duration,
+    pub duration:                Duration,
     /// Frames kept, per region (every region has the same count).
-    pub frames_captured:    usize,
-    /// Frames Chrome delivered that were discarded by the fps ceiling or the
-    /// `max_frames` cap. A large number next to a small `frames_captured`
-    /// means `fps` is the binding constraint.
-    pub frames_dropped:     usize,
+    pub frames_captured:         usize,
+    /// Frames delivered by Chrome but discarded by bounds or invalid data.
+    pub frames_dropped:          usize,
+    /// Frames discarded by the requested fps ceiling.
+    pub frames_dropped_by_rate:  usize,
+    /// Frames discarded after the requested frame limit was reached.
+    pub frames_dropped_by_limit: usize,
+    /// Delivered frames whose base64 payload could not be decoded.
+    pub frame_decode_failures:   usize,
+    /// Screencast frame acknowledgements rejected by Chromium.
+    pub frame_ack_failures:      usize,
+    /// Whether the CDP event stream ended before an explicit stop/deadline.
+    pub stream_disconnected:     bool,
+    /// True only when no decode/ack/disconnect or stale-mask failure occurred.
+    pub complete:                bool,
+    /// Original screencast frame dimensions, when at least one frame survived.
+    pub frame_size_pixels:       Option<(u32, u32)>,
+    /// CSS viewport dimensions reported with the first retained frame.
+    pub capture_viewport_css:    Option<(f64, f64)>,
     /// The page's `devicePixelRatio` at capture time, for translating frame
     /// pixels back to CSS pixels.
-    pub device_pixel_ratio: f64,
+    pub device_pixel_ratio:      f64,
     /// Whether this recording pinned the tab to the foreground and held the
     /// browser's capture lock — the resolved value of
     /// [`RecordingOptions::foreground`], which is normally auto-detected.
     /// `false` means the recording ran concurrently with the rest of the
     /// browser.
-    pub foregrounded:       bool,
+    pub foregrounded:            bool,
 }
 
 impl Recording {
@@ -668,57 +694,64 @@ impl Recording {
 /// [`DownloadCapture`]: crate::DownloadCapture
 #[derive(Debug)]
 pub struct RecordingHandle {
-    collector:        JoinHandle<CollectedFrames>,
-    stop_tx:          Option<oneshot::Sender<()>>,
+    collector:          JoinHandle<CollectedFrames>,
+    stop_tx:            Option<oneshot::Sender<()>>,
     /// Live mask geometry, `None` when no masks were requested. Shared with
     /// the tracker task and read by the collector when stamping frames.
-    mask_state:       Option<Arc<AsyncMutex<MaskState>>>,
+    mask_state:         Option<Arc<AsyncMutex<MaskState>>>,
     /// The re-resolution task, present only when at least one mask tracks.
     /// Stopped by `mask_stop_tx` and bounded by the same `max_duration` as
     /// the collector, so it cannot outlive the recording.
-    mask_tracker:     Option<JoinHandle<()>>,
-    mask_stop_tx:     Option<oneshot::Sender<()>>,
+    mask_tracker:       Option<JoinHandle<()>>,
+    mask_stop_tx:       Option<oneshot::Sender<()>>,
     /// The CDP handle for the recorded tab, kept so `stop` can halt the
     /// screencast without needing the wrapping [`Page`] first. Cheap to
     /// clone: `chromiumoxide::Page` is an `Arc` internally.
-    cdp:              CdpPage,
+    cdp:                CdpPage,
     /// Shared with the collector so the hard deadline can release the
     /// browser-wide capture lock even when the caller never calls `stop`.
-    capture_guard:    Option<Arc<AsyncMutex<Option<OwnedMutexGuard<()>>>>>,
-    started:          Instant,
-    regions:          Vec<(String, Option<Bbox>)>,
-    restore_scroll:   Option<(f64, f64)>,
+    capture_guard:      Option<Arc<AsyncMutex<Option<OwnedMutexGuard<()>>>>>,
+    started:            Instant,
+    started_at_unix_ms: Option<u64>,
+    document_epoch:     DocumentEpoch,
+    regions:            Vec<(String, Option<Bbox>)>,
+    restore_scroll:     Option<(f64, f64)>,
     /// Three genuinely distinct states: `None` = no override was applied and
     /// nothing needs restoring; `Some(None)` = an override was applied over a
     /// page that had none, so clear it; `Some(Some(v))` = restore `v`.
     #[expect(clippy::option_option, reason = "outer = did we override, inner = what was there")]
-    restore_viewport: Option<Option<Viewport>>,
+    restore_viewport:   Option<Option<Viewport>>,
     /// The resolved foreground decision, reported on the [`Recording`].
-    foregrounded:     bool,
-    opts:             RecordingOptions,
+    foregrounded:       bool,
+    opts:               RecordingOptions,
 }
 
 /// Everything `begin_screencast` sets up, handed to the [`RecordingHandle`].
 struct ScreencastStart {
-    collector:      JoinHandle<CollectedFrames>,
-    stop_tx:        oneshot::Sender<()>,
+    collector:          JoinHandle<CollectedFrames>,
+    stop_tx:            oneshot::Sender<()>,
     /// Shared with the collector so the hard deadline can release the
     /// browser-wide capture lock even when the caller never calls `stop`.
-    capture_guard:  Option<Arc<AsyncMutex<Option<OwnedMutexGuard<()>>>>>,
-    regions:        Vec<(String, Option<Bbox>)>,
-    mask_state:     Option<Arc<AsyncMutex<MaskState>>>,
-    mask_tracker:   Option<JoinHandle<()>>,
-    mask_stop_tx:   Option<oneshot::Sender<()>>,
-    restore_scroll: Option<(f64, f64)>,
-    started_at:     Instant,
-    foregrounded:   bool,
+    capture_guard:      Option<Arc<AsyncMutex<Option<OwnedMutexGuard<()>>>>>,
+    regions:            Vec<(String, Option<Bbox>)>,
+    mask_state:         Option<Arc<AsyncMutex<MaskState>>>,
+    mask_tracker:       Option<JoinHandle<()>>,
+    mask_stop_tx:       Option<oneshot::Sender<()>>,
+    restore_scroll:     Option<(f64, f64)>,
+    started_at:         Instant,
+    started_at_unix_ms: Option<u64>,
+    foregrounded:       bool,
 }
 
 /// What the collector task hands back.
 #[derive(Debug)]
 struct CollectedFrames {
-    frames:  Vec<RawFrame>,
-    dropped: usize,
+    frames:              Vec<RawFrame>,
+    dropped_by_rate:     usize,
+    dropped_by_limit:    usize,
+    decode_failures:     usize,
+    ack_failures:        usize,
+    stream_disconnected: bool,
 }
 
 /// Live mask geometry, shared between the tracker task (which writes) and the
@@ -806,18 +839,19 @@ fn union(a: Bbox, b: Bbox) -> Bbox {
 
 #[derive(Debug)]
 struct RawFrame {
-    offset:       Duration,
-    data:         Vec<u8>,
+    offset:        Duration,
+    data:          Vec<u8>,
     /// Mask rectangles current when this frame was captured, in CSS pixels.
     /// Stamped per frame rather than fixed for the recording, because a mask
     /// that lags a scrolling element uncovers what it was asked to cover.
-    masks:        Vec<Bbox>,
+    masks:         Vec<Bbox>,
     /// Width in CSS pixels of the surface this frame depicts, from the
     /// screencast metadata. Divided into the decoded image width, this gives
     /// the image-pixels-per-CSS-pixel scale needed to place a CSS-pixel crop
     /// rectangle — Chrome may downscale frames, so the ratio is not
     /// necessarily the devicePixelRatio.
-    device_width: f64,
+    device_width:  f64,
+    device_height: f64,
 }
 
 async fn release_capture_guard(
@@ -894,6 +928,8 @@ impl RecordingHandle {
             duration,
             dpr,
             self.foregrounded,
+            self.started_at_unix_ms,
+            self.document_epoch,
         )
         .await?;
 
@@ -952,6 +988,7 @@ impl Page {
     /// ```
     pub async fn start_recording(&self, opts: RecordingOptions) -> Result<RecordingHandle> {
         opts.validate()?;
+        let document_epoch = self.top_level_document_scope().await?.epoch;
 
         // One-shot viewport override, snapshotted for exact restore — same
         // leak-proofing as `screenshot`, and doubly important here because a
@@ -977,6 +1014,8 @@ impl Page {
                 cdp: self.cdp().clone(),
                 capture_guard: started.capture_guard,
                 started: started.started_at,
+                started_at_unix_ms: started.started_at_unix_ms,
+                document_epoch,
                 regions: started.regions,
                 restore_scroll: started.restore_scroll,
                 restore_viewport,
@@ -1054,6 +1093,7 @@ impl Page {
             .map_err(|e| VoidCrawlError::RecordingError(format!("startScreencast: {e}")))?;
 
         let started_at = Instant::now();
+        let started_at_unix_ms = unix_millis_now();
         let (stop_tx, stop_rx) = oneshot::channel();
         let collector = spawn_collector(
             self.cdp().clone(),
@@ -1069,7 +1109,7 @@ impl Page {
 
         // Only worth a task when something can actually move: a recording of
         // fixed rectangles pays nothing for tracking it doesn't use.
-        let tracked: Vec<(usize, SelectorEntry)> = opts
+        let tracked: Vec<(usize, BrowserTarget)> = opts
             .masks
             .iter()
             .enumerate()
@@ -1106,6 +1146,7 @@ impl Page {
             mask_stop_tx,
             restore_scroll,
             started_at,
+            started_at_unix_ms,
             foregrounded: foreground,
         })
     }
@@ -1126,18 +1167,21 @@ impl Page {
                     (mask.label.clone().unwrap_or_else(|| format!("mask{i}")), *bbox)
                 }
                 MaskRegion::Selector(entry) => {
+                    if !entry.supports_geometry() {
+                        return Err(VoidCrawlError::UnsupportedVisualTarget);
+                    }
                     let label = mask
                         .label
                         .clone()
                         .unwrap_or_else(|| format!("mask_{}", region_label(entry, i)));
-                    let bbox = match self.resolve_selector(entry).await? {
-                        SelectorResolution::Resolved { bbox } => bbox,
-                        SelectorResolution::Empty { reason } => {
+                    let bbox = match self.resolve_target(entry).await? {
+                        TargetResolution::Resolved { bbox } => bbox,
+                        TargetResolution::Empty { reason } => {
                             return Err(VoidCrawlError::ElementNotVisible(format!(
                                 "recording mask {label:?}: {reason}"
                             )));
                         }
-                        SelectorResolution::Ambiguous { reason, .. } => {
+                        TargetResolution::Ambiguous { reason, .. } => {
                             return Err(VoidCrawlError::AmbiguousSelector(format!(
                                 "recording mask {label:?}: {reason}"
                             )));
@@ -1175,15 +1219,18 @@ impl Page {
 
         let mut regions = Vec::with_capacity(opts.selectors.len());
         for (i, entry) in opts.selectors.iter().enumerate() {
+            if !entry.supports_geometry() {
+                return Err(VoidCrawlError::UnsupportedVisualTarget);
+            }
             let label = region_label(entry, i);
-            match self.resolve_selector(entry).await? {
-                SelectorResolution::Resolved { bbox } => regions.push((label, Some(bbox))),
-                SelectorResolution::Empty { reason } => {
+            match self.resolve_target(entry).await? {
+                TargetResolution::Resolved { bbox } => regions.push((label, Some(bbox))),
+                TargetResolution::Empty { reason } => {
                     return Err(VoidCrawlError::ElementNotVisible(format!(
                         "recording region {label:?}: {reason}"
                     )));
                 }
-                SelectorResolution::Ambiguous { reason, .. } => {
+                TargetResolution::Ambiguous { reason, .. } => {
                     return Err(VoidCrawlError::AmbiguousSelector(format!(
                         "recording region {label:?}: {reason}"
                     )));
@@ -1195,7 +1242,7 @@ impl Page {
 }
 
 /// A stable, filesystem-safe name for a region.
-fn region_label(entry: &SelectorEntry, index: usize) -> String {
+fn region_label(entry: &BrowserTarget, index: usize) -> String {
     let raw =
         entry.name.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or(entry.value.as_str());
     let cleaned: String = raw
@@ -1234,7 +1281,11 @@ fn spawn_collector(
     let min_gap = Duration::from_secs_f64(1.0 / f64::from(fps));
     tokio::spawn(async move {
         let mut frames: Vec<RawFrame> = Vec::new();
-        let mut dropped = 0usize;
+        let mut dropped_by_rate = 0usize;
+        let mut dropped_by_limit = 0usize;
+        let mut decode_failures = 0usize;
+        let mut ack_failures = 0usize;
+        let mut stream_disconnected = false;
         let mut last_kept: Option<Instant> = None;
         let mut stop_rx = stop_rx;
         // The hard stop is enforced here too, not just by `record`, so a
@@ -1258,19 +1309,24 @@ fn spawn_collector(
                 }
                 event = events.next() => event,
             };
-            let Some(event) = event else { break };
+            let Some(event) = event else {
+                stream_disconnected = true;
+                break;
+            };
 
-            let _ = cdp.execute(ScreencastFrameAckParams::new(event.session_id)).await;
+            if cdp.execute(ScreencastFrameAckParams::new(event.session_id)).await.is_err() {
+                ack_failures += 1;
+            }
 
             let now = Instant::now();
             if frames.len() >= max_frames {
-                dropped += 1;
+                dropped_by_limit += 1;
                 continue;
             }
             if let Some(last) = last_kept
                 && now.duration_since(last) < min_gap
             {
-                dropped += 1;
+                dropped_by_rate += 1;
                 continue;
             }
 
@@ -1290,15 +1346,23 @@ fn spawn_collector(
                         data,
                         masks,
                         device_width: event.metadata.device_width,
+                        device_height: event.metadata.device_height,
                     });
                 }
                 // A frame that doesn't decode is a lost frame, not a lost
                 // recording.
-                Err(_) => dropped += 1,
+                Err(_) => decode_failures += 1,
             }
         }
 
-        CollectedFrames { frames, dropped }
+        CollectedFrames {
+            frames,
+            dropped_by_rate,
+            dropped_by_limit,
+            decode_failures,
+            ack_failures,
+            stream_disconnected,
+        }
     })
 }
 
@@ -1310,7 +1374,7 @@ fn spawn_collector(
 /// leave a task issuing CDP calls against the tab forever.
 fn spawn_mask_tracker(
     page: Page,
-    tracked: Vec<(usize, SelectorEntry)>,
+    tracked: Vec<(usize, BrowserTarget)>,
     state: Arc<AsyncMutex<MaskState>>,
     interval: Duration,
     stop_rx: oneshot::Receiver<()>,
@@ -1330,8 +1394,8 @@ fn spawn_mask_tracker(
             }
 
             for (index, entry) in &tracked {
-                match page.resolve_selector(entry).await {
-                    Ok(SelectorResolution::Resolved { bbox }) => {
+                match page.resolve_target(entry).await {
+                    Ok(TargetResolution::Resolved { bbox }) => {
                         state.lock().await.record_resolved(*index, bbox);
                     }
                     // Empty, ambiguous, or a failed round-trip all mean the
@@ -1354,9 +1418,29 @@ async fn build_regions(
     duration: Duration,
     device_pixel_ratio: f64,
     foregrounded: bool,
+    started_at_unix_ms: Option<u64>,
+    document_epoch: DocumentEpoch,
 ) -> Result<Recording> {
     let frames_captured = collected.frames.len();
-    let frames_dropped = collected.dropped;
+    let frames_dropped_by_rate = collected.dropped_by_rate;
+    let frames_dropped_by_limit = collected.dropped_by_limit;
+    let frame_decode_failures = collected.decode_failures;
+    let frame_ack_failures = collected.ack_failures;
+    let stream_disconnected = collected.stream_disconnected;
+    let frames_dropped = frames_dropped_by_rate
+        .saturating_add(frames_dropped_by_limit)
+        .saturating_add(frame_decode_failures);
+    let frame_size_pixels = collected
+        .frames
+        .first()
+        .and_then(|frame| image::load_from_memory(&frame.data).ok())
+        .map(|image| image.dimensions());
+    let capture_viewport_css =
+        collected.frames.first().map(|frame| (frame.device_width, frame.device_height));
+    let complete = frame_decode_failures == 0
+        && frame_ack_failures == 0
+        && !stream_disconnected
+        && masks.iter().all(|mask| mask.stale_frames == 0);
     let regions_spec: Vec<(String, Option<Bbox>)> = regions.to_vec();
     let format = opts.format;
     let quality = opts.quality;
@@ -1377,12 +1461,22 @@ async fn build_regions(
     .map_err(|e| VoidCrawlError::RecordingError(format!("crop task: {e}")))??;
 
     Ok(Recording {
+        started_at_unix_ms,
+        document_epoch,
         regions: built,
         masks,
         format,
         duration,
         frames_captured,
         frames_dropped,
+        frames_dropped_by_rate,
+        frames_dropped_by_limit,
+        frame_decode_failures,
+        frame_ack_failures,
+        stream_disconnected,
+        complete,
+        frame_size_pixels,
+        capture_viewport_css,
         device_pixel_ratio,
         foregrounded,
     })
@@ -1633,7 +1727,7 @@ mod encoders;
 #[allow(clippy::unwrap_used, reason = "test module")]
 mod tests {
     use super::*;
-    use crate::selector::SelectorKind;
+    use crate::selector::BrowserTargetKind;
 
     fn bbox(x: u32, y: u32, width: u32, height: u32) -> Bbox {
         Bbox { x, y, width, height }
@@ -1646,6 +1740,47 @@ mod tests {
 
     fn is_black(img: &RgbaImage, x: u32, y: u32) -> bool {
         img.get_pixel(x, y).0 == [0, 0, 0, 255]
+    }
+
+    #[tokio::test]
+    async fn partial_frame_failure_preserves_retained_frames_and_honest_facts() {
+        let mut bytes = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(canvas(10, 8)).write_to(&mut bytes, ImageFormat::Png).unwrap();
+        let collected = CollectedFrames {
+            frames:              vec![RawFrame {
+                offset:        Duration::ZERO,
+                data:          bytes.into_inner(),
+                masks:         Vec::new(),
+                device_width:  10.0,
+                device_height: 8.0,
+            }],
+            dropped_by_rate:     2,
+            dropped_by_limit:    3,
+            decode_failures:     1,
+            ack_failures:        0,
+            stream_disconnected: false,
+        };
+
+        let recording = build_regions(
+            collected,
+            &[("viewport".into(), None)],
+            Vec::new(),
+            &RecordingOptions::default(),
+            Duration::from_secs(1),
+            1.0,
+            false,
+            Some(1),
+            DocumentEpoch::Known(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(recording.frames_captured, 1);
+        assert_eq!(recording.regions[0].frames.len(), 1);
+        assert_eq!(recording.frames_dropped, 6);
+        assert!(!recording.complete);
+        assert_eq!(recording.frame_size_pixels, Some((10, 8)));
+        assert_eq!(recording.capture_viewport_css, Some((10.0, 8.0)));
     }
 
     #[test]
@@ -1800,8 +1935,8 @@ mod tests {
 
     #[test]
     fn a_selector_mask_tracks_by_default_and_can_be_pinned() {
-        let entry = SelectorEntry {
-            kind:  SelectorKind::Css,
+        let entry = BrowserTarget {
+            kind:  BrowserTargetKind::Css,
             value: "#password".into(),
             regex: None,
             name:  None,
@@ -1817,10 +1952,11 @@ mod tests {
     fn masking_is_a_no_op_when_a_frame_carries_no_rectangles() {
         // Guards the fast path: an unmasked recording must not pay a decode.
         let mut frames = vec![RawFrame {
-            offset:       Duration::ZERO,
-            data:         b"not a decodable image".to_vec(),
-            masks:        Vec::new(),
-            device_width: 100.0,
+            offset:        Duration::ZERO,
+            data:          b"not a decodable image".to_vec(),
+            masks:         Vec::new(),
+            device_width:  100.0,
+            device_height: 100.0,
         }];
         assert!(mask_raw_frames(&mut frames, 2, FrameFormat::Png, 80).is_ok());
     }
@@ -1828,10 +1964,11 @@ mod tests {
     #[test]
     fn an_undecodable_frame_fails_the_recording_rather_than_passing_through() {
         let mut frames = vec![RawFrame {
-            offset:       Duration::ZERO,
-            data:         b"not a decodable image".to_vec(),
-            masks:        vec![bbox(0, 0, 10, 10)],
-            device_width: 100.0,
+            offset:        Duration::ZERO,
+            data:          b"not a decodable image".to_vec(),
+            masks:         vec![bbox(0, 0, 10, 10)],
+            device_width:  100.0,
+            device_height: 100.0,
         }];
         let err = mask_raw_frames(&mut frames, 0, FrameFormat::Png, 80).unwrap_err();
         assert!(matches!(err, VoidCrawlError::RecordingError(_)));

@@ -31,7 +31,7 @@
 
 ## Requirements
 
-- **Rust** ≥ 1.86 (edition 2024)
+- **Rust** ≥ 1.98 (edition 2024)
 - **Python** ≥ 3.10
 - **Chrome/Chromium** installed on the system
 - **maturin** ≥ 1.7 (`cargo install maturin`)
@@ -158,7 +158,7 @@ uv run pytest tests/ -v
 
 ## Documentation
 
-
+- [VoidCrawl–Yosoi Browser Acquisition boundary](YOSOI_BROWSER_ACQUISITION.md)
 - [Examples](examples/)
 
 ## Community

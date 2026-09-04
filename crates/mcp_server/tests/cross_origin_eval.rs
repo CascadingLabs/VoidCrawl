@@ -17,6 +17,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use rmcp::ErrorData;
 use tokio::{sync::Mutex, time::sleep};
 use void_crawl_core::BrowserSession;
 use voidcrawl_mcp::{
@@ -32,6 +33,11 @@ use voidcrawl_mcp::{
 /// then parent) is correct: the inner `%XX` escapes become `%25XX`, which the
 /// browser decodes back to `%XX` when it reads the parent, yielding the
 /// original child URL as the iframe `src`.
+fn error_code(error: &ErrorData) -> String {
+    let value = serde_json::to_value(error).expect("serialize MCP error");
+    value["data"]["code"].as_str().unwrap_or_default().to_string()
+}
+
 fn data_url(html: &str) -> String {
     let encoded = html
         .replace('%', "%25")
@@ -174,12 +180,8 @@ async fn eval_js_in_frame_errors_when_no_frame_matches() {
     )
     .await
     .expect_err("a non-matching pattern must error, not silently run in the top frame");
-    // FrameNotFound maps to invalid_params; the message is the pattern itself.
-    assert!(
-        err.message.contains("no-such-frame-xyz"),
-        "error should name the missing frame, got: {}",
-        err.message
-    );
+    assert_eq!(err.message, "target frame was not found");
+    assert_eq!(error_code(&err), "voidcrawl.target.frame_not_found");
 
     teardown(&server).await;
 }
@@ -217,12 +219,15 @@ async fn eval_js_in_frame_fails_closed_when_pattern_is_ambiguous() {
         .await
         {
             Ok(_) => panic!("an ambiguous pattern must not resolve to a single frame"),
-            Err(e) if e.message.contains("matched 2 frames") => {
+            Err(e) if error_code(&e) == "voidcrawl.target.frame_ambiguous" => {
                 err = Some(e);
                 break;
             }
-            // Both frames not registered yet — retry.
-            Err(_) => sleep(Duration::from_millis(100)).await,
+            // Both frames not registered yet — retry only the expected miss.
+            Err(e) if error_code(&e) == "voidcrawl.target.frame_not_found" => {
+                sleep(Duration::from_millis(100)).await;
+            }
+            Err(e) => panic!("unexpected frame error: {e:?}"),
         }
     }
     assert!(
