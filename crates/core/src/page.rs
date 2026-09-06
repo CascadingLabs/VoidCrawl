@@ -1438,7 +1438,22 @@ impl Page {
         }
         let html = self.content().await?;
         let scope = self.top_level_document_scope().await?;
-        Ok(rendered_dom(html, scope, max_bytes))
+        rendered_dom(html, scope, max_bytes).map_err(|_| VoidCrawlError::InvalidInput {
+            operation: "rendered_dom_snapshot",
+            reason:    "max_bytes does not fit browser byte accounting",
+        })
+    }
+
+    /// Capture the current rendered DOM using a validated browser byte limit.
+    pub async fn rendered_dom_snapshot_with_limit(
+        &self,
+        max_bytes: crate::BrowserByteLimit,
+    ) -> Result<RenderedDomSnapshot> {
+        let max_bytes = max_bytes.as_usize().map_err(|_| VoidCrawlError::InvalidInput {
+            operation: "rendered_dom_snapshot",
+            reason:    "max_bytes does not fit in usize",
+        })?;
+        self.rendered_dom_snapshot(max_bytes).await
     }
 
     /// Return the page title.
@@ -2211,7 +2226,25 @@ impl Page {
         validate_accessibility_options(options)?;
         let nodes = self.full_ax_nodes(options.depth, None).await?;
         let scope = self.top_level_document_scope().await?;
-        Ok(accessibility(&nodes, scope, options))
+        accessibility(&nodes, scope, options).map_err(|_| VoidCrawlError::InvalidInput {
+            operation: "accessibility_snapshot",
+            reason:    "max_bytes does not fit browser byte accounting",
+        })
+    }
+
+    /// Capture the top-level accessibility tree using a validated byte limit.
+    pub async fn accessibility_snapshot_with_limit(
+        &self,
+        depth: Option<i64>,
+        max_nodes: usize,
+        max_bytes: crate::BrowserByteLimit,
+    ) -> Result<AccessibilitySnapshot> {
+        let max_bytes = max_bytes.as_usize().map_err(|_| VoidCrawlError::InvalidInput {
+            operation: "accessibility_snapshot",
+            reason:    "max_bytes does not fit in usize",
+        })?;
+        self.accessibility_snapshot(AccessibilitySnapshotOptions { depth, max_nodes, max_bytes })
+            .await
     }
 
     /// Capture one matching frame's raw accessibility tree with explicit
@@ -2237,13 +2270,38 @@ impl Page {
             url:   top.url,
         };
         match self.full_ax_nodes(options.depth, Some(frame_id)).await {
-            Ok(nodes) => Ok(accessibility(&nodes, scope, options)),
+            Ok(nodes) => {
+                accessibility(&nodes, scope, options).map_err(|_| VoidCrawlError::InvalidInput {
+                    operation: "accessibility_snapshot",
+                    reason:    "max_bytes does not fit browser byte accounting",
+                })
+            }
             Err(_) => Ok(unavailable_accessibility(
                 scope,
                 options.depth,
                 SnapshotUnavailableReason::FrameUnavailable,
             )),
         }
+    }
+
+    /// Capture one matching frame's accessibility tree using a validated byte
+    /// limit.
+    pub async fn accessibility_snapshot_in_frame_with_limit(
+        &self,
+        frame_url_pattern: &str,
+        depth: Option<i64>,
+        max_nodes: usize,
+        max_bytes: crate::BrowserByteLimit,
+    ) -> Result<AccessibilitySnapshot> {
+        let max_bytes = max_bytes.as_usize().map_err(|_| VoidCrawlError::InvalidInput {
+            operation: "accessibility_snapshot",
+            reason:    "max_bytes does not fit in usize",
+        })?;
+        self.accessibility_snapshot_in_frame(
+            frame_url_pattern,
+            AccessibilitySnapshotOptions { depth, max_nodes, max_bytes },
+        )
+        .await
     }
 
     async fn full_ax_nodes(

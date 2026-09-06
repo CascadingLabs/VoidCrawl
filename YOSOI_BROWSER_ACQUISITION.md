@@ -1,6 +1,6 @@
 # VoidCrawl–Yosoi Browser Acquisition boundary
 
-Status: CAS-313 architecture contract; no public API changes
+Status: CAS-313 architecture contract; CAS-322 browser byte-accounting readiness
 
 This document defines how VoidCrawl can serve as the Chromium/CDP provider for
 Yosoi Oxide Browser Acquisition without making either project own the other's
@@ -63,6 +63,16 @@ Yosoi capture attempts. A future crate may be named for the integration, but
 CAS-313 does not commit a crate name or create it.
 
 ## Ownership contract
+
+### CAS-322 byte-accounting boundary
+
+`void_crawl_core::byte_control` owns a closed, browser-native vocabulary for
+CDP decoded bodies, rendered DOM UTF-8, AX JSON UTF-8, runtime diagnostics,
+PNG screenshots, recording frames, and encoded recordings. Limits are
+validated nonzero typed values; reports retain configured limits and state
+whether a bound was streaming admission or post-materialization retention.
+The core has no Yosoi dependency. An adapter may translate these facts into
+Yosoi artifacts, but must not infer a configured limit from retained bytes.
 
 ### VoidCrawl owns
 

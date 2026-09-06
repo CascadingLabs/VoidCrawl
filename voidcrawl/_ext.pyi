@@ -77,6 +77,7 @@ class CapturedResponse:
     body_state: str
     body_error: str | None
     truncated: bool
+    byte_report: dict[str, Any]
     async def bytes(self) -> bytes: ...
     async def text(self) -> str: ...
     async def json(self) -> Any: ...
@@ -100,6 +101,7 @@ class RenderedDomSnapshot:
     generated_at_unix_ms: int | None
     retained_bytes: int
     complete_bytes: int | None
+    byte_report: dict[str, Any]
     def bytes(self) -> bytes: ...
 
 class AccessibilitySnapshot:
@@ -115,6 +117,7 @@ class AccessibilitySnapshot:
     nodes_retained: int
     retained_bytes: int
     complete_bytes: int | None
+    byte_report: dict[str, Any]
     def bytes(self) -> bytes: ...
 
 class LayoutSnapshot:
@@ -141,6 +144,7 @@ class VisualSnapshot:
     device_scale_factor: float
     retained_bytes: int
     complete: bool
+    byte_report: dict[str, Any]
     def bytes(self) -> bytes: ...
 
 class NavigationCaptureReport:
@@ -162,6 +166,7 @@ class NavigationCaptureReport:
     source_body_state: str | None
     source_retained_bytes: int | None
     source_complete_bytes: int | None
+    source_byte_report: dict[str, Any] | None
     def source_body(self) -> bytes | None: ...
     def source_header_names(self) -> list[str]: ...
     def resources(self, *, include_urls: bool = False) -> list[dict[str, Any]]: ...
@@ -739,6 +744,7 @@ class Frame:
     **not** evenly spaced — encode against this, not ``index / fps``."""
     data: bytes
     """Encoded image bytes, in the recording's ``format``."""
+    byte_report: dict[str, Any]
 
     def __len__(self) -> int: ...
 

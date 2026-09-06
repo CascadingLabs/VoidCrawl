@@ -33,6 +33,7 @@ use recording::{
 use serde_json::Value;
 use snapshots::{
     PyAccessibilitySnapshot, PyLayoutSnapshot, PyRenderedDomSnapshot, PyVisualSnapshot,
+    byte_report_dict,
 };
 use tokio::{sync::Mutex, task::spawn_blocking};
 use void_crawl_core::{
@@ -369,7 +370,7 @@ impl<'py> IntoPyObject<'py> for PyJsonValue {
 }
 
 /// Convert a [`Value`] directly to a Python object.
-fn json_to_py(py: Python<'_>, val: Value) -> PyResult<Bound<'_, PyAny>> {
+pub(crate) fn json_to_py(py: Python<'_>, val: Value) -> PyResult<Bound<'_, PyAny>> {
     match val {
         Value::Null => Ok(py.None().into_bound(py)),
         Value::Bool(b) => Ok(b.into_pyobject(py)?.to_owned().into_any()),
@@ -626,6 +627,14 @@ impl PyCapturedResponse {
         self.inner.body_state == void_crawl_core::ResponseBodyState::Truncated
     }
 
+    #[getter]
+    fn byte_report<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        byte_report_dict(
+            py,
+            self.inner.byte_report().map_err(|error| PyValueError::new_err(error.to_string()))?,
+        )
+    }
+
     fn bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let body = captured_body(&self.inner)?;
         future_into_py(py, async move { Ok(PyBytesResult(body)) })
@@ -769,7 +778,12 @@ impl PyResponseExpectation {
             owner,
             patterns,
             timeout: Duration::from_secs_f64(timeout),
-            limits: ResponseCaptureLimits { max_response_bytes, max_total_bytes },
+            limits: ResponseCaptureLimits::new(
+                void_crawl_core::BrowserByteLimit::try_from(max_response_bytes)
+                    .unwrap_or(void_crawl_core::BrowserByteLimit::one()),
+                void_crawl_core::BrowserByteLimit::try_from(max_total_bytes)
+                    .unwrap_or(void_crawl_core::BrowserByteLimit::one()),
+            ),
             single,
             lifecycle: Arc::new(Mutex::new(())),
             capture: Arc::new(Mutex::new(None)),
@@ -1049,6 +1063,22 @@ impl PyNavigationCaptureReport {
         self.report.main_document.as_ref().and_then(|source| source.complete_bytes)
     }
 
+    #[getter]
+    fn source_byte_report<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        self.report
+            .main_document
+            .as_ref()
+            .map(|source| {
+                byte_report_dict(
+                    py,
+                    source
+                        .byte_report()
+                        .map_err(|error| PyValueError::new_err(error.to_string()))?,
+                )
+            })
+            .transpose()
+    }
+
     fn source_body<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyBytes>> {
         self.report.main_document.as_ref().map(|source| PyBytes::new(py, source.body()))
     }
@@ -1206,9 +1236,19 @@ impl PyObservationScope {
                 ObservationStopAction::Wait => scope.wait().await,
             }
             .map_err(to_py_err)?;
-            let value = serde_json::to_value(report).map_err(|error| {
+            let mut value = serde_json::to_value(&report).map_err(|error| {
                 PyRuntimeError::new_err(format!("serialize observation report: {error}"))
             })?;
+            let byte_report = serde_json::to_value(report.byte_report().map_err(|error| {
+                PyRuntimeError::new_err(format!("observation byte report: {error}"))
+            })?)
+            .map_err(|error| PyRuntimeError::new_err(format!("serialize byte report: {error}")))?;
+            value
+                .as_object_mut()
+                .ok_or_else(|| {
+                    PyRuntimeError::new_err("observation report must serialize as object")
+                })?
+                .insert("byte_report".to_string(), byte_report);
             Ok(PyJsonValue(value))
         })
     }

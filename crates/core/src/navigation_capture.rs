@@ -6,12 +6,15 @@
 
 use std::{
     collections::HashMap,
-    fmt, mem,
+    fmt,
+    io::Read,
+    mem,
+    result::Result as StdResult,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use base64::engine::general_purpose::STANDARD as BASE64;
 use chromiumoxide::{
     Page as CdpPage,
     cdp::browser_protocol::network::{
@@ -28,6 +31,8 @@ use tokio::{
 };
 
 use crate::{
+    BrowserBudgetScope, BrowserByteCount, BrowserByteDomain, BrowserByteLimit, BrowserByteReport,
+    BrowserByteReportError, BrowserByteSpec, BrowserLimitScope, BrowserPayloadUnavailableReason,
     MeasuredCount, MeasurementUnavailableReason, ResponseBodyState, Result, VoidCrawlError,
 };
 
@@ -52,6 +57,20 @@ impl Default for NavigationCaptureOptions {
 }
 
 impl NavigationCaptureOptions {
+    /// Construct options from typed byte limits while retaining the legacy
+    /// usize fields.
+    pub fn with_source_limit(mut self, limit: BrowserByteLimit) -> Result<Self> {
+        self.max_source_bytes = limit.as_usize().map_err(|_| VoidCrawlError::InvalidInput {
+            operation: "navigation_capture",
+            reason:    "source-byte limit is too large",
+        })?;
+        Ok(self)
+    }
+
+    pub fn source_limit(&self) -> StdResult<BrowserByteLimit, crate::BrowserByteLimitError> {
+        BrowserByteLimit::try_from(self.max_source_bytes)
+    }
+
     pub(crate) fn validate(self) -> Result<Self> {
         if self.max_events == 0 || self.max_resources == 0 || self.max_source_bytes == 0 {
             return Err(VoidCrawlError::InvalidInput {
@@ -189,11 +208,41 @@ pub struct MainDocumentSource {
     pub retained_bytes:      usize,
     pub complete_bytes:      Option<usize>,
     body:                    Arc<[u8]>,
+    max_source_bytes:        usize,
 }
 
 impl MainDocumentSource {
     pub fn body(&self) -> &[u8] {
         &self.body
+    }
+
+    pub fn byte_report(&self) -> StdResult<BrowserByteReport, BrowserByteReportError> {
+        let spec = self.max_source_spec()?;
+        match self.body_state {
+            ResponseBodyState::Unavailable => Ok(BrowserByteReport::unavailable(
+                BrowserByteDomain::CdpDecodedBody,
+                BrowserPayloadUnavailableReason::ProviderDidNotReport,
+            )),
+            ResponseBodyState::Available | ResponseBodyState::Truncated => {
+                Ok(BrowserByteReport::from_known_extent(
+                    BrowserByteDomain::CdpDecodedBody,
+                    Some(spec),
+                    BrowserByteCount::try_from_usize(
+                        self.complete_bytes.unwrap_or(self.retained_bytes),
+                    )?,
+                    BrowserByteCount::try_from_usize(self.retained_bytes)?,
+                )?)
+            }
+        }
+    }
+
+    fn max_source_spec(&self) -> StdResult<BrowserByteSpec, BrowserByteReportError> {
+        Ok(BrowserByteSpec::new(
+            BrowserByteDomain::CdpDecodedBody,
+            BrowserByteLimit::try_from(self.max_source_bytes)?,
+            BrowserLimitScope::RetentionAfterProviderMaterialization,
+            BrowserBudgetScope::PerPayload,
+        ))
     }
 }
 
@@ -706,21 +755,15 @@ async fn capture_main_document(
 ) -> MainDocumentSource {
     match page.execute(GetResponseBodyParams::new(request_id)).await {
         Ok(response) => {
-            let decoded = if response.result.base64_encoded {
-                match BASE64.decode(response.result.body.as_bytes()) {
-                    Ok(body) => body,
-                    Err(_) => {
-                        return unavailable_main_document(
-                            resource,
-                            SourceBodyUnavailableReason::InvalidBase64,
-                        );
-                    }
-                }
-            } else {
-                response.result.body.into_bytes()
+            let (mut decoded, complete_bytes) = match decode_cdp_body(
+                response.result.body,
+                response.result.base64_encoded,
+                max_source_bytes,
+            ) {
+                Ok(body) => body,
+                Err(reason) => return unavailable_main_document(resource, reason),
             };
-            let complete_bytes = decoded.len();
-            let retained_bytes = complete_bytes.min(max_source_bytes);
+            let retained_bytes = decoded.len();
             let body_state = if retained_bytes == complete_bytes {
                 ResponseBodyState::Available
             } else {
@@ -739,13 +782,44 @@ async fn capture_main_document(
                 body_unavailable: None,
                 retained_bytes,
                 complete_bytes: Some(complete_bytes),
-                body: Arc::from(decoded[..retained_bytes].to_vec()),
+                body: Arc::from(mem::take(&mut decoded)),
+                max_source_bytes,
             }
         }
         Err(_) => {
             unavailable_main_document(resource, SourceBodyUnavailableReason::CdpBodyUnavailable)
         }
     }
+}
+
+fn decode_cdp_body(
+    body: String,
+    base64_encoded: bool,
+    max_source_bytes: usize,
+) -> StdResult<(Vec<u8>, usize), SourceBodyUnavailableReason> {
+    if !base64_encoded {
+        let complete_bytes = body.len();
+        let mut retained = body.into_bytes();
+        retained.truncate(max_source_bytes);
+        return Ok((retained, complete_bytes));
+    }
+
+    let mut decoder = base64::read::DecoderReader::new(body.as_bytes(), &BASE64);
+    let mut retained = Vec::with_capacity(max_source_bytes.min(8 * 1024));
+    let mut complete_bytes = 0usize;
+    let mut chunk = [0_u8; 8 * 1024];
+    loop {
+        let read =
+            decoder.read(&mut chunk).map_err(|_| SourceBodyUnavailableReason::InvalidBase64)?;
+        if read == 0 {
+            break;
+        }
+        complete_bytes =
+            complete_bytes.checked_add(read).ok_or(SourceBodyUnavailableReason::InvalidBase64)?;
+        let available = max_source_bytes.saturating_sub(retained.len());
+        retained.extend_from_slice(&chunk[..read.min(available)]);
+    }
+    Ok((retained, complete_bytes))
 }
 
 fn unavailable_main_document(
@@ -766,6 +840,7 @@ fn unavailable_main_document(
         retained_bytes:      0,
         complete_bytes:      None,
         body:                Arc::from([]),
+        max_source_bytes:    1,
     }
 }
 
@@ -835,6 +910,8 @@ fn duration_micros(duration: Duration) -> u64 {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
+    use base64::Engine as _;
+
     use super::*;
 
     #[test]
@@ -868,6 +945,18 @@ mod tests {
         assert!(!debug.contains("Bearer"));
         assert!(!debug.contains("session="));
         assert!(!debug.contains("secret"));
+    }
+
+    #[test]
+    fn bounded_base64_decode_counts_full_output_without_retaining_it_all() {
+        let encoded = BASE64.encode(b"abcdefgh");
+        let (retained, complete) = decode_cdp_body(encoded, true, 3).expect("valid base64");
+        assert_eq!(retained, b"abc");
+        assert_eq!(complete, 8);
+        assert_eq!(
+            decode_cdp_body("YWJj!!!!".into(), true, 2),
+            Err(SourceBodyUnavailableReason::InvalidBase64),
+        );
     }
 
     #[test]

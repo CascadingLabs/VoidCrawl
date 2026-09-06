@@ -5,6 +5,7 @@
 
 use std::{
     fmt,
+    result::Result as StdResult,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -12,7 +13,11 @@ use std::{
 use chromiumoxide::cdp::browser_protocol::accessibility::AxNode;
 use serde::Serialize;
 
-use crate::ProtectedUrl;
+use crate::{
+    BrowserBudgetScope, BrowserByteCount, BrowserByteDomain, BrowserByteLimit,
+    BrowserByteLimitError, BrowserByteReport, BrowserByteReportError, BrowserByteSpec,
+    BrowserLimitScope, BrowserPayloadUnavailableReason, ProtectedUrl,
+};
 
 /// Capture-local navigation epoch for document correlation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -63,11 +68,22 @@ pub struct RenderedDomSnapshot {
     pub retained_bytes:       usize,
     pub complete_bytes:       Option<usize>,
     payload:                  Arc<[u8]>,
+    byte_spec:                BrowserByteSpec,
 }
 
 impl RenderedDomSnapshot {
     pub fn bytes(&self) -> &[u8] {
         &self.payload
+    }
+
+    /// Canonical accounting for the rendered DOM UTF-8 payload.
+    pub fn byte_report(&self) -> StdResult<BrowserByteReport, BrowserByteReportError> {
+        BrowserByteReport::from_known_extent(
+            BrowserByteDomain::RenderedDomUtf8,
+            Some(self.byte_spec),
+            BrowserByteCount::try_from_usize(self.complete_bytes.unwrap_or(self.retained_bytes))?,
+            BrowserByteCount::try_from_usize(self.retained_bytes)?,
+        )
     }
 }
 
@@ -110,11 +126,28 @@ pub struct AccessibilitySnapshot {
     pub retained_bytes:       usize,
     pub complete_bytes:       Option<usize>,
     payload:                  Arc<[u8]>,
+    byte_spec:                BrowserByteSpec,
 }
 
 impl AccessibilitySnapshot {
     pub fn bytes(&self) -> &[u8] {
         &self.payload
+    }
+
+    /// Canonical accounting for the accessibility JSON UTF-8 payload.
+    pub fn byte_report(&self) -> StdResult<BrowserByteReport, BrowserByteReportError> {
+        if matches!(self.state, SnapshotState::Unavailable { .. }) {
+            return Ok(BrowserByteReport::unavailable(
+                BrowserByteDomain::AccessibilityJsonUtf8,
+                BrowserPayloadUnavailableReason::ProviderDidNotReport,
+            ));
+        }
+        BrowserByteReport::from_known_extent(
+            BrowserByteDomain::AccessibilityJsonUtf8,
+            Some(self.byte_spec),
+            BrowserByteCount::try_from_usize(self.complete_bytes.unwrap_or(self.retained_bytes))?,
+            BrowserByteCount::try_from_usize(self.retained_bytes)?,
+        )
     }
 }
 
@@ -138,11 +171,15 @@ pub(crate) fn rendered_dom(
     html: String,
     scope: DocumentScope,
     max_bytes: usize,
-) -> RenderedDomSnapshot {
+) -> StdResult<RenderedDomSnapshot, BrowserByteLimitError> {
+    let byte_limit = BrowserByteLimit::try_from(max_bytes)?;
+    let complete_bytes = html.len();
+    let retained_bytes = (0..=complete_bytes.min(max_bytes))
+        .rev()
+        .find(|&index| html.is_char_boundary(index))
+        .unwrap_or(0);
     let bytes = html.into_bytes();
-    let complete_bytes = bytes.len();
-    let retained_bytes = complete_bytes.min(max_bytes);
-    RenderedDomSnapshot {
+    Ok(RenderedDomSnapshot {
         scope,
         generated_at_unix_ms: unix_millis(),
         state: if retained_bytes == complete_bytes {
@@ -153,21 +190,28 @@ pub(crate) fn rendered_dom(
         retained_bytes,
         complete_bytes: Some(complete_bytes),
         payload: Arc::from(bytes[..retained_bytes].to_vec()),
-    }
+        byte_spec: BrowserByteSpec::new(
+            BrowserByteDomain::RenderedDomUtf8,
+            byte_limit,
+            BrowserLimitScope::RetentionAfterProviderMaterialization,
+            BrowserBudgetScope::PerPayload,
+        ),
+    })
 }
 
 pub(crate) fn accessibility(
     nodes: &[AxNode],
     scope: DocumentScope,
     options: AccessibilitySnapshotOptions,
-) -> AccessibilitySnapshot {
+) -> StdResult<AccessibilitySnapshot, BrowserByteLimitError> {
+    let byte_limit = BrowserByteLimit::try_from(options.max_bytes)?;
     let nodes_observed = nodes.len();
     let Ok(complete) = serde_json::to_vec(nodes) else {
-        return unavailable_accessibility(
+        return Ok(unavailable_accessibility(
             scope,
             options.depth,
             SnapshotUnavailableReason::SerializationFailed,
-        );
+        ));
     };
     let complete_bytes = complete.len();
     let mut payload = Vec::with_capacity(options.max_bytes.min(complete_bytes));
@@ -175,11 +219,11 @@ pub(crate) fn accessibility(
     let mut nodes_retained = 0usize;
     for node in nodes.iter().take(options.max_nodes) {
         let Ok(encoded) = serde_json::to_vec(node) else {
-            return unavailable_accessibility(
+            return Ok(unavailable_accessibility(
                 scope,
                 options.depth,
                 SnapshotUnavailableReason::SerializationFailed,
-            );
+            ));
         };
         let separator = usize::from(nodes_retained > 0);
         if payload.len().saturating_add(separator).saturating_add(encoded.len()).saturating_add(1)
@@ -195,7 +239,7 @@ pub(crate) fn accessibility(
     }
     payload.push(b']');
     let truncated = nodes_retained < nodes_observed;
-    AccessibilitySnapshot {
+    Ok(AccessibilitySnapshot {
         scope,
         generated_at_unix_ms: unix_millis(),
         state: if truncated { SnapshotState::Truncated } else { SnapshotState::Complete },
@@ -205,7 +249,13 @@ pub(crate) fn accessibility(
         retained_bytes: payload.len(),
         complete_bytes: Some(complete_bytes),
         payload: Arc::from(payload),
-    }
+        byte_spec: BrowserByteSpec::new(
+            BrowserByteDomain::AccessibilityJsonUtf8,
+            byte_limit,
+            BrowserLimitScope::RetentionAfterProviderMaterialization,
+            BrowserBudgetScope::PerPayload,
+        ),
+    })
 }
 
 pub(crate) fn unavailable_accessibility(
@@ -223,6 +273,12 @@ pub(crate) fn unavailable_accessibility(
         retained_bytes: 0,
         complete_bytes: None,
         payload: Arc::from([]),
+        byte_spec: BrowserByteSpec::new(
+            BrowserByteDomain::AccessibilityJsonUtf8,
+            BrowserByteLimit::one(),
+            BrowserLimitScope::RetentionAfterProviderMaterialization,
+            BrowserBudgetScope::PerPayload,
+        ),
     }
 }
 
@@ -238,6 +294,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn rendered_dom_truncation_is_exact() {
         let snapshot = rendered_dom(
             "abcdef".into(),
@@ -247,7 +304,8 @@ mod tests {
                 url:   None,
             },
             3,
-        );
+        )
+        .expect("positive limit");
         assert_eq!(snapshot.state, SnapshotState::Truncated);
         assert_eq!(snapshot.bytes(), b"abc");
         assert_eq!(snapshot.retained_bytes, 3);

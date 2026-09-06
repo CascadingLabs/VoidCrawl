@@ -4,6 +4,7 @@
 
 pub mod antibot;
 pub mod ax;
+pub mod byte_control;
 pub mod captcha;
 pub mod challenge;
 pub mod context_isolation;
@@ -31,6 +32,13 @@ pub mod visual_snapshot;
 
 // Re-export CDP types for downstream crates (pyo3_bindings).
 pub use antibot::{AntibotVerdict, Evidence as AntibotEvidence, classify as classify_antibot};
+pub use byte_control::{
+    BrowserBudgetScope, BrowserByteAccounting, BrowserByteAccountingError, BrowserByteAdmission,
+    BrowserByteBudget, BrowserByteCount, BrowserByteDomain, BrowserByteLimit,
+    BrowserByteLimitError, BrowserByteMeasurementUnavailableReason, BrowserByteReport,
+    BrowserByteReportError, BrowserByteSpec, BrowserLimitScope, BrowserPayloadExtent,
+    BrowserPayloadFailureReason, BrowserPayloadUnavailableReason, MeasuredBrowserBytes,
+};
 pub use captcha::{
     CaptchaInfo, CaptchaKind, WidgetRect, capture_captcha, detect_captcha, inject_captcha_token,
 };

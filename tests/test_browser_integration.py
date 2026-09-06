@@ -154,12 +154,17 @@ class TestPageLifecycleAndResponses:
         assert dom.retained_bytes == 128
         assert len(dom.bytes()) == 128
         assert dom.epoch is not None
+        assert dom.byte_report["domain"] == "rendered_dom_utf8"
+        assert dom.byte_report["extent"]["status"] == "truncated"
+        assert dom.byte_report["accounting"]["retained"] == 128
         assert "network fixture" not in repr(dom)
 
         assert ax.state == "truncated"
         assert ax.nodes_retained == 1
         assert ax.nodes_observed >= 1
         assert ax.frame_scope == "top_level"
+        assert ax.byte_report["domain"] == "accessibility_json_utf8"
+        assert ax.byte_report["accounting"]["retained"] == ax.retained_bytes
         assert "network fixture" not in repr(ax)
 
     @pytest.mark.asyncio
@@ -182,6 +187,9 @@ class TestPageLifecycleAndResponses:
         assert visual.format == "png"
         assert visual.image_size[0] > 0
         assert visual.complete is True
+        assert visual.byte_report["domain"] == "screenshot_png"
+        assert visual.byte_report["spec"] is None
+        assert visual.byte_report["extent"]["status"] == "complete"
         assert visual.retained_bytes == len(visual.bytes())
         assert visual.bytes().startswith(b"\x89PNG")
         assert "network fixture" not in repr(visual)
@@ -255,6 +263,10 @@ class TestPageLifecycleAndResponses:
         assert report.resource_count >= 3
         assert report.cleanup_complete is True
         assert report.network_extra_info == "unavailable_in_current_client"
+        source_byte_report = report.source_byte_report
+        assert source_byte_report is not None
+        assert source_byte_report["domain"] == "cdp_decoded_body"
+        assert source_byte_report["extent"]["status"] == "complete"
         assert all("url" not in resource for resource in report.resources())
         assert any(
             "url" in resource for resource in report.resources(include_urls=True)
@@ -288,6 +300,8 @@ class TestPageLifecycleAndResponses:
         assert report["diagnostic_bytes_retained"] == 8
         assert report["diagnostic_bytes_dropped"] > 0
         assert report["diagnostics"][0]["truncated"] is True
+        assert report["byte_report"]["domain"] == "runtime_diagnostic_utf8"
+        assert report["byte_report"]["spec"]["budget_scope"] == "capture_aggregate"
         assert "text" not in report["diagnostics"][0]
         assert report["accounting"]["bytes"]["retained"] == {
             "status": "known",

@@ -1,6 +1,6 @@
 use std::fmt;
 
-use pyo3::{prelude::*, types::PyBytes};
+use pyo3::{exceptions::PyValueError, prelude::*, types::PyBytes};
 use void_crawl_core::{
     AccessibilitySnapshot, BrowserTargetKind, DocumentEpoch, DocumentFrameScope, LayoutSnapshot,
     RenderedDomSnapshot, SnapshotState, SnapshotUnavailableReason, VisualCaptureRegion,
@@ -31,6 +31,15 @@ fn epoch(epoch: DocumentEpoch) -> Option<u64> {
         DocumentEpoch::Known(value) => Some(value),
         DocumentEpoch::UnavailableForAttachedPage => None,
     }
+}
+
+pub(crate) fn byte_report_dict(
+    py: Python<'_>,
+    report: void_crawl_core::BrowserByteReport,
+) -> PyResult<Bound<'_, PyAny>> {
+    let value = serde_json::to_value(report)
+        .map_err(|error| PyValueError::new_err(format!("serialize byte report: {error}")))?;
+    crate::json_to_py(py, value)
 }
 
 fn frame_scope(scope: &DocumentFrameScope) -> &'static str {
@@ -106,6 +115,14 @@ impl PyRenderedDomSnapshot {
 
     fn bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
         PyBytes::new(py, self.inner.bytes())
+    }
+
+    #[getter]
+    fn byte_report<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        byte_report_dict(
+            py,
+            self.inner.byte_report().map_err(|error| PyValueError::new_err(error.to_string()))?,
+        )
     }
 
     fn __repr__(&self) -> String {
@@ -209,6 +226,14 @@ impl PyAccessibilitySnapshot {
 
     fn bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
         PyBytes::new(py, self.inner.bytes())
+    }
+
+    #[getter]
+    fn byte_report<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        byte_report_dict(
+            py,
+            self.inner.byte_report().map_err(|error| PyValueError::new_err(error.to_string()))?,
+        )
     }
 
     fn __repr__(&self) -> String {
@@ -404,6 +429,14 @@ impl PyVisualSnapshot {
     #[getter]
     fn complete(&self) -> bool {
         self.inner.complete
+    }
+
+    #[getter]
+    fn byte_report<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        byte_report_dict(
+            py,
+            self.inner.byte_report().map_err(|error| PyValueError::new_err(error.to_string()))?,
+        )
     }
 
     fn bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {

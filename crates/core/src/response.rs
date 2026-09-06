@@ -6,6 +6,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt,
+    result::Result as StdResult,
     sync::Arc,
     time::Duration,
 };
@@ -23,7 +24,11 @@ use futures::StreamExt;
 use globset::{Glob, GlobMatcher};
 use tokio::{sync::oneshot, task::JoinHandle, time};
 
-use crate::error::{Result, VoidCrawlError};
+use crate::{
+    BrowserBudgetScope, BrowserByteCount, BrowserByteDomain, BrowserByteLimit, BrowserByteReport,
+    BrowserByteReportError, BrowserByteSpec, BrowserLimitScope, BrowserPayloadUnavailableReason,
+    error::{Result, VoidCrawlError},
+};
 
 /// Default maximum retained body size for one captured response (2 MiB).
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
@@ -81,12 +86,35 @@ pub struct CapturedResponse {
     pub body_state:          ResponseBodyState,
     pub body_error:          Option<String>,
     body:                    Arc<[u8]>,
+    limits:                  ResponseCaptureLimits,
+    complete_bytes:          Option<usize>,
 }
 
 impl CapturedResponse {
     #[must_use]
     pub fn body(&self) -> &[u8] {
         &self.body
+    }
+
+    pub fn byte_report(&self) -> StdResult<BrowserByteReport, BrowserByteReportError> {
+        if self.body_state == ResponseBodyState::Unavailable {
+            return Ok(BrowserByteReport::unavailable(
+                BrowserByteDomain::CdpDecodedBody,
+                BrowserPayloadUnavailableReason::ProviderDidNotReport,
+            ));
+        }
+        let spec = BrowserByteSpec::new(
+            BrowserByteDomain::CdpDecodedBody,
+            self.limits.per_response(),
+            BrowserLimitScope::RetentionAfterProviderMaterialization,
+            BrowserBudgetScope::PerPayload,
+        );
+        BrowserByteReport::from_known_extent(
+            BrowserByteDomain::CdpDecodedBody,
+            Some(spec),
+            BrowserByteCount::try_from_usize(self.complete_bytes.unwrap_or(self.body.len()))?,
+            BrowserByteCount::try_from_usize(self.body.len())?,
+        )
     }
 
     pub fn text(&self) -> Result<String> {
@@ -104,16 +132,32 @@ impl CapturedResponse {
 /// Memory limits for one response expectation.
 #[derive(Debug, Clone, Copy)]
 pub struct ResponseCaptureLimits {
-    pub max_response_bytes: usize,
-    pub max_total_bytes:    usize,
+    per_response: BrowserByteLimit,
+    aggregate:    BrowserByteLimit,
+}
+
+impl ResponseCaptureLimits {
+    pub fn new(per_response: BrowserByteLimit, aggregate: BrowserByteLimit) -> Self {
+        Self { per_response, aggregate }
+    }
+
+    pub fn per_response(self) -> BrowserByteLimit {
+        self.per_response
+    }
+
+    pub fn aggregate(self) -> BrowserByteLimit {
+        self.aggregate
+    }
 }
 
 impl Default for ResponseCaptureLimits {
     fn default() -> Self {
-        Self {
-            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
-            max_total_bytes:    DEFAULT_MAX_TOTAL_RESPONSE_BYTES,
-        }
+        Self::new(
+            BrowserByteLimit::try_from(DEFAULT_MAX_RESPONSE_BYTES)
+                .unwrap_or(BrowserByteLimit::one()),
+            BrowserByteLimit::try_from(DEFAULT_MAX_TOTAL_RESPONSE_BYTES)
+                .unwrap_or(BrowserByteLimit::one()),
+        )
     }
 }
 
@@ -160,10 +204,6 @@ impl ResponseCapture {
         if patterns.is_empty() {
             return Err(VoidCrawlError::Other("at least one response pattern is required".into()));
         }
-        if limits.max_response_bytes == 0 || limits.max_total_bytes == 0 {
-            return Err(VoidCrawlError::Other("response byte limits must be positive".into()));
-        }
-
         let mut names = HashSet::with_capacity(patterns.len());
         if let Some((duplicate, _)) = patterns.iter().find(|(name, _)| !names.insert(name.clone()))
         {
@@ -356,7 +396,7 @@ async fn run_capture(
                         } else {
                             result.body.as_bytes().to_vec()
                         };
-                        bounded_response(meta.clone(), decoded, &mut retained, limits)
+                        bounded_response(meta.clone(), decoded, &mut retained, limits)?
                     }
                     Err(error) => unavailable_response(meta.clone(), error.to_string()),
                 };
@@ -391,29 +431,38 @@ fn bounded_response(
     mut body: Vec<u8>,
     retained: &mut usize,
     limits: ResponseCaptureLimits,
-) -> CapturedResponse {
-    let remaining = limits.max_total_bytes.saturating_sub(*retained);
-    let keep = body.len().min(limits.max_response_bytes).min(remaining);
+) -> Result<CapturedResponse> {
+    let complete_bytes = body.len();
+    let aggregate =
+        limits.aggregate().as_usize().map_err(|error| VoidCrawlError::Other(error.to_string()))?;
+    let per_response = limits
+        .per_response()
+        .as_usize()
+        .map_err(|error| VoidCrawlError::Other(error.to_string()))?;
+    let remaining = aggregate.saturating_sub(*retained);
+    let keep = body.len().min(per_response).min(remaining);
     let truncated = keep < body.len();
     body.truncate(keep);
     *retained += keep;
-    CapturedResponse {
-        url:                 meta.url,
-        status:              meta.status,
-        headers:             meta.headers,
-        request_headers:     meta.request_headers,
-        mime_type:           meta.mime_type,
-        resource_type:       meta.resource_type,
-        from_cache:          meta.from_cache,
+    Ok(CapturedResponse {
+        url: meta.url,
+        status: meta.status,
+        headers: meta.headers,
+        request_headers: meta.request_headers,
+        mime_type: meta.mime_type,
+        resource_type: meta.resource_type,
+        from_cache: meta.from_cache,
         from_service_worker: meta.from_service_worker,
-        body_state:          if truncated {
+        body_state: if truncated {
             ResponseBodyState::Truncated
         } else {
             ResponseBodyState::Available
         },
-        body_error:          None,
-        body:                Arc::from(body),
-    }
+        body_error: None,
+        body: Arc::from(body),
+        limits,
+        complete_bytes: Some(complete_bytes),
+    })
 }
 
 fn unavailable_response(meta: PendingResponse, error: String) -> CapturedResponse {
@@ -429,6 +478,8 @@ fn unavailable_response(meta: PendingResponse, error: String) -> CapturedRespons
         body_state:          ResponseBodyState::Unavailable,
         body_error:          Some(error),
         body:                Arc::from([]),
+        limits:              ResponseCaptureLimits::default(),
+        complete_bytes:      None,
     }
 }
 
@@ -498,6 +549,7 @@ fn flatten_headers(value: &serde_json::Value) -> Vec<(String, String)> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -522,8 +574,12 @@ mod tests {
             pending(),
             vec![1, 2, 3, 4],
             &mut retained,
-            ResponseCaptureLimits { max_response_bytes: 2, max_total_bytes: 8 },
-        );
+            ResponseCaptureLimits::new(
+                BrowserByteLimit::try_from(2_u64).expect("positive"),
+                BrowserByteLimit::try_from(8_u64).expect("positive"),
+            ),
+        )
+        .expect("limits originate from usize values");
         assert_eq!(response.body(), &[1, 2]);
         assert_eq!(response.body_state, ResponseBodyState::Truncated);
     }
@@ -552,7 +608,8 @@ mod tests {
         meta.request_headers = flattened;
         let mut retained = 0;
         let captured =
-            bounded_response(meta, vec![], &mut retained, ResponseCaptureLimits::default());
+            bounded_response(meta, vec![], &mut retained, ResponseCaptureLimits::default())
+                .expect("default limits are representable");
         assert!(
             captured
                 .request_headers
@@ -636,8 +693,12 @@ mod tests {
             pending(),
             vec![1, 2, 3, 4],
             &mut retained,
-            ResponseCaptureLimits { max_response_bytes: 8, max_total_bytes: 5 },
-        );
+            ResponseCaptureLimits::new(
+                BrowserByteLimit::try_from(8_u64).expect("positive"),
+                BrowserByteLimit::try_from(5_u64).expect("positive"),
+            ),
+        )
+        .expect("limits originate from usize values");
         assert_eq!(response.body(), &[1, 2]);
         assert_eq!(retained, 5);
     }

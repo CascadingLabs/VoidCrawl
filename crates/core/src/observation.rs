@@ -6,7 +6,9 @@
 
 use std::{
     collections::HashSet,
-    fmt, mem, str,
+    fmt, mem,
+    result::Result as StdResult,
+    str,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -31,7 +33,11 @@ use tokio::{
     time,
 };
 
-use crate::{Result, VoidCrawlError};
+use crate::{
+    BrowserBudgetScope, BrowserByteBudget, BrowserByteCount, BrowserByteDomain, BrowserByteLimit,
+    BrowserByteReport, BrowserByteReportError, BrowserByteSpec, BrowserLimitScope, Result,
+    VoidCrawlError,
+};
 
 /// Collectors and hard bounds for one observation scope.
 #[derive(Debug, Clone, Copy)]
@@ -62,6 +68,20 @@ impl Default for ObservationOptions {
 }
 
 impl ObservationOptions {
+    /// Set the diagnostic retention limit using the typed browser-byte API.
+    pub fn with_diagnostic_limit(
+        mut self,
+        limit: BrowserByteLimit,
+    ) -> StdResult<Self, crate::BrowserByteLimitError> {
+        self.max_diagnostic_bytes = limit.as_usize()?;
+        Ok(self)
+    }
+
+    /// Return the configured diagnostic retention limit in typed form.
+    pub fn diagnostic_limit(&self) -> StdResult<BrowserByteLimit, crate::BrowserByteLimitError> {
+        BrowserByteLimit::try_from(self.max_diagnostic_bytes)
+    }
+
     pub(crate) fn validate(self) -> Result<Self> {
         if !(self.collect_network || self.collect_console || self.collect_exceptions) {
             return Err(VoidCrawlError::InvalidInput {
@@ -145,6 +165,15 @@ impl RuntimeDiagnostic {
     pub fn text(&self) -> &ProtectedDiagnosticText {
         &self.text
     }
+
+    pub fn byte_report(&self) -> StdResult<BrowserByteReport, BrowserByteReportError> {
+        BrowserByteReport::from_known_extent(
+            BrowserByteDomain::RuntimeDiagnosticUtf8,
+            None,
+            BrowserByteCount::try_from_usize(self.complete_bytes)?,
+            BrowserByteCount::try_from_usize(self.retained_bytes)?,
+        )
+    }
 }
 
 /// One retained event in provider receipt order.
@@ -209,6 +238,9 @@ pub struct ObservationReport {
     pub diagnostics:               Vec<RuntimeDiagnostic>,
     pub diagnostic_bytes_retained: usize,
     pub diagnostic_bytes_dropped:  usize,
+    /// Configured aggregate diagnostic retention bound, retained independently
+    /// of how many bytes happened to be observed.
+    pub diagnostic_byte_limit:     BrowserByteLimit,
     pub accounting:                ObservationAccounting,
     pub cleanup_complete:          bool,
 }
@@ -323,6 +355,28 @@ impl ObservationScope {
         worker
             .await
             .map_err(|error| VoidCrawlError::Other(format!("observation worker failed: {error}")))
+    }
+}
+
+impl ObservationReport {
+    /// Canonical aggregate accounting for all runtime diagnostic bytes.
+    pub fn byte_report(&self) -> StdResult<BrowserByteReport, BrowserByteReportError> {
+        let spec = BrowserByteSpec::new(
+            BrowserByteDomain::RuntimeDiagnosticUtf8,
+            self.diagnostic_byte_limit,
+            BrowserLimitScope::RetentionAfterProviderMaterialization,
+            BrowserBudgetScope::CaptureAggregate,
+        );
+        BrowserByteReport::from_known_extent(
+            BrowserByteDomain::RuntimeDiagnosticUtf8,
+            Some(spec),
+            BrowserByteCount::try_from_usize(
+                self.diagnostic_bytes_retained
+                    .checked_add(self.diagnostic_bytes_dropped)
+                    .ok_or(crate::BrowserByteAccountingError::Overflow)?,
+            )?,
+            BrowserByteCount::try_from_usize(self.diagnostic_bytes_retained)?,
+        )
     }
 }
 
@@ -465,7 +519,8 @@ fn retain_signal(
     diagnostics: &mut Vec<RuntimeDiagnostic>,
     diagnostic_bytes_retained: &mut usize,
     diagnostic_bytes_dropped: &mut usize,
-    max_diagnostic_bytes: usize,
+    _max_diagnostic_bytes: usize,
+    diagnostic_budget: &mut BrowserByteBudget,
 ) -> RetainOutcome {
     let RawSignal::Event { kind, request, diagnostic } = signal else {
         return RetainOutcome::StreamClosed;
@@ -480,13 +535,23 @@ fn retain_signal(
             }
         }
     }
-    let sequence = u64::try_from(events.len()).unwrap_or(u64::MAX);
+    let Ok(sequence) = u64::try_from(events.len()) else {
+        return RetainOutcome::EventLimitReached;
+    };
     events.push(ObservationEvent { sequence, offset_micros, kind });
     if let Some(diagnostic) = diagnostic {
         let bytes = diagnostic.text.into_bytes();
         let complete_bytes = bytes.len();
-        let remaining = max_diagnostic_bytes.saturating_sub(*diagnostic_bytes_retained);
-        let retained_bytes = complete_bytes.min(remaining);
+        let Ok(complete_count) = u64::try_from(complete_bytes) else {
+            return RetainOutcome::EventLimitReached;
+        };
+        let Ok(admission) = diagnostic_budget.observe_chunk(BrowserByteCount::new(complete_count))
+        else {
+            return RetainOutcome::EventLimitReached;
+        };
+        let Ok(retained_bytes) = usize::try_from(admission.retain_prefix.get()) else {
+            return RetainOutcome::EventLimitReached;
+        };
         *diagnostic_bytes_retained = diagnostic_bytes_retained.saturating_add(retained_bytes);
         *diagnostic_bytes_dropped =
             diagnostic_bytes_dropped.saturating_add(complete_bytes.saturating_sub(retained_bytes));
@@ -520,6 +585,13 @@ async fn run_scope(
     let mut diagnostics = Vec::new();
     let mut diagnostic_bytes_retained = 0usize;
     let mut diagnostic_bytes_dropped = 0usize;
+    let diagnostic_spec = BrowserByteSpec::new(
+        BrowserByteDomain::RuntimeDiagnosticUtf8,
+        options.diagnostic_limit().unwrap_or(BrowserByteLimit::one()),
+        BrowserLimitScope::RetentionAfterProviderMaterialization,
+        BrowserBudgetScope::CaptureAggregate,
+    );
+    let mut diagnostic_budget = BrowserByteBudget::new(diagnostic_spec);
     let mut in_flight = HashSet::new();
 
     let mut termination = loop {
@@ -545,6 +617,7 @@ async fn run_scope(
                         &mut diagnostic_bytes_retained,
                         &mut diagnostic_bytes_dropped,
                         options.max_diagnostic_bytes,
+                        &mut diagnostic_budget,
                     ) {
                         RetainOutcome::Continue => {}
                         RetainOutcome::EventLimitReached => {
@@ -573,6 +646,7 @@ async fn run_scope(
             &mut diagnostic_bytes_retained,
             &mut diagnostic_bytes_dropped,
             options.max_diagnostic_bytes,
+            &mut diagnostic_budget,
         ) {
             RetainOutcome::Continue | RetainOutcome::StreamClosed => {}
             RetainOutcome::EventLimitReached => {
@@ -620,6 +694,7 @@ async fn run_scope(
         diagnostics,
         diagnostic_bytes_retained,
         diagnostic_bytes_dropped,
+        diagnostic_byte_limit: diagnostic_budget.spec().limit(),
         cleanup_complete: true,
     }
 }
@@ -803,6 +878,7 @@ mod tests {
             }],
             diagnostic_bytes_retained: 6,
             diagnostic_bytes_dropped:  0,
+            diagnostic_byte_limit:     BrowserByteLimit::one(),
             accounting:                ObservationAccounting {
                 events:             ObservationCountAccounting {
                     admitted: MeasuredCount::Known { value: 1 },

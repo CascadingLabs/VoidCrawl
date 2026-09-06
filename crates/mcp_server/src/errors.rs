@@ -21,6 +21,10 @@ pub fn map_err(err: VoidCrawlError) -> ErrorData {
     let summary = err.safe_summary();
     let message = summary.message;
     match err {
+        VoidCrawlError::InvalidInput { operation, reason } => ErrorData::invalid_params(
+            format!("{operation}: {reason}"),
+            Some(obj(summary_data(summary))),
+        ),
         VoidCrawlError::ElementNotFound(_)
         | VoidCrawlError::FrameNotFound(_)
         | VoidCrawlError::AmbiguousFrame(_)

@@ -21,11 +21,11 @@ use pyo3::{
 use pyo3_async_runtimes::tokio::future_into_py;
 use tokio::sync::Mutex;
 use void_crawl_core::{
-    BrowserTarget, DocumentEpoch, Encoding, FrameFormat, MaskSpec, Page, Recording,
-    RecordingHandle, RecordingOptions, ScrollTarget,
+    BrowserByteCount, BrowserByteDomain, BrowserByteReport, BrowserTarget, DocumentEpoch, Encoding,
+    FrameFormat, MaskSpec, Page, Recording, RecordingHandle, RecordingOptions, ScrollTarget,
 };
 
-use crate::{resolve_selector_args, resolve_viewport_args, to_py_err};
+use crate::{resolve_selector_args, resolve_viewport_args, snapshots::byte_report_dict, to_py_err};
 
 /// One captured frame.
 #[pyclass(name = "Frame", module = "voidcrawl._ext", frozen)]
@@ -51,6 +51,22 @@ impl PyFrame {
 
     fn __len__(&self) -> usize {
         self.data.len()
+    }
+
+    #[getter]
+    fn byte_report<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let bytes = BrowserByteCount::try_from_usize(self.data.len())
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        byte_report_dict(
+            py,
+            BrowserByteReport::from_known_extent(
+                BrowserByteDomain::RecordingFrame,
+                None,
+                bytes,
+                bytes,
+            )
+            .map_err(|error| PyValueError::new_err(error.to_string()))?,
+        )
     }
 
     fn __repr__(&self) -> String {

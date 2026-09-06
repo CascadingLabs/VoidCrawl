@@ -2,13 +2,17 @@
 
 use std::{
     fmt,
+    result::Result as StdResult,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::Serialize;
 
-use crate::{Bbox, BrowserTargetKind, DocumentScope, EffectiveViewport};
+use crate::{
+    Bbox, BrowserByteCount, BrowserByteDomain, BrowserByteReport, BrowserByteReportError,
+    BrowserTargetKind, DocumentScope, EffectiveViewport,
+};
 
 /// Layout viewport metrics in CSS pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -90,6 +94,16 @@ pub struct VisualSnapshot {
 impl VisualSnapshot {
     pub fn bytes(&self) -> &[u8] {
         &self.payload
+    }
+
+    /// Complete, unbounded accounting for the PNG payload.
+    pub fn byte_report(&self) -> StdResult<BrowserByteReport, BrowserByteReportError> {
+        BrowserByteReport::from_known_extent(
+            BrowserByteDomain::ScreenshotPng,
+            None,
+            BrowserByteCount::try_from_usize(self.retained_bytes)?,
+            BrowserByteCount::try_from_usize(self.retained_bytes)?,
+        )
     }
 }
 

@@ -130,6 +130,7 @@ use std::{
     fmt, fs,
     io::Cursor,
     path::{Path, PathBuf},
+    result::Result as StdResult,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -155,7 +156,7 @@ use tokio::{
 };
 
 use crate::{
-    DocumentEpoch,
+    BrowserByteCount, BrowserByteDomain, BrowserByteReport, BrowserByteReportError, DocumentEpoch,
     error::{Result, VoidCrawlError},
     page::{Bbox, Page},
     selector::{BrowserTarget, TargetResolution},
@@ -582,6 +583,18 @@ pub struct Frame {
     /// Encoded image bytes in the recording's [`FrameFormat`].
     #[serde(skip)]
     pub data:   Vec<u8>,
+}
+
+impl Frame {
+    /// Exact byte accounting for this retained encoded frame.
+    pub fn byte_report(&self) -> StdResult<BrowserByteReport, BrowserByteReportError> {
+        BrowserByteReport::from_known_extent(
+            BrowserByteDomain::RecordingFrame,
+            None,
+            BrowserByteCount::try_from_usize(self.data.len())?,
+            BrowserByteCount::try_from_usize(self.data.len())?,
+        )
+    }
 }
 
 impl fmt::Debug for Frame {

@@ -115,10 +115,11 @@ fn enabled_from(value: Option<&str>) -> bool {
     }
 }
 
-fn raw_access_denied_err(what: &str) -> VoidCrawlError {
-    VoidCrawlError::Other(format!(
-        "{what} exposes raw credential values and is disabled; set {ENABLE_ENV}=1 to enable"
-    ))
+fn raw_access_denied_err(what: &'static str) -> VoidCrawlError {
+    VoidCrawlError::InvalidInput {
+        operation: what,
+        reason:    "raw credential access is disabled; set VOIDCRAWL_ALLOW_CREDENTIAL_CAPTURE=1 to enable",
+    }
 }
 
 // ── Arm ──────────────────────────────────────────────────────────────────
@@ -179,7 +180,10 @@ pub async fn arm(
         return Err(map_err(raw_access_denied_err("include_sensitive_headers")));
     }
     if args.patterns.is_empty() {
-        return Err(map_err(VoidCrawlError::Other("at least one pattern is required".into())));
+        return Err(map_err(VoidCrawlError::InvalidInput {
+            operation: "network_capture_arm",
+            reason:    "at least one pattern is required",
+        }));
     }
 
     let session = server
@@ -203,14 +207,16 @@ pub async fn arm(
 
     let patterns = args.patterns.into_iter().map(|p| (p.name, p.url_glob)).collect::<Vec<_>>();
     let ceiling = Duration::from_secs(args.arm_ceiling_secs.unwrap_or(DEFAULT_ARM_CEILING_SECS));
-    let limits = ResponseCaptureLimits {
-        max_response_bytes: args
-            .max_response_bytes
-            .unwrap_or(void_crawl_core::DEFAULT_MAX_RESPONSE_BYTES),
-        max_total_bytes:    args
-            .max_total_bytes
-            .unwrap_or(void_crawl_core::DEFAULT_MAX_TOTAL_RESPONSE_BYTES),
-    };
+    let limits = ResponseCaptureLimits::new(
+        void_crawl_core::BrowserByteLimit::try_from(
+            args.max_response_bytes.unwrap_or(void_crawl_core::DEFAULT_MAX_RESPONSE_BYTES),
+        )
+        .map_err(|error| map_err(VoidCrawlError::Other(error.to_string())))?,
+        void_crawl_core::BrowserByteLimit::try_from(
+            args.max_total_bytes.unwrap_or(void_crawl_core::DEFAULT_MAX_TOTAL_RESPONSE_BYTES),
+        )
+        .map_err(|error| map_err(VoidCrawlError::Other(error.to_string())))?,
+    );
 
     let capture = {
         let page = session.page.lock().await;
@@ -262,6 +268,8 @@ pub struct CapturedResponseJson {
     /// `"available"`, `"truncated"`, or `"unavailable"`.
     pub body_state:          String,
     pub body_error:          Option<String>,
+    /// Canonical byte accounting for the response body.
+    pub byte_report:         serde_json::Value,
     /// Base64 body, present when `capture_body` was set and any bytes were
     /// retained — including a `truncated` body, whose retained prefix is
     /// returned rather than discarded. NOT credential-scanned.
@@ -311,6 +319,13 @@ fn to_json(
                 from_service_worker: resp.from_service_worker,
                 body_state: resp.body_state.as_str().to_string(),
                 body_error: resp.body_error.clone(),
+                byte_report: serde_json::to_value(resp.byte_report().unwrap_or_else(|_| {
+                    void_crawl_core::BrowserByteReport::unavailable(
+                        void_crawl_core::BrowserByteDomain::CdpDecodedBody,
+                        void_crawl_core::BrowserPayloadUnavailableReason::ProviderDidNotReport,
+                    )
+                }))
+                .unwrap_or(serde_json::Value::Null),
                 body_base64,
             };
             (name, json)
