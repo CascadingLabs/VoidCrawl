@@ -29,24 +29,32 @@ from pydantic import BaseModel, Field
 
 from voidcrawl._downloads import capture_download
 from voidcrawl._ext import (
+    AccessibilitySnapshot,
     AntibotChallenge,
     AntibotVerdict,
     BrowserClosedError,
     CaptchaDetected,
     CapturedResponse,
     ChromeProfileBusy,
+    ContextCleanupReport,
     DownloadCapture,
     DownloadOutcome,
     Frame,
     InterruptExpired,
     InterruptNotFound,
     InterruptTerminal,
+    IsolatedBrowserContext,
+    LayoutSnapshot,
     MaskReport,
+    NavigationCapture,
+    NavigationCaptureReport,
     NavigationError,
     NavigationTimeoutError,
+    ObservationScope,
     Page,
     PageResponse,
     PooledTab,
+    PoolReleaseReport,
     ProfileBusy,
     ProfileHandle,
     ProfileLeaseExpired,
@@ -54,11 +62,14 @@ from voidcrawl._ext import (
     RecordedRegion,
     Recording,
     RecordingHandle,
+    RenderedDomSnapshot,
+    ResponseCaptureReport,
     ResponseExpectation,
     ResponseTimeoutError,
     ScanReport,
     SessionInterrupted,
     TabInstrumentationState,
+    VisualSnapshot,
     VoidCrawlError,
     _AcquireContext,
     _PoolParamsContext,
@@ -86,8 +97,14 @@ from voidcrawl.schema import Attr, Schema, Text, safe_url, strip_tags
 from voidcrawl.viewport import Viewport, list_device_presets
 
 Selector = Text
+PoolReleaseStrategy = Literal[
+    "blank_document_and_reuse_shared_state",
+    "dispose_tab_after_reset_failure",
+    "dispose_tab_after_pool_closed",
+]
 
 __all__ = [
+    "AccessibilitySnapshot",
     "AntibotChallenge",
     "AntibotVerdict",
     "Attr",
@@ -98,6 +115,7 @@ __all__ = [
     "CaptchaDetected",
     "CapturedResponse",
     "ChromeProfileBusy",
+    "ContextCleanupReport",
     "DownloadCapture",
     "DownloadOutcome",
     "Frame",
@@ -106,15 +124,22 @@ __all__ = [
     "InterruptRef",
     "InterruptRequest",
     "InterruptTerminal",
+    "IsolatedBrowserContext",
     "JsTab",
+    "LayoutSnapshot",
     "ManagedProfileSnapshot",
     "ManagedProfileSplit",
     "MaskReport",
+    "NavigationCapture",
+    "NavigationCaptureReport",
     "NavigationError",
     "NavigationTimeoutError",
+    "ObservationScope",
     "Page",
     "PageResponse",
     "PoolConfig",
+    "PoolReleaseReport",
+    "PoolReleaseStrategy",
     "PooledTab",
     "ProfileBusy",
     "ProfileHandle",
@@ -124,6 +149,8 @@ __all__ = [
     "RecordedRegion",
     "Recording",
     "RecordingHandle",
+    "RenderedDomSnapshot",
+    "ResponseCaptureReport",
     "ResponseExpectation",
     "ResponseTimeoutError",
     "ScaleProfile",
@@ -136,6 +163,7 @@ __all__ = [
     "TabInstrumentationState",
     "Text",
     "Viewport",
+    "VisualSnapshot",
     "VoidCrawlError",
     "acquire_profile",
     "capture_download",
@@ -225,7 +253,11 @@ class BrowserConfig(BaseModel):
         proxy: Upstream HTTPS proxy URL, e.g. ``"http://proxy:8080"``.
         chrome_executable: Path to a custom Chrome/Chromium binary.
             When ``None``, the bundled Chromium discovery is used.
-        extra_args: Additional command-line flags forwarded to Chrome.
+        extra_args: Additional command-line flags forwarded to Chrome. Chrome's
+            GPU-process sandbox remains enabled by default. Add
+            ``"--disable-gpu-sandbox"`` only as a documented host-specific
+            graphics-driver workaround after confirming it is necessary:
+            Chromium warns that it reduces security and stability.
         user_data_dir: Persistent Chrome user data directory. Use this for
             same-profile anti-bot validation and long-lived local sessions.
         ws_url: Connect to an **already-running** Chrome instance via its
@@ -628,6 +660,22 @@ class BrowserSession:
                 step_delay=bc.step_delay,
             )
         return page
+
+    async def new_isolated_context(self) -> IsolatedBrowserContext:
+        """Create a disposable Chromium context with isolated browser state.
+
+        Dispose the returned handle to atomically remove its pages, cookies,
+        cache, storage, service workers, permissions, and context-scoped state.
+        """
+        if self._inner is None:
+            raise RuntimeError("BrowserSession not started — use async with")
+        return await self._inner.new_isolated_context()
+
+    async def state_binding(self) -> str:
+        """Return the mutable-state boundary used by ordinary session pages."""
+        if self._inner is None:
+            raise RuntimeError("BrowserSession not started — use async with")
+        return await self._inner.state_binding()
 
     async def new_page_in_window(self, url: str) -> Page:
         """Open a tab in its **own browser window** and navigate to *url*.

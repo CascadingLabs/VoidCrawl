@@ -31,7 +31,7 @@
 
 ## Requirements
 
-- **Rust** ≥ 1.86 (edition 2024)
+- **Rust** ≥ 1.98 (edition 2024)
 - **Python** ≥ 3.10
 - **Chrome/Chromium** installed on the system
 - **maturin** ≥ 1.7 (`cargo install maturin`)
@@ -80,6 +80,15 @@ async def main():
 
 asyncio.run(main())
 ```
+
+### GPU sandbox policy
+
+VoidCrawl keeps Chromium's GPU-process sandbox enabled by default, including
+when GPU acceleration uses ANGLE/Vulkan. If a specific host has a confirmed
+GPU-driver incompatibility, opt in explicitly with
+`BrowserConfig(extra_args=["--disable-gpu-sandbox"])` and document the host
+reason. Chromium warns that this switch reduces security and stability; it is
+not a general performance or compatibility setting.
 
 ## MCP server for Claude Code
 
@@ -158,7 +167,7 @@ uv run pytest tests/ -v
 
 ## Documentation
 
-
+- [VoidCrawl–Yosoi Browser Acquisition boundary](YOSOI_BROWSER_ACQUISITION.md)
 - [Examples](examples/)
 
 ## Community

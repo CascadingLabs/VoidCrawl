@@ -45,6 +45,7 @@ pub struct PendingDownload {
 pub struct PendingNetworkCapture {
     pub capture:                   ResponseCapture,
     pub include_sensitive_headers: bool,
+    pub include_raw_urls:          bool,
     pub capture_body:              bool,
 }
 

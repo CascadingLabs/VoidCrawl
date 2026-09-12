@@ -46,7 +46,7 @@ void_crawl/
 - `pyo3` 0.28 + `pyo3-async-runtimes` 0.28 — Python bridge
 - `thiserror` — error types
 - `reqwest` — HTTP (for WebSocket URL resolution)
-- Rust edition 2024 / MSRV 1.86
+- Rust edition 2024 / MSRV 1.98
 
 ## Pool architecture
 - Chrome is a long-lived daemon — never launch per-request
@@ -55,6 +55,12 @@ void_crawl/
 - Tab recycling: navigate to about:blank, never close+reopen
 - Hard recycle after TAB_MAX_USES (default 50)
 - Idle eviction after TAB_MAX_IDLE_SECS (default 60)
+
+## Async coordination
+- Do not use `sleep` as synchronization, readiness detection, retry backoff, or settlement polling.
+- Wait on explicit browser/CDP events, channels, notifications, or owned task completion instead.
+- A timeout may bound an event-driven wait, but elapsed time must not be the signal that ordinary progress became ready.
+- `scripts/check-event-driven-waits.py` scans production Rust and Python. A sleep exception requires an immediately preceding contiguous comment block containing `EVENT_DRIVEN_SLEEP_APPROVED:` with a substantive rationale; approvals require maintainer review and should be rare.
 
 ## PyO3 rules
 - Never use std::sync::Mutex — always tokio::sync::Mutex

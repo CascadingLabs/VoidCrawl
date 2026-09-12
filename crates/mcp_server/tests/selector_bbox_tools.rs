@@ -11,7 +11,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use rmcp::model::RawContent;
+use rmcp::{ErrorData, model::RawContent};
 use tokio::sync::Mutex;
 use void_crawl_core::BrowserSession;
 use voidcrawl_mcp::{
@@ -26,6 +26,11 @@ use voidcrawl_mcp::{
 };
 
 const SID: &str = "selector-bbox-session";
+
+fn error_code(error: &ErrorData) -> String {
+    let value = serde_json::to_value(error).expect("serialize MCP error");
+    value["data"]["code"].as_str().unwrap_or_default().to_string()
+}
 
 fn data_url(html: &str) -> String {
     let encoded = html
@@ -160,7 +165,8 @@ async fn session_screenshot_ambiguous_selector_fails_with_invalid_params() {
     .await
     .expect_err("ambiguous selector should error");
 
-    assert!(err.message.contains("visible matches"), "got: {}", err.message);
+    assert_eq!(err.message, "target selector was ambiguous");
+    assert_eq!(error_code(&err), "voidcrawl.target.selector_ambiguous");
 
     teardown(&server).await;
 }
@@ -180,7 +186,8 @@ async fn session_screenshot_no_match_selector_fails_with_invalid_params() {
     .await
     .expect_err("no match should error");
 
-    assert!(err.message.contains("no elements"), "got: {}", err.message);
+    assert_eq!(err.message, "target element was not visible");
+    assert_eq!(error_code(&err), "voidcrawl.target.element_not_visible");
 
     teardown(&server).await;
 }
@@ -200,7 +207,8 @@ async fn session_screenshot_jsonld_selector_fails_as_non_visual() {
     .await
     .expect_err("jsonld should error");
 
-    assert!(err.message.contains("non-visual"), "got: {}", err.message);
+    assert_eq!(err.message, "target kind does not support visual geometry");
+    assert_eq!(error_code(&err), "voidcrawl.target.visual_geometry_unsupported");
 
     teardown(&server).await;
 }

@@ -212,7 +212,7 @@ impl InterruptRegistry {
 mod tests {
     use std::time::Duration;
 
-    use tokio::time::sleep;
+    use tokio::time::{Instant, sleep_until};
 
     use super::{InterruptRegistry, InterruptRequest, InterruptState};
     use crate::VoidCrawlError;
@@ -251,7 +251,7 @@ mod tests {
                 },
             )
             .await?;
-        sleep(Duration::from_millis(5)).await;
+        sleep_until(Instant::now() + Duration::from_millis(5)).await;
         let expired = registry.status(&info.interrupt_id).await?;
         assert_eq!(expired.state, InterruptState::Expired);
         assert!(matches!(

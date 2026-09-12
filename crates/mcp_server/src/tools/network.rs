@@ -25,13 +25,10 @@
 //!
 //! # Known limits
 //!
-//! * **URLs are returned raw and unredacted.** A presigned URL or a
-//!   `?access_token=` query parameter is a credential in the URL, and this tool
-//!   does not sanitize it — replay needs the real URL, so redacting it would
-//!   defeat the tool's purpose. Treat `url` as potentially secret.
-//! * **Bodies are not scanned.** With `capture_body`, an endpoint that echoes
-//!   auth context into its JSON (whoami/auth-check responses often do) returns
-//!   it verbatim in `body_base64`.
+//! * URLs are safe by default: query strings, fragments, and URL userinfo are
+//!   removed. Raw URLs require both a caller opt-in and the operator gate.
+//! * Bodies are absent by default. `capture_body` returns them verbatim (not
+//!   credential-scanned) and therefore requires the same two-part gate.
 //! * **Cookies are never captured from the wire.** Neither the request-side
 //!   `Cookie` nor the response-side `Set-Cookie` appears: Chrome reports both
 //!   only via its `*ExtraInfo` events, and subscribing to those was measured as
@@ -44,7 +41,6 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use rmcp::ErrorData;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::time;
 use void_crawl_core::{
     CapturedResponse, LeaseScope, ResponseBodyState, ResponseCaptureLimits, VoidCrawlError,
     fork_scoped,
@@ -115,10 +111,11 @@ fn enabled_from(value: Option<&str>) -> bool {
     }
 }
 
-fn raw_access_denied_err(what: &str) -> VoidCrawlError {
-    VoidCrawlError::Other(format!(
-        "{what} exposes raw credential values and is disabled; set {ENABLE_ENV}=1 to enable"
-    ))
+fn raw_access_denied_err(what: &'static str) -> VoidCrawlError {
+    VoidCrawlError::InvalidInput {
+        operation: what,
+        reason:    "raw credential access is disabled; set VOIDCRAWL_ALLOW_CREDENTIAL_CAPTURE=1 to enable",
+    }
 }
 
 // ── Arm ──────────────────────────────────────────────────────────────────
@@ -143,11 +140,15 @@ pub struct NetworkCaptureArmArgs {
     /// pass `timeout_secs` to `network_capture_wait` for that.
     #[serde(default)]
     pub arm_ceiling_secs:          Option<u64>,
-    /// Also capture and return response bodies (default false — headers and
-    /// status only), subject to `max_response_bytes` / `max_total_bytes`.
-    /// Bodies are returned verbatim and are NOT credential-scanned.
+    /// Also capture and return response bodies. Raw bodies require the
+    /// operator to set `VOIDCRAWL_ALLOW_CREDENTIAL_CAPTURE=1`.
     #[serde(default)]
     pub capture_body:              bool,
+    /// Return full URLs including query strings. By default `url` is safe for
+    /// transcripts (query, fragment, and userinfo removed). Raw URLs require
+    /// the operator credential-capture gate as well as this caller opt-in.
+    #[serde(default)]
+    pub include_raw_urls:          bool,
     /// Max bytes retained for one response body (default 2 MiB).
     #[serde(default)]
     pub max_response_bytes:        Option<usize>,
@@ -178,8 +179,17 @@ pub async fn arm(
     if args.include_sensitive_headers && !raw_access_enabled() {
         return Err(map_err(raw_access_denied_err("include_sensitive_headers")));
     }
+    if args.include_raw_urls && !raw_access_enabled() {
+        return Err(map_err(raw_access_denied_err("include_raw_urls")));
+    }
+    if args.capture_body && !raw_access_enabled() {
+        return Err(map_err(raw_access_denied_err("capture_body")));
+    }
     if args.patterns.is_empty() {
-        return Err(map_err(VoidCrawlError::Other("at least one pattern is required".into())));
+        return Err(map_err(VoidCrawlError::InvalidInput {
+            operation: "network_capture_arm",
+            reason:    "at least one pattern is required",
+        }));
     }
 
     let session = server
@@ -203,14 +213,16 @@ pub async fn arm(
 
     let patterns = args.patterns.into_iter().map(|p| (p.name, p.url_glob)).collect::<Vec<_>>();
     let ceiling = Duration::from_secs(args.arm_ceiling_secs.unwrap_or(DEFAULT_ARM_CEILING_SECS));
-    let limits = ResponseCaptureLimits {
-        max_response_bytes: args
-            .max_response_bytes
-            .unwrap_or(void_crawl_core::DEFAULT_MAX_RESPONSE_BYTES),
-        max_total_bytes:    args
-            .max_total_bytes
-            .unwrap_or(void_crawl_core::DEFAULT_MAX_TOTAL_RESPONSE_BYTES),
-    };
+    let limits = ResponseCaptureLimits::new(
+        void_crawl_core::BrowserByteLimit::try_from(
+            args.max_response_bytes.unwrap_or(void_crawl_core::DEFAULT_MAX_RESPONSE_BYTES),
+        )
+        .map_err(|error| map_err(VoidCrawlError::Other(error.to_string())))?,
+        void_crawl_core::BrowserByteLimit::try_from(
+            args.max_total_bytes.unwrap_or(void_crawl_core::DEFAULT_MAX_TOTAL_RESPONSE_BYTES),
+        )
+        .map_err(|error| map_err(VoidCrawlError::Other(error.to_string())))?,
+    );
 
     let capture = {
         let page = session.page.lock().await;
@@ -220,6 +232,7 @@ pub async fn arm(
     *slot = Some(PendingNetworkCapture {
         capture,
         include_sensitive_headers: args.include_sensitive_headers,
+        include_raw_urls: args.include_raw_urls,
         capture_body: args.capture_body,
     });
 
@@ -245,8 +258,8 @@ pub struct NetworkCaptureWaitArgs {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct CapturedResponseJson {
-    /// Returned RAW and unredacted — may itself embed a credential (presigned
-    /// URL, `?access_token=`). Replay needs the real URL.
+    /// Safe URL by default (query, fragment, and userinfo removed). Raw only
+    /// when explicitly requested under the operator credential-capture gate.
     pub url:                 String,
     pub status:              u16,
     /// Headers the browser SENT. This is where `Authorization` / `Cookie`
@@ -262,6 +275,8 @@ pub struct CapturedResponseJson {
     /// `"available"`, `"truncated"`, or `"unavailable"`.
     pub body_state:          String,
     pub body_error:          Option<String>,
+    /// Canonical byte accounting for the response body.
+    pub byte_report:         serde_json::Value,
     /// Base64 body, present when `capture_body` was set and any bytes were
     /// retained — including a `truncated` body, whose retained prefix is
     /// returned rather than discarded. NOT credential-scanned.
@@ -270,7 +285,12 @@ pub struct CapturedResponseJson {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct NetworkCaptureWaitResult {
-    pub captures: HashMap<String, CapturedResponseJson>,
+    /// Compatibility map of captures, including factual partial captures.
+    pub captures:        HashMap<String, CapturedResponseJson>,
+    /// `complete`, `deadline_reached`, `cancelled`, or `provider_disconnected`.
+    pub termination:     String,
+    /// Shared aggregate body-budget accounting for the capture.
+    pub aggregate_bytes: serde_json::Value,
 }
 
 fn redact_headers(headers: &[(String, String)], include_sensitive: bool) -> Vec<(String, String)> {
@@ -286,9 +306,31 @@ fn redact_headers(headers: &[(String, String)], include_sensitive: bool) -> Vec<
         .collect()
 }
 
+fn safe_url(raw: &str) -> String {
+    let without_suffix = raw.split(['?', '#']).next().unwrap_or(raw);
+    let Some(scheme_end) = without_suffix.find("://") else {
+        return without_suffix.to_string();
+    };
+    let authority_start = scheme_end + 3;
+    let authority_end = without_suffix[authority_start..]
+        .find('/')
+        .map_or(without_suffix.len(), |offset| authority_start + offset);
+    let authority = &without_suffix[authority_start..authority_end];
+    match authority.rfind('@') {
+        Some(at) => format!(
+            "{}{}{}",
+            &without_suffix[..authority_start],
+            &authority[at + 1..],
+            &without_suffix[authority_end..]
+        ),
+        None => without_suffix.to_string(),
+    }
+}
+
 fn to_json(
     name_to_response: HashMap<String, CapturedResponse>,
     include_sensitive_headers: bool,
+    include_raw_urls: bool,
     capture_body: bool,
 ) -> HashMap<String, CapturedResponseJson> {
     name_to_response
@@ -301,7 +343,7 @@ fn to_json(
                 && !resp.body().is_empty())
             .then(|| BASE64.encode(resp.body()));
             let json = CapturedResponseJson {
-                url: resp.url.clone(),
+                url: if include_raw_urls { resp.url.clone() } else { safe_url(&resp.url) },
                 status: resp.status,
                 request_headers: redact_headers(&resp.request_headers, include_sensitive_headers),
                 headers: redact_headers(&resp.headers, include_sensitive_headers),
@@ -310,7 +352,17 @@ fn to_json(
                 from_cache: resp.from_cache,
                 from_service_worker: resp.from_service_worker,
                 body_state: resp.body_state.as_str().to_string(),
-                body_error: resp.body_error.clone(),
+                body_error: resp
+                    .body_error
+                    .as_ref()
+                    .map(|_| "response body unavailable".to_string()),
+                byte_report: serde_json::to_value(resp.byte_report().unwrap_or_else(|_| {
+                    void_crawl_core::BrowserByteReport::unavailable(
+                        void_crawl_core::BrowserByteDomain::CdpDecodedBody,
+                        void_crawl_core::BrowserPayloadUnavailableReason::ProviderDidNotReport,
+                    )
+                }))
+                .unwrap_or(serde_json::Value::Null),
                 body_base64,
             };
             (name, json)
@@ -335,23 +387,35 @@ pub async fn wait(
             "no armed network capture for this session; call network_capture_arm first".into(),
         ))
     })?;
-    let PendingNetworkCapture { capture, include_sensitive_headers, capture_body } = pending;
+    let PendingNetworkCapture {
+        capture,
+        include_sensitive_headers,
+        include_raw_urls,
+        capture_body,
+    } = pending;
 
     let budget = Duration::from_secs(args.timeout_secs.unwrap_or(DEFAULT_WAIT_SECS));
-    // Enforce the caller's budget here, from now — not from when `arm` ran.
-    // Dropping the capture on timeout aborts its worker.
-    let result = match time::timeout(budget, capture.wait()).await {
-        Ok(inner) => inner.map_err(map_err)?,
-        Err(_) => {
-            return Err(map_err(VoidCrawlError::Timeout(format!(
-                "no matching responses observed within {}s of network_capture_wait; the armed \
-                 patterns may not match the requests the page actually made",
-                budget.as_secs()
-            ))));
+    // The core keeps worker ownership through this caller budget and returns a
+    // factual partial deadline report instead of losing captures to an outer timeout.
+    let report = capture.wait_report_for(budget).await.map_err(map_err)?;
+    let termination = match report.termination {
+        void_crawl_core::ResponseCaptureTermination::Complete => "complete",
+        void_crawl_core::ResponseCaptureTermination::DeadlineReached => "deadline_reached",
+        void_crawl_core::ResponseCaptureTermination::Cancelled => "cancelled",
+        void_crawl_core::ResponseCaptureTermination::ProviderDisconnected => {
+            "provider_disconnected"
         }
     };
     Ok(NetworkCaptureWaitResult {
-        captures: to_json(result, include_sensitive_headers, capture_body),
+        captures:        to_json(
+            report.responses,
+            include_sensitive_headers,
+            include_raw_urls,
+            capture_body,
+        ),
+        termination:     termination.to_string(),
+        aggregate_bytes: serde_json::to_value(report.aggregate_bytes)
+            .unwrap_or(serde_json::Value::Null),
     })
 }
 
@@ -487,6 +551,16 @@ mod tests {
     fn opting_in_returns_raw_values() {
         let headers = vec![("authorization".to_string(), "Bearer tok".to_string())];
         assert_eq!(redact_headers(&headers, true)[0].1, "Bearer tok");
+    }
+
+    #[test]
+    fn safe_urls_strip_queries_fragments_and_userinfo() {
+        assert_eq!(
+            safe_url("https://user:pass@example.test/api?q=secret#fragment"),
+            "https://example.test/api"
+        );
+        assert_eq!(safe_url("https://example.test/?token=x"), "https://example.test/");
+        assert_eq!(safe_url("about:blank?secret"), "about:blank");
     }
 
     #[test]

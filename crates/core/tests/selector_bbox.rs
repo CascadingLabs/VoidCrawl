@@ -1,7 +1,7 @@
 //! Integration tests for selector-backed screenshot bbox resolution
-//! (`Page::resolve_selector`, `ScreenshotOptions::selector`) — CAS-252.
+//! (`Page::resolve_target`, `ScreenshotOptions::selector`) — CAS-252.
 //!
-//! Covers all 8 Yosoi `SelectorEntry` kinds (css, xpath, regex, jsonld,
+//! Covers all 8 VoidCrawl `BrowserTarget` kinds (css, xpath, regex, jsonld,
 //! attr, global_id, role, visual), ambiguous/hidden/zero-area/out-of-range
 //! edge cases, and one end-to-end `screenshot(selector: ...)` crop.
 //!
@@ -11,8 +11,8 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use void_crawl_core::{
-    BrowserSession, Page, ScreenshotOptions, ScreenshotOutput, SelectorEntry, SelectorKind,
-    SelectorResolution, VoidCrawlError,
+    BrowserSession, BrowserTarget, BrowserTargetKind, Page, ScreenshotOptions, ScreenshotOutput,
+    TargetResolution, VoidCrawlError,
 };
 
 async fn headless_session() -> BrowserSession {
@@ -46,8 +46,8 @@ fn png_dimensions(bytes: &[u8]) -> (u32, u32) {
     (width, height)
 }
 
-fn entry(kind: SelectorKind, value: &str) -> SelectorEntry {
-    SelectorEntry {
+fn entry(kind: BrowserTargetKind, value: &str) -> BrowserTarget {
+    BrowserTarget {
         kind,
         value: value.to_string(),
         regex: None,
@@ -104,9 +104,9 @@ async fn css_selector_resolves_unique_element_bbox() {
     let page = page_with(FIXTURE, &session).await;
 
     let resolution =
-        page.resolve_selector(&entry(SelectorKind::Css, "h1")).await.expect("resolve ok");
+        page.resolve_target(&entry(BrowserTargetKind::Css, "h1")).await.expect("resolve ok");
     match resolution {
-        SelectorResolution::Resolved { bbox } => {
+        TargetResolution::Resolved { bbox } => {
             assert_eq!((bbox.x, bbox.y), (10, 10));
             assert_eq!((bbox.width, bbox.height), (200, 30));
         }
@@ -123,9 +123,9 @@ async fn css_selector_multiple_matches_without_nth_is_ambiguous() {
     let page = page_with(FIXTURE, &session).await;
 
     let resolution =
-        page.resolve_selector(&entry(SelectorKind::Css, ".dup")).await.expect("resolve ok");
+        page.resolve_target(&entry(BrowserTargetKind::Css, ".dup")).await.expect("resolve ok");
     match resolution {
-        SelectorResolution::Ambiguous { candidates, .. } => assert_eq!(candidates, 2),
+        TargetResolution::Ambiguous { candidates, .. } => assert_eq!(candidates, 2),
         other => panic!("expected Ambiguous, got {other:?}"),
     }
 
@@ -138,11 +138,11 @@ async fn css_selector_with_nth_disambiguates() {
     let session = headless_session().await;
     let page = page_with(FIXTURE, &session).await;
 
-    let mut sel = entry(SelectorKind::Css, ".dup");
+    let mut sel = entry(BrowserTargetKind::Css, ".dup");
     sel.nth = Some(1);
-    let resolution = page.resolve_selector(&sel).await.expect("resolve ok");
+    let resolution = page.resolve_target(&sel).await.expect("resolve ok");
     match resolution {
-        SelectorResolution::Resolved { bbox } => assert_eq!((bbox.x, bbox.y), (300, 60)),
+        TargetResolution::Resolved { bbox } => assert_eq!((bbox.x, bbox.y), (300, 60)),
         other => panic!("expected Resolved, got {other:?}"),
     }
 
@@ -156,9 +156,9 @@ async fn css_selector_no_match_is_empty() {
     let page = page_with(FIXTURE, &session).await;
 
     let resolution =
-        page.resolve_selector(&entry(SelectorKind::Css, ".nope")).await.expect("resolve ok");
+        page.resolve_target(&entry(BrowserTargetKind::Css, ".nope")).await.expect("resolve ok");
     match resolution {
-        SelectorResolution::Empty { reason } => assert!(reason.contains("no elements")),
+        TargetResolution::Empty { reason } => assert!(reason.contains("no elements")),
         other => panic!("expected Empty, got {other:?}"),
     }
 
@@ -174,9 +174,9 @@ async fn xpath_selector_resolves_element_bbox() {
     let page = page_with(FIXTURE, &session).await;
 
     let resolution =
-        page.resolve_selector(&entry(SelectorKind::Xpath, "//h1")).await.expect("resolve ok");
+        page.resolve_target(&entry(BrowserTargetKind::Xpath, "//h1")).await.expect("resolve ok");
     match resolution {
-        SelectorResolution::Resolved { bbox } => assert_eq!((bbox.x, bbox.y), (10, 10)),
+        TargetResolution::Resolved { bbox } => assert_eq!((bbox.x, bbox.y), (10, 10)),
         other => panic!("expected Resolved, got {other:?}"),
     }
 
@@ -191,11 +191,11 @@ async fn attr_selector_resolves_via_the_css_value_ignoring_name_in_the_query() {
     let session = headless_session().await;
     let page = page_with(FIXTURE, &session).await;
 
-    let mut sel = entry(SelectorKind::Attr, "time");
+    let mut sel = entry(BrowserTargetKind::Attr, "time");
     sel.name = Some("datetime".into());
-    let resolution = page.resolve_selector(&sel).await.expect("resolve ok");
+    let resolution = page.resolve_target(&sel).await.expect("resolve ok");
     match resolution {
-        SelectorResolution::Resolved { bbox } => assert_eq!((bbox.x, bbox.y), (10, 60)),
+        TargetResolution::Resolved { bbox } => assert_eq!((bbox.x, bbox.y), (10, 60)),
         other => panic!("expected Resolved, got {other:?}"),
     }
 
@@ -211,19 +211,19 @@ async fn global_id_selector_filters_by_shared_id_prefix() {
     let page = page_with(FIXTURE, &session).await;
 
     // Without a prefix filter, both score_* rows match -> Ambiguous.
-    let unfiltered = entry(SelectorKind::GlobalId, "tr");
-    match page.resolve_selector(&unfiltered).await.expect("resolve ok") {
-        SelectorResolution::Ambiguous { candidates, .. } => assert_eq!(candidates, 2),
+    let unfiltered = entry(BrowserTargetKind::GlobalId, "tr");
+    match page.resolve_target(&unfiltered).await.expect("resolve ok") {
+        TargetResolution::Ambiguous { candidates, .. } => assert_eq!(candidates, 2),
         other => panic!("expected Ambiguous, got {other:?}"),
     }
 
     // nth picks the second row deterministically (prefix filter is a no-op
     // here since both ids share the same "score_" prefix).
-    let mut nth_sel = entry(SelectorKind::GlobalId, "tr");
+    let mut nth_sel = entry(BrowserTargetKind::GlobalId, "tr");
     nth_sel.name = Some("score_".into());
     nth_sel.nth = Some(1);
-    match page.resolve_selector(&nth_sel).await.expect("resolve ok") {
-        SelectorResolution::Resolved { bbox } => assert_eq!((bbox.x, bbox.y), (10, 130)),
+    match page.resolve_target(&nth_sel).await.expect("resolve ok") {
+        TargetResolution::Resolved { bbox } => assert_eq!((bbox.x, bbox.y), (10, 130)),
         other => panic!("expected Resolved, got {other:?}"),
     }
 
@@ -238,11 +238,11 @@ async fn role_selector_resolves_via_ax_tree() {
     let session = headless_session().await;
     let page = page_with(FIXTURE, &session).await;
 
-    let mut sel = entry(SelectorKind::Role, "button");
+    let mut sel = entry(BrowserTargetKind::Role, "button");
     sel.name = Some("Save Document".into());
-    let resolution = page.resolve_selector(&sel).await.expect("resolve ok");
+    let resolution = page.resolve_target(&sel).await.expect("resolve ok");
     match resolution {
-        SelectorResolution::Resolved { bbox } => {
+        TargetResolution::Resolved { bbox } => {
             assert_eq!((bbox.x, bbox.y), (10, 160));
             assert_eq!((bbox.width, bbox.height), (120, 40));
         }
@@ -258,10 +258,10 @@ async fn role_selector_no_match_is_empty() {
     let session = headless_session().await;
     let page = page_with(FIXTURE, &session).await;
 
-    let mut sel = entry(SelectorKind::Role, "button");
+    let mut sel = entry(BrowserTargetKind::Role, "button");
     sel.name = Some("Nonexistent Button".into());
-    match page.resolve_selector(&sel).await.expect("resolve ok") {
-        SelectorResolution::Empty { .. } => {}
+    match page.resolve_target(&sel).await.expect("resolve ok") {
+        TargetResolution::Empty { .. } => {}
         other => panic!("expected Empty, got {other:?}"),
     }
 
@@ -276,11 +276,11 @@ async fn visual_selector_resolves_to_exact_1x1_box() {
     let session = headless_session().await;
     let page = page_with(FIXTURE, &session).await;
 
-    let mut sel = entry(SelectorKind::Visual, "");
+    let mut sel = entry(BrowserTargetKind::Visual, "");
     sel.x = Some(50.0);
     sel.y = Some(75.0);
-    match page.resolve_selector(&sel).await.expect("resolve ok") {
-        SelectorResolution::Resolved { bbox } => {
+    match page.resolve_target(&sel).await.expect("resolve ok") {
+        TargetResolution::Resolved { bbox } => {
             assert_eq!((bbox.x, bbox.y), (50, 75));
             assert_eq!((bbox.width, bbox.height), (1, 1));
         }
@@ -292,13 +292,16 @@ async fn visual_selector_resolves_to_exact_1x1_box() {
 }
 
 #[tokio::test]
-async fn visual_selector_missing_coords_is_empty() {
+async fn visual_selector_missing_coords_is_invalid_input() {
     let session = headless_session().await;
     let page = page_with(FIXTURE, &session).await;
 
-    match page.resolve_selector(&entry(SelectorKind::Visual, "")).await.expect("resolve ok") {
-        SelectorResolution::Empty { reason } => assert!(reason.contains("requires both x and y")),
-        other => panic!("expected Empty, got {other:?}"),
+    match page.resolve_target(&entry(BrowserTargetKind::Visual, "")).await {
+        Err(VoidCrawlError::InvalidInput { operation, reason }) => {
+            assert_eq!(operation, "browser_target");
+            assert_eq!(reason, "visual target requires both x and y coordinates");
+        }
+        other => panic!("expected InvalidInput, got {other:?}"),
     }
 
     page.close().await.ok();
@@ -310,11 +313,11 @@ async fn visual_selector_out_of_viewport_is_empty() {
     let session = headless_session().await;
     let page = page_with(FIXTURE, &session).await;
 
-    let mut sel = entry(SelectorKind::Visual, "");
+    let mut sel = entry(BrowserTargetKind::Visual, "");
     sel.x = Some(999_999.0);
     sel.y = Some(10.0);
-    match page.resolve_selector(&sel).await.expect("resolve ok") {
-        SelectorResolution::Empty { reason } => assert!(reason.contains("outside")),
+    match page.resolve_target(&sel).await.expect("resolve ok") {
+        TargetResolution::Empty { reason } => assert!(reason.contains("outside")),
         other => panic!("expected Empty, got {other:?}"),
     }
 
@@ -329,8 +332,12 @@ async fn jsonld_selector_is_always_empty() {
     let session = headless_session().await;
     let page = page_with(FIXTURE, &session).await;
 
-    match page.resolve_selector(&entry(SelectorKind::Jsonld, "$.name")).await.expect("resolve ok") {
-        SelectorResolution::Empty { reason } => assert!(reason.contains("non-visual")),
+    match page
+        .resolve_target(&entry(BrowserTargetKind::Jsonld, "$.name"))
+        .await
+        .expect("resolve ok")
+    {
+        TargetResolution::Empty { reason } => assert!(reason.contains("non-visual")),
         other => panic!("expected Empty, got {other:?}"),
     }
 
@@ -343,8 +350,9 @@ async fn regex_selector_is_always_empty() {
     let session = headless_session().await;
     let page = page_with(FIXTURE, &session).await;
 
-    match page.resolve_selector(&entry(SelectorKind::Regex, "Ada.*Lovelace")).await.expect("ok") {
-        SelectorResolution::Empty { reason } => assert!(reason.contains("raw HTML")),
+    match page.resolve_target(&entry(BrowserTargetKind::Regex, "Ada.*Lovelace")).await.expect("ok")
+    {
+        TargetResolution::Empty { reason } => assert!(reason.contains("raw HTML")),
         other => panic!("expected Empty, got {other:?}"),
     }
 
@@ -359,8 +367,8 @@ async fn hidden_element_is_empty_not_resolved() {
     let session = headless_session().await;
     let page = page_with(FIXTURE, &session).await;
 
-    match page.resolve_selector(&entry(SelectorKind::Css, ".hidden-target")).await.expect("ok") {
-        SelectorResolution::Empty { reason } => assert!(reason.contains("none are visible")),
+    match page.resolve_target(&entry(BrowserTargetKind::Css, ".hidden-target")).await.expect("ok") {
+        TargetResolution::Empty { reason } => assert!(reason.contains("none are visible")),
         other => panic!("expected Empty, got {other:?}"),
     }
 
@@ -373,8 +381,12 @@ async fn zero_area_element_is_empty_not_resolved() {
     let session = headless_session().await;
     let page = page_with(FIXTURE, &session).await;
 
-    match page.resolve_selector(&entry(SelectorKind::Css, ".zero-area-target")).await.expect("ok") {
-        SelectorResolution::Empty { reason } => assert!(reason.contains("none are visible")),
+    match page
+        .resolve_target(&entry(BrowserTargetKind::Css, ".zero-area-target"))
+        .await
+        .expect("ok")
+    {
+        TargetResolution::Empty { reason } => assert!(reason.contains("none are visible")),
         other => panic!("expected Empty, got {other:?}"),
     }
 
@@ -390,7 +402,7 @@ async fn screenshot_selector_crops_the_resolved_element() {
     let page = page_with(FIXTURE, &session).await;
 
     let output = page
-        .screenshot(ScreenshotOptions::default().with_selector(entry(SelectorKind::Css, "h1")))
+        .screenshot(ScreenshotOptions::default().with_selector(entry(BrowserTargetKind::Css, "h1")))
         .await
         .expect("screenshot ok");
     let ScreenshotOutput::Bytes(bytes) = output else { panic!("expected bytes") };
@@ -406,7 +418,9 @@ async fn screenshot_selector_empty_becomes_element_not_visible_error() {
     let page = page_with(FIXTURE, &session).await;
 
     let err = page
-        .screenshot(ScreenshotOptions::default().with_selector(entry(SelectorKind::Css, ".nope")))
+        .screenshot(
+            ScreenshotOptions::default().with_selector(entry(BrowserTargetKind::Css, ".nope")),
+        )
         .await
         .expect_err("should error");
     assert!(
@@ -424,7 +438,9 @@ async fn screenshot_selector_ambiguous_becomes_ambiguous_selector_error() {
     let page = page_with(FIXTURE, &session).await;
 
     let err = page
-        .screenshot(ScreenshotOptions::default().with_selector(entry(SelectorKind::Css, ".dup")))
+        .screenshot(
+            ScreenshotOptions::default().with_selector(entry(BrowserTargetKind::Css, ".dup")),
+        )
         .await
         .expect_err("should error");
     assert!(
@@ -443,7 +459,7 @@ async fn screenshot_bbox_and_selector_together_is_rejected() {
 
     let opts = ScreenshotOptions::default()
         .with_bbox(void_crawl_core::Bbox { x: 0, y: 0, width: 10, height: 10 })
-        .with_selector(entry(SelectorKind::Css, "h1"));
+        .with_selector(entry(BrowserTargetKind::Css, "h1"));
     let err = page.screenshot(opts).await.expect_err("should error");
     assert!(err.to_string().contains("mutually exclusive"), "got: {err}");
 

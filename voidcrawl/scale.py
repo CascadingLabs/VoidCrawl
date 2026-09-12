@@ -492,7 +492,6 @@ def generate_supervisord_conf(report: ScaleReport, base_port: int | None = None)
         " --enable-gpu"
         " --ignore-gpu-blocklist"
         " --use-angle=vulkan"
-        " --disable-gpu-sandbox"
         " --disable-dev-shm-usage"
         " --disable-breakpad"
         " --disable-session-crashed-bubble"

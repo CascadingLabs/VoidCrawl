@@ -11,11 +11,11 @@ from __future__ import annotations
 import asyncio
 import shutil
 import urllib.parse
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from voidcrawl import BrowserConfig, BrowserSession, Recording
+from voidcrawl import BrowserConfig, BrowserSession, Recording, VoidCrawlError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -61,6 +61,19 @@ class TestRecording:
             assert rec.regions[0].bbox is None
             assert rec.frames_captured > 1
             assert rec.effective_fps() <= 10.5
+            assert rec.started_at_unix_ms is not None
+            assert rec.document_epoch is not None
+            assert rec.complete is True
+            assert rec.frame_size_pixels is not None
+            assert rec.capture_viewport_css is not None
+            assert rec.frames_dropped == (
+                rec.frames_dropped_by_rate
+                + rec.frames_dropped_by_limit
+                + rec.frame_decode_failures
+            )
+            assert rec.byte_report["accounting"]["retained"] > 0
+            assert rec.regions[0].byte_report["accounting"]["retained"] > 0
+            assert rec.regions[0].output_byte_reports == []
 
             frames = rec.regions[0].frames
             assert len(frames) == rec.frames_captured
@@ -162,11 +175,15 @@ class TestRecording:
             await page.goto(ANIMATED_URL)
             loop = asyncio.get_running_loop()
             started = loop.time()
-            with pytest.raises(RuntimeError, match=r"no visible target|not visible"):
+            with pytest.raises(
+                VoidCrawlError, match=r"no visible target|not visible"
+            ) as raised:
                 await page.record(
                     duration_secs=30,
                     selectors=[{"type": "css", "value": "#nope"}],
                 )
+            assert raised.value.code == "voidcrawl.target.element_not_visible"
+            assert raised.value.category == "unavailable"
             # Must fail up front, not after burning the full duration.
             assert loop.time() - started < 10
 
@@ -193,18 +210,21 @@ class TestRecording:
         ):
             await page.goto(ANIMATED_URL)
             rec = None
-            failure = None
+            failure: RuntimeError | None = None
             try:
                 rec = await page.record(
                     duration_secs=1, output_dir=str(tmp_path), encode=["gif"]
                 )
             except RuntimeError as exc:
-                failure = str(exc)
+                failure = exc
 
             if failure is not None:
-                # Built without the feature: the error must name it, so the
-                # caller knows what to enable rather than guessing.
-                assert "encode-gif" in failure
+                # Provider diagnostics stay local; consumers dispatch on the
+                # stable typed code rather than parsing the safe message.
+                error: Any = failure
+                assert str(error) == "recording encoding failed"
+                assert error.code == "voidcrawl.visual.recording_encode_failed"
+                assert error.category == "unsupported"
             else:
                 # Built with the feature on: the artifact must actually exist.
                 assert rec is not None

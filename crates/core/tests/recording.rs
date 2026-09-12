@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 
 use tokio::time::{sleep, timeout};
 use void_crawl_core::{
-    BrowserSession, Page, RecordingOptions, SelectorEntry, SelectorKind, VoidCrawlError,
+    BrowserSession, BrowserTarget, BrowserTargetKind, DocumentEpoch, Page, RecordingOptions,
+    VoidCrawlError,
 };
 
 /// A page that repaints continuously, so Chrome has a reason to emit frames.
@@ -70,9 +71,9 @@ async fn animated_page(session: &BrowserSession) -> Page {
     session.new_page(&data_url(ANIMATED)).await.expect("new_page failed")
 }
 
-fn css(value: &str) -> SelectorEntry {
-    SelectorEntry {
-        kind:  SelectorKind::Css,
+fn css(value: &str) -> BrowserTarget {
+    BrowserTarget {
+        kind:  BrowserTargetKind::Css,
         value: value.to_string(),
         regex: None,
         name:  None,
@@ -97,6 +98,15 @@ async fn records_the_viewport() {
     assert_eq!(rec.regions[0].label, "viewport");
     assert!(rec.regions[0].bbox.is_none());
     assert!(rec.frames_captured > 0, "an animating page must yield frames");
+    assert!(rec.started_at_unix_ms.is_some());
+    assert!(matches!(rec.document_epoch, DocumentEpoch::Known(_)));
+    assert!(rec.complete);
+    assert!(rec.frame_size_pixels.is_some());
+    assert!(rec.capture_viewport_css.is_some());
+    assert_eq!(
+        rec.frames_dropped,
+        rec.frames_dropped_by_rate + rec.frames_dropped_by_limit + rec.frame_decode_failures
+    );
     assert_eq!(rec.regions[0].frames.len(), rec.frames_captured);
     assert!(
         rec.regions[0].frames.iter().all(|f| !f.data.is_empty()),
@@ -367,9 +377,9 @@ async fn foreground_is_auto_detected_from_window_placement() {
 #[cfg(feature = "encode-gif")]
 #[tokio::test]
 async fn encodes_regions_to_gif() {
-    use std::fs;
+    use std::{fs, io::Write as _};
 
-    use void_crawl_core::Encoding;
+    use void_crawl_core::{BrowserByteDomain, Encoding};
 
     let session = headless_session().await;
     let page = animated_page(&session).await;
@@ -394,6 +404,28 @@ async fn encodes_regions_to_gif() {
         assert!(meta.len() > 0, "empty gif at {}", path.display());
         let header = fs::read(path).expect("read gif");
         assert_eq!(&header[..6], b"GIF89a", "not a GIF at {}", path.display());
+
+        let reports = region.output_byte_reports().expect("encoded output byte reports");
+        assert_eq!(reports.len(), 1, "one report per artifact");
+        assert_eq!(reports[0].domain(), BrowserByteDomain::EncodedRecording);
+        assert_eq!(reports[0].accounting().retained().get(), meta.len());
+
+        // Facts describe the artifact when encoding completed, not a mutable
+        // path reread after the recording was returned.
+        fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .expect("open gif for mutation")
+            .write_all(b"later mutation")
+            .expect("mutate gif");
+        assert_eq!(
+            region.output_byte_reports().expect("stored output report")[0]
+                .accounting()
+                .retained()
+                .get(),
+            meta.len(),
+            "report must retain the capture-time file size"
+        );
     }
 }
 
@@ -412,6 +444,8 @@ async fn gif_without_the_feature_is_an_actionable_error() {
         .record(opts_for(2).with_dir(dir.path()).with_encoding(Encoding::Gif))
         .await
         .expect_err("must error without the encode-gif feature");
-    assert!(matches!(err, VoidCrawlError::RecordingEncodeError(_)), "got {err:?}");
-    assert!(err.to_string().contains("encode-gif"), "error must name the feature: {err}");
+    let VoidCrawlError::RecordingEncodeError(diagnostic) = err else {
+        panic!("expected recording encode error");
+    };
+    assert!(diagnostic.contains("encode-gif"), "raw local diagnostic must name the feature");
 }

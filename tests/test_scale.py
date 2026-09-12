@@ -397,11 +397,10 @@ class TestGenerateSupervisordConf:
             "--enable-gpu",
             "--ignore-gpu-blocklist",
             "--use-angle=vulkan",
-            "--disable-gpu-sandbox",
         ]:
             assert flag in conf
-        # The software-rendering flag must be gone (guard against the substring
-        # match with --disable-gpu-sandbox by checking for a flag boundary).
+        assert "--disable-gpu-sandbox" not in conf
+        # The software-rendering flag must be absent; it forces SwiftShader.
         assert "--disable-gpu " not in conf
         assert not conf.rstrip().endswith("--disable-gpu")
 

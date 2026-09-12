@@ -164,7 +164,9 @@ async fn click_by_role_no_match_errors() {
     )
     .await
     .expect_err("no match should error");
-    assert!(err.message.contains("Missing"), "error should name the target: {}", err.message);
+    let wire = serde_json::to_value(&err).expect("serialize MCP error");
+    assert_eq!(err.message, "target element was not found");
+    assert_eq!(wire["data"]["code"], "voidcrawl.target.element_not_found");
 
     teardown(&server).await;
 }

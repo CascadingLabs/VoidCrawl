@@ -44,7 +44,7 @@ pub struct ScreenshotArgs {
     /// exclusive with `selector`.
     #[serde(default)]
     pub bbox:         Option<BboxArg>,
-    /// Crop to a Yosoi selector's resolved rectangle (any of its 8 kinds —
+    /// Crop to a browser target's resolved rectangle (any of its 8 kinds —
     /// css/xpath/regex/jsonld/attr/global_id/role/visual) instead of an
     /// explicit `bbox`. Mutually exclusive with `bbox`. A selector that
     /// matches nothing, is ambiguous, or is inherently non-visual
@@ -78,7 +78,7 @@ pub struct SessionScreenshotArgs {
     /// exclusive with `selector`.
     #[serde(default)]
     pub bbox:       Option<BboxArg>,
-    /// Crop to a Yosoi selector's resolved rectangle instead of an explicit
+    /// Crop to a browser target's resolved rectangle instead of an explicit
     /// `bbox`. Mutually exclusive with `bbox`. See `ScreenshotArgs.selector`
     /// / `SelectorArg` for the full field reference per kind.
     #[serde(default)]

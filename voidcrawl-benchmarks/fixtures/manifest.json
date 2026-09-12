@@ -1,0 +1,21 @@
+{
+  "generator": "scripts/generate-benchmark-fixtures.py",
+  "version": 1,
+  "fixtures": [
+    {
+      "route": "/index.html",
+      "file": "index.html",
+      "size_bytes": 409,
+      "sha256": "4788955bf865ad751f8f5a89d89e141f298d44a1760053b3abe0dcc2dbc85835",
+      "content_type": "text/html; charset=utf-8",
+      "generator": "hand-curated HTML emitted/validated by the fixture generator"
+    },
+    {
+      "route": "/bytes?size=1024",
+      "size_bytes": 1024,
+      "sha256": "49abd65bbf7f7e40c7055093ed2e3fd75f2f602f2c5fcf955c213e3135eb03f7",
+      "content_type": "text/plain; charset=utf-8",
+      "generator": "loopback server deterministic b'x' body"
+    }
+  ]
+}

@@ -17,7 +17,7 @@ cd VoidCrawl
 
 | Tool | Version | Install |
 |------|---------|---------|
-| Rust | >= 1.86 | [rustup.rs](https://rustup.rs) |
+| Rust | >= 1.98 | [rustup.rs](https://rustup.rs) |
 | Python | >= 3.10 | System or [mise](https://mise.jdx.dev) |
 | Chrome/Chromium | Any recent | System package manager |
 | maturin | >= 1.7 | `cargo install maturin` |
@@ -117,7 +117,7 @@ cargo fmt --check
 ```
 
 - Follow standard Rust conventions (`rustfmt` defaults)
-- Clippy config lives in `clippy.toml` -enforces cognitive complexity thresholds, MSRV 1.86
+- Clippy config lives in `clippy.toml` -enforces cognitive complexity thresholds, MSRV 1.98
 - `print!`/`println!` are disallowed -use `tracing` instead
 - Use `thiserror` for error types -every new error variant goes in `error.rs`
 - Map chromiumoxide errors to `VoidCrawlError` at the boundary, not deep inside methods
@@ -137,7 +137,11 @@ uv run mypy .
 - Never use `unittest` -always `pytest`
 - Use `tenacity` for retries -never `time.sleep()` in loops
 
-CI runs clippy, cargo test, and ruff on every push and PR. Your PR must pass all checks.
+CI runs clippy, cargo test, ruff, and the event-driven wait gate on every push and PR. Your PR must pass all checks.
+
+### Event-driven waits
+
+Production Rust (`crates/*/src`) and Python (`voidcrawl/`) must wait on browser/CDP events, channels, or owned task completion rather than `sleep(...)`. The `scripts/check-event-driven-waits.py` gate rejects unqualified and qualified sleep calls; `timeout`, `timeout_at`, and `sleep_until` remain valid bounds or deadline waits. A rare exception needs an immediately preceding contiguous comment block containing `EVENT_DRIVEN_SLEEP_APPROVED:` and at least 40 non-whitespace rationale characters. These approvals require maintainer review and should be rare.
 
 ## Issues
 

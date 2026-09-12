@@ -1,0 +1,41 @@
+[package]
+name = "voidcrawl-benchmarks"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+autobenches = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# Exact versions keep the benchmark harness reproducible; Cargo.lock remains authoritative.
+futures = "=0.3.32"
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+sha2 = "=0.10.9"
+tokio = { version = "=1.52.3", features = ["full"] }
+void_crawl_core = { path = "../crates/core" }
+
+[dev-dependencies]
+criterion = { version = "=0.7.0", default-features = false, features = ["async_tokio", "cargo_bench_support"] }
+divan = "=0.1.21"
+gungraun = "=0.19.4"
+
+[[bench]]
+name = "criterion_browser"
+harness = false
+
+[[bench]]
+name = "allocation_sync"
+harness = false
+
+[[bench]]
+name = "gungraun_sync"
+harness = false
+
+[[bin]]
+name = "profile_browser"
+path = "src/bin/profile_browser.rs"

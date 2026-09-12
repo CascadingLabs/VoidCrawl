@@ -84,6 +84,10 @@ class TestAxTree:
         async with BrowserSession(BrowserConfig()) as browser:
             page = await browser.new_page(data_url("<button>Only</button>"))
 
-            with pytest.raises(Exception, match="Missing"):
+            with pytest.raises(Exception) as raised:
                 await page.click_by_role("button", "Missing")
+            error: Any = raised.value
+            assert str(error) == "target element was not found"
+            assert error.code == "voidcrawl.target.element_not_found"
+            assert error.category == "unavailable"
             await page.close()

@@ -2,7 +2,7 @@
 //! `screenshot()`.
 //!
 //! Kwargs mirror `screenshot()`'s wherever the concept carries over
-//! (`viewport_*`, `scroll_*`, `bbox`, the Yosoi selector fields), so the two
+//! (`viewport_*`, `scroll_*`, `bbox`, and browser target fields), so the two
 //! read the same at a call site. Two deliberate differences, both forced by
 //! the underlying CDP screencast and documented on
 //! [`void_crawl_core::recording`]:
@@ -21,11 +21,11 @@ use pyo3::{
 use pyo3_async_runtimes::tokio::future_into_py;
 use tokio::sync::Mutex;
 use void_crawl_core::{
-    Encoding, FrameFormat, MaskSpec, Page, Recording, RecordingHandle, RecordingOptions,
-    ScrollTarget, SelectorEntry,
+    BrowserByteCount, BrowserByteDomain, BrowserByteReport, BrowserTarget, DocumentEpoch, Encoding,
+    FrameFormat, MaskSpec, Page, Recording, RecordingHandle, RecordingOptions, ScrollTarget,
 };
 
-use crate::{resolve_selector_args, resolve_viewport_args, to_py_err};
+use crate::{resolve_selector_args, resolve_viewport_args, snapshots::byte_report_dict, to_py_err};
 
 /// One captured frame.
 #[pyclass(name = "Frame", module = "voidcrawl._ext", frozen)]
@@ -33,12 +33,12 @@ use crate::{resolve_selector_args, resolve_viewport_args, to_py_err};
 pub struct PyFrame {
     /// Position in the sequence, 0-based.
     #[pyo3(get)]
-    pub index:     usize,
+    pub index: usize,
     /// Real elapsed milliseconds from the start of the recording. Frames are
     /// **not** evenly spaced — encode against this, not `index / fps`.
     #[pyo3(get)]
     pub offset_ms: f64,
-    data:          Vec<u8>,
+    data: Vec<u8>,
 }
 
 #[pymethods]
@@ -51,6 +51,22 @@ impl PyFrame {
 
     fn __len__(&self) -> usize {
         self.data.len()
+    }
+
+    #[getter]
+    fn byte_report<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let bytes = BrowserByteCount::try_from_usize(self.data.len())
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        byte_report_dict(
+            py,
+            BrowserByteReport::from_known_extent(
+                BrowserByteDomain::RecordingFrame,
+                None,
+                bytes,
+                bytes,
+            )
+            .map_err(|error| PyValueError::new_err(error.to_string()))?,
+        )
     }
 
     fn __repr__(&self) -> String {
@@ -71,20 +87,36 @@ pub struct PyRecordedRegion {
     /// Name derived from the selector, or ``"viewport"`` / ``"bbox"``. Also
     /// the on-disk subdirectory when ``write_frames=True``.
     #[pyo3(get)]
-    pub label:   String,
+    pub label: String,
     /// ``(x, y, width, height)`` in CSS pixels, or ``None`` for the full
     /// frame. Resolved once when recording started, then held fixed.
     #[pyo3(get)]
-    pub bbox:    Option<(u32, u32, u32, u32)>,
+    pub bbox: Option<(u32, u32, u32, u32)>,
     #[pyo3(get)]
-    pub frames:  Vec<Py<PyFrame>>,
+    pub frames: Vec<Py<PyFrame>>,
     /// Paths of encoded artifacts written for this region.
     #[pyo3(get)]
     pub outputs: Vec<String>,
+    byte_report: BrowserByteReport,
+    output_byte_reports: Vec<BrowserByteReport>,
 }
 
 #[pymethods]
 impl PyRecordedRegion {
+    #[getter]
+    fn byte_report<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        byte_report_dict(py, self.byte_report.clone())
+    }
+
+    #[getter]
+    fn output_byte_reports<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        self.output_byte_reports
+            .iter()
+            .cloned()
+            .map(|report| byte_report_dict(py, report))
+            .collect()
+    }
+
     fn __repr__(&self) -> String {
         format!("RecordedRegion(label={:?}, frames={})", self.label, self.frames.len())
     }
@@ -100,20 +132,20 @@ impl PyRecordedRegion {
 #[derive(Debug)]
 pub struct PyMaskReport {
     #[pyo3(get)]
-    pub label:            String,
+    pub label: String,
     /// ``(x, y, width, height)`` in CSS pixels, as first resolved.
     #[pyo3(get)]
-    pub bbox:             (u32, u32, u32, u32),
+    pub bbox: (u32, u32, u32, u32),
     /// Whether the mask was re-resolved while recording.
     #[pyo3(get)]
-    pub tracked:          bool,
+    pub tracked: bool,
     /// Ticks where re-resolution failed. The mask kept its last known
     /// rectangle for those, so something stayed covered.
     #[pyo3(get)]
     pub unresolved_ticks: usize,
     /// Frames captured while the most recent re-resolution had failed.
     #[pyo3(get)]
-    pub stale_frames:     usize,
+    pub stale_frames: usize,
 }
 
 #[pymethods]
@@ -130,36 +162,62 @@ impl PyMaskReport {
 #[pyclass(name = "Recording", module = "voidcrawl._ext", frozen)]
 #[derive(Debug)]
 pub struct PyRecording {
+    #[pyo3(get)]
+    pub started_at_unix_ms: Option<u64>,
+    #[pyo3(get)]
+    pub document_epoch: Option<u64>,
     /// One entry per requested region; a single ``"viewport"`` region when
     /// neither ``bbox`` nor ``selectors`` was given.
     #[pyo3(get)]
-    pub regions:            Vec<Py<PyRecordedRegion>>,
+    pub regions: Vec<Py<PyRecordedRegion>>,
     /// One entry per requested mask. Empty means nothing was asked to be
     /// covered — not that there was nothing worth covering.
     #[pyo3(get)]
-    pub masks:              Vec<Py<PyMaskReport>>,
+    pub masks: Vec<Py<PyMaskReport>>,
     /// ``"jpeg"`` or ``"png"``.
     #[pyo3(get)]
-    pub format:             String,
+    pub format: String,
     #[pyo3(get)]
-    pub duration_ms:        f64,
+    pub duration_ms: f64,
     #[pyo3(get)]
-    pub frames_captured:    usize,
+    pub frames_captured: usize,
     /// Frames Chrome delivered that the fps ceiling or frame cap discarded.
     /// Large next to a small ``frames_captured`` means ``fps`` was binding.
     #[pyo3(get)]
-    pub frames_dropped:     usize,
+    pub frames_dropped: usize,
+    #[pyo3(get)]
+    pub frames_dropped_by_rate: usize,
+    #[pyo3(get)]
+    pub frames_dropped_by_limit: usize,
+    #[pyo3(get)]
+    pub frame_decode_failures: usize,
+    #[pyo3(get)]
+    pub frame_ack_failures: usize,
+    #[pyo3(get)]
+    pub stream_disconnected: bool,
+    #[pyo3(get)]
+    pub complete: bool,
+    #[pyo3(get)]
+    pub frame_size_pixels: Option<(u32, u32)>,
+    #[pyo3(get)]
+    pub capture_viewport_css: Option<(f64, f64)>,
     #[pyo3(get)]
     pub device_pixel_ratio: f64,
     /// Whether this recording pinned its tab to the foreground and held the
     /// browser's capture lock. ``False`` means it ran concurrently with the
     /// rest of the browser — see ``foreground`` in :meth:`Page.record`.
     #[pyo3(get)]
-    pub foregrounded:       bool,
+    pub foregrounded: bool,
+    byte_report: BrowserByteReport,
 }
 
 #[pymethods]
 impl PyRecording {
+    #[getter]
+    fn byte_report<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        byte_report_dict(py, self.byte_report.clone())
+    }
+
     /// Frames per second actually achieved — at most the requested ``fps``,
     /// and usually below it on a mostly-static page. Report this, not the
     /// requested value.
@@ -192,7 +250,7 @@ impl PyRecording {
 #[pyclass(name = "RecordingHandle", module = "voidcrawl._ext")]
 pub struct PyRecordingHandle {
     handle: Arc<Mutex<Option<RecordingHandle>>>,
-    page:   Arc<Page>,
+    page: Arc<Page>,
 }
 
 impl fmt::Debug for PyRecordingHandle {
@@ -231,16 +289,28 @@ impl PyRecordingHandle {
 
 /// Convert a core [`Recording`] into its Python mirror.
 pub(crate) fn into_py_recording(py: Python<'_>, rec: Recording) -> PyResult<Py<PyRecording>> {
+    let byte_report =
+        rec.byte_report().map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let started_at_unix_ms = rec.started_at_unix_ms;
+    let document_epoch = match rec.document_epoch {
+        DocumentEpoch::Known(epoch) => Some(epoch),
+        DocumentEpoch::UnavailableForAttachedPage => None,
+    };
     let mut regions = Vec::with_capacity(rec.regions.len());
     for region in rec.regions {
+        let region_byte_report =
+            region.byte_report().map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let output_byte_reports = region
+            .output_byte_reports()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
         let mut frames = Vec::with_capacity(region.frames.len());
         for frame in region.frames {
             frames.push(Py::new(
                 py,
                 PyFrame {
-                    index:     frame.index,
+                    index: frame.index,
                     offset_ms: frame.offset.as_secs_f64() * 1000.0,
-                    data:      frame.data,
+                    data: frame.data,
                 },
             )?);
         }
@@ -251,6 +321,8 @@ pub(crate) fn into_py_recording(py: Python<'_>, rec: Recording) -> PyResult<Py<P
                 bbox: region.bbox.map(|b| (b.x, b.y, b.width, b.height)),
                 frames,
                 outputs: region.outputs.into_iter().map(|p| p.display().to_string()).collect(),
+                byte_report: region_byte_report,
+                output_byte_reports,
             },
         )?);
     }
@@ -259,17 +331,19 @@ pub(crate) fn into_py_recording(py: Python<'_>, rec: Recording) -> PyResult<Py<P
         masks.push(Py::new(
             py,
             PyMaskReport {
-                label:            mask.label,
-                bbox:             (mask.bbox.x, mask.bbox.y, mask.bbox.width, mask.bbox.height),
-                tracked:          mask.tracked,
+                label: mask.label,
+                bbox: (mask.bbox.x, mask.bbox.y, mask.bbox.width, mask.bbox.height),
+                tracked: mask.tracked,
                 unresolved_ticks: mask.unresolved_ticks,
-                stale_frames:     mask.stale_frames,
+                stale_frames: mask.stale_frames,
             },
         )?);
     }
     Py::new(
         py,
         PyRecording {
+            started_at_unix_ms,
+            document_epoch,
             regions,
             masks,
             format: match rec.format {
@@ -279,18 +353,28 @@ pub(crate) fn into_py_recording(py: Python<'_>, rec: Recording) -> PyResult<Py<P
             duration_ms: rec.duration.as_secs_f64() * 1000.0,
             frames_captured: rec.frames_captured,
             frames_dropped: rec.frames_dropped,
+            frames_dropped_by_rate: rec.frames_dropped_by_rate,
+            frames_dropped_by_limit: rec.frames_dropped_by_limit,
+            frame_decode_failures: rec.frame_decode_failures,
+            frame_ack_failures: rec.frame_ack_failures,
+            stream_disconnected: rec.stream_disconnected,
+            complete: rec.complete,
+            frame_size_pixels: rec.frame_size_pixels,
+            capture_viewport_css: rec.capture_viewport_css,
             device_pixel_ratio: rec.device_pixel_ratio,
             foregrounded: rec.foregrounded,
+            byte_report,
         },
     )
 }
 
 /// Parse one `selectors=[...]` entry. Accepts the same field names as a
-/// Yosoi `SelectorEntry` dump (`type`/`value`/`regex`/`name`/`nth`/`x`/`y`),
-/// so `entry.model_dump()` can be passed straight through.
-fn selector_from_dict(item: &Bound<'_, PyAny>) -> PyResult<SelectorEntry> {
+/// Legacy-compatible browser target dump
+/// (`type`/`value`/`regex`/`name`/`nth`/`x`/`y`), so `entry.model_dump()` can
+/// be passed straight through.
+fn selector_from_dict(item: &Bound<'_, PyAny>) -> PyResult<BrowserTarget> {
     let dict = item.cast::<PyDict>().map_err(|_| {
-        PyValueError::new_err("each entry in `selectors` must be a dict of SelectorEntry fields")
+        PyValueError::new_err("each entry in `selectors` must be a dict of BrowserTarget fields")
     })?;
     // Non-generic on purpose: a generic `get::<T>` would tie the extracted
     // value's borrow to the helper's lifetime parameter, which the temporary
@@ -313,7 +397,7 @@ fn selector_from_dict(item: &Bound<'_, PyAny>) -> PyResult<SelectorEntry> {
             _ => Ok(None),
         }
     };
-    // `type` is the Yosoi field name; `selector_type` is accepted too so the
+    // `type` is the legacy wire field; `selector_type` is accepted too so the
     // plural form lines up with `screenshot()`'s flat kwargs.
     let kind = match get_str("type")? {
         Some(k) => Some(k),
