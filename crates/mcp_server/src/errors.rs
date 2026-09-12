@@ -1,18 +1,14 @@
 //! `VoidCrawlError` → `rmcp::ErrorData` mapping.
 
 use rmcp::ErrorData;
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
+use void_crawl_core::{VoidCrawlError, VoidCrawlErrorCategory, VoidCrawlErrorSummary};
 
-fn obj(m: Map<String, Value>) -> Value {
-    Value::Object(m)
-}
-use void_crawl_core::{VoidCrawlError, VoidCrawlErrorSummary};
-
-/// Map a core error into the MCP wire error. User-caused errors
-/// (bad URL, bad selector, bad JS) surface as `invalid_params`;
-/// everything else surfaces as `internal_error`. Typed exceptions
-/// (captcha, profile failures) carry a structured `data` payload so
-/// clients can dispatch on `data.exception`.
+/// Map a core error into the MCP wire error.
+///
+/// The JSON-RPC status is derived solely from the stable error category. A
+/// small set of historic `data.exception` tags remains for client
+/// compatibility, but diagnostic fields are never copied to the wire.
 #[allow(
     clippy::needless_pass_by_value,
     reason = "map_err is used directly by Result::map_err call sites"
@@ -20,75 +16,46 @@ use void_crawl_core::{VoidCrawlError, VoidCrawlErrorSummary};
 pub fn map_err(err: VoidCrawlError) -> ErrorData {
     let summary = err.safe_summary();
     let message = summary.message;
-    match err {
-        VoidCrawlError::InvalidInput { operation, reason } => ErrorData::invalid_params(
-            format!("{operation}: {reason}"),
-            Some(obj(summary_data(summary))),
-        ),
-        VoidCrawlError::ElementNotFound(_)
-        | VoidCrawlError::FrameNotFound(_)
-        | VoidCrawlError::AmbiguousFrame(_)
-        | VoidCrawlError::NavigationFailed(_)
-        | VoidCrawlError::JsEvalError(_)
-        | VoidCrawlError::ElementNotVisible(_)
-        | VoidCrawlError::UnsupportedVisualTarget
-        | VoidCrawlError::AmbiguousSelector(_) => {
-            ErrorData::invalid_params(message, Some(obj(summary_data(summary))))
+    let mut data = summary_data(summary);
+
+    match &err {
+        VoidCrawlError::CaptchaDetected { kind } => {
+            tag(&mut data, "CaptchaDetected");
+            data.insert("kind".into(), Value::String(challenge_tag(kind).into()));
         }
-        VoidCrawlError::Timeout(_) | VoidCrawlError::BrowserClosed => {
-            ErrorData::internal_error(message, Some(obj(summary_data(summary))))
+        VoidCrawlError::AntibotChallenge { vendor } => {
+            tag(&mut data, "AntibotChallenge");
+            data.insert("vendor".into(), Value::String(challenge_tag(vendor).into()));
         }
-        VoidCrawlError::CaptchaDetected { ref kind } => {
-            let data = tagged(summary, "CaptchaDetected", json!({ "kind": kind }));
-            ErrorData::internal_error(message, Some(obj(data)))
+        VoidCrawlError::ProfileBusy { .. } => tag(&mut data, "ProfileBusy"),
+        VoidCrawlError::ProfileLeaseExpired { timeout_secs, .. } => {
+            tag(&mut data, "ProfileLeaseExpired");
+            data.insert("timeout_secs".into(), Value::from(*timeout_secs));
         }
-        VoidCrawlError::AntibotChallenge { ref vendor } => {
-            let data = tagged(summary, "AntibotChallenge", json!({ "vendor": vendor }));
-            ErrorData::internal_error(message, Some(obj(data)))
+        VoidCrawlError::ProfileNotFound { .. } => tag(&mut data, "ProfileNotFound"),
+        VoidCrawlError::SessionInterrupted { .. } => tag(&mut data, "SessionInterrupted"),
+        VoidCrawlError::InterruptExpired { .. } => tag(&mut data, "InterruptExpired"),
+        VoidCrawlError::InterruptTerminal { state, .. } => {
+            tag(&mut data, "InterruptTerminal");
+            data.insert("state".into(), Value::String(interrupt_state_tag(state).into()));
         }
-        VoidCrawlError::ProfileBusy { ref name, pid, acquired_at } => {
-            let data = tagged(
-                summary,
-                "ProfileBusy",
-                json!({ "name": name, "pid": pid, "acquired_at": acquired_at }),
-            );
-            ErrorData::internal_error(message, Some(obj(data)))
+        VoidCrawlError::InterruptNotFound { .. } => tag(&mut data, "InterruptNotFound"),
+        _ => {}
+    }
+
+    let data = Some(Value::Object(data));
+    match summary.category {
+        VoidCrawlErrorCategory::InvalidInput | VoidCrawlErrorCategory::Unsupported => {
+            ErrorData::invalid_params(message, data)
         }
-        VoidCrawlError::ProfileLeaseExpired { ref name, timeout_secs } => {
-            let data = tagged(
-                summary,
-                "ProfileLeaseExpired",
-                json!({ "name": name, "timeout_secs": timeout_secs }),
-            );
-            ErrorData::internal_error(message, Some(obj(data)))
-        }
-        VoidCrawlError::ProfileNotFound { .. } => {
-            let data = tagged(summary, "ProfileNotFound", json!({}));
-            ErrorData::invalid_params(message, Some(obj(data)))
-        }
-        VoidCrawlError::SessionInterrupted { ref interrupt_id } => {
-            let data =
-                tagged(summary, "SessionInterrupted", json!({ "interrupt_id": interrupt_id }));
-            ErrorData::internal_error(message, Some(obj(data)))
-        }
-        VoidCrawlError::InterruptExpired { ref interrupt_id } => {
-            let data = tagged(summary, "InterruptExpired", json!({ "interrupt_id": interrupt_id }));
-            ErrorData::internal_error(message, Some(obj(data)))
-        }
-        VoidCrawlError::InterruptTerminal { ref interrupt_id, ref state } => {
-            let data = tagged(
-                summary,
-                "InterruptTerminal",
-                json!({ "interrupt_id": interrupt_id, "state": state }),
-            );
-            ErrorData::internal_error(message, Some(obj(data)))
-        }
-        VoidCrawlError::InterruptNotFound { ref interrupt_id } => {
-            let data =
-                tagged(summary, "InterruptNotFound", json!({ "interrupt_id": interrupt_id }));
-            ErrorData::invalid_params(message, Some(obj(data)))
-        }
-        _ => ErrorData::internal_error(message, Some(obj(summary_data(summary)))),
+        VoidCrawlErrorCategory::Timeout
+        | VoidCrawlErrorCategory::Interrupted
+        | VoidCrawlErrorCategory::Unavailable
+        | VoidCrawlErrorCategory::ProviderFailure
+        | VoidCrawlErrorCategory::Internal => ErrorData::internal_error(message, data),
+        // `VoidCrawlErrorCategory` is non-exhaustive. Unknown future categories
+        // fail closed rather than accidentally becoming client errors.
+        _ => ErrorData::internal_error(message, data),
     }
 }
 
@@ -99,11 +66,27 @@ fn summary_data(summary: VoidCrawlErrorSummary) -> Map<String, Value> {
     data
 }
 
-fn tagged(summary: VoidCrawlErrorSummary, exception: &str, extra: Value) -> Map<String, Value> {
-    let mut data = summary_data(summary);
+fn tag(data: &mut Map<String, Value>, exception: &'static str) {
     data.insert("exception".into(), Value::String(exception.into()));
-    if let Value::Object(extra) = extra {
-        data.extend(extra);
+}
+
+fn challenge_tag(value: &str) -> &'static str {
+    match value.to_ascii_lowercase().as_str() {
+        "recaptcha" => "recaptcha",
+        "hcaptcha" => "hcaptcha",
+        "turnstile" => "turnstile",
+        "cloudflare" | "cloudflare_challenge" => "cloudflare_challenge",
+        "datadome" => "datadome",
+        _ => "unknown",
     }
-    data
+}
+
+fn interrupt_state_tag(value: &str) -> &'static str {
+    match value {
+        "active" => "active",
+        "resumed" => "resumed",
+        "released" => "released",
+        "expired" => "expired",
+        _ => "unknown",
+    }
 }

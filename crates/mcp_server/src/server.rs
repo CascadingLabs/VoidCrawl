@@ -175,7 +175,7 @@ on action downloads (no Content-Type is observed), so `clean` is not a malware-f
         name = "screenshot",
         description = "Load a URL in stealth headless Chrome and return a PNG. Full page by \
 default; pass `full_page: false` to capture only the visible viewport (cheaper — no off-screen \
-content), `bbox` to crop an exact CSS-pixel region, `selector` to crop a Yosoi selector's resolved \
+content), `bbox` to crop an exact CSS-pixel region, `selector` to crop a browser target's resolved \
 rectangle instead (any of css/xpath/regex/jsonld/attr/global_id/role/visual — mutually exclusive \
 with `bbox`; a selector that matches nothing, is ambiguous, or is inherently non-visual \
 (jsonld/regex) fails with invalid_params rather than silently cropping an arbitrary target), \
@@ -197,7 +197,7 @@ this one call."
 authenticated, post-click, paginated, or challenge state that only an open session holds. Response \
 includes devicePixelRatio guidance compatible with click_visual_coords. Optional one-shot `viewport` \
 (preset or custom size), `full_page: false` (visible viewport only, not the whole scroll), `bbox` \
-crop, `selector` (crop a Yosoi selector's resolved rectangle — css/xpath/regex/jsonld/attr/ \
+crop, `selector` (crop a browser target's resolved rectangle — css/xpath/regex/jsonld/attr/ \
 global_id/role/visual — mutually exclusive with `bbox`; fails with invalid_params rather than \
 guessing when nothing/ambiguous/non-visual resolves), and `scroll` (page down before cropping) — \
 none of these persist past this call; use session_set_viewport for a persistent device/size. \

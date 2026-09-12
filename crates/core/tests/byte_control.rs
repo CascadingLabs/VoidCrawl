@@ -3,8 +3,9 @@
 use void_crawl_core::{
     BrowserBudgetScope, BrowserByteAccounting, BrowserByteAccountingError, BrowserByteBudget,
     BrowserByteCount, BrowserByteDomain, BrowserByteLimit, BrowserByteLimitError,
-    BrowserByteReport, BrowserByteReportError, BrowserByteSpec, BrowserLimitScope,
-    BrowserPayloadExtent, BrowserPayloadFailureReason, MeasuredBrowserBytes,
+    BrowserByteMeasurementUnavailableReason, BrowserByteReport, BrowserByteReportError,
+    BrowserByteSpec, BrowserLimitScope, BrowserPayloadExtent, BrowserPayloadFailureReason,
+    BrowserPayloadUnavailableReason, MeasuredBrowserBytes,
 };
 
 fn spec(limit: u64, budget_scope: BrowserBudgetScope) -> BrowserByteSpec {
@@ -134,6 +135,16 @@ fn reports_derive_complete_and_truncated_extent_from_one_accounting_source() {
     .expect("complete report");
     assert_eq!(complete.extent(), BrowserPayloadExtent::Complete);
 
+    assert_eq!(
+        BrowserByteReport::from_known_extent(
+            BrowserByteDomain::CdpDecodedBody,
+            Some(spec(3, BrowserBudgetScope::PerPayload)),
+            BrowserByteCount::new(4),
+            BrowserByteCount::new(4),
+        ),
+        Err(BrowserByteReportError::Accounting(BrowserByteAccountingError::RetainedExceedsLimit,)),
+    );
+
     let truncated = BrowserByteReport::from_known_extent(
         BrowserByteDomain::CdpDecodedBody,
         Some(spec(4, BrowserBudgetScope::PerPayload)),
@@ -186,6 +197,120 @@ fn discarded_and_failed_reports_preserve_terminal_invariants_through_serde() {
         r#"{"domain":"cdp_decoded_body","spec":null,"accounting":{"observed":7,"retained":1,"discarded":{"status":"known","value":6}},"extent":{"status":"discarded","observed_bytes":{"status":"known","value":6}},"additional_loss":{"status":"known","value":0}}"#
     )
     .is_err(), "discarded reports must not deserialize with retained bytes");
+}
+
+#[test]
+fn canonical_reports_cover_exact_unknown_overflow_and_contradictions() {
+    let zero = MeasuredBrowserBytes::Known { value: BrowserByteCount::new(0) };
+    let one = MeasuredBrowserBytes::Known { value: BrowserByteCount::new(1) };
+    let unknown = MeasuredBrowserBytes::Unavailable {
+        reason: BrowserByteMeasurementUnavailableReason::CaptureEndedEarly,
+    };
+    let exact =
+        BrowserByteAccounting::new(BrowserByteCount::new(5), BrowserByteCount::new(5), zero)
+            .expect("exact accounting");
+
+    for (discarded, additional) in [(one, zero), (zero, one), (unknown, zero), (zero, unknown)] {
+        let accounting = BrowserByteAccounting::new(
+            BrowserByteCount::new(5),
+            BrowserByteCount::new(if discarded == one { 4 } else { 5 }),
+            discarded,
+        )
+        .expect("valid accounting");
+        assert_eq!(
+            BrowserByteReport::new(
+                BrowserByteDomain::CdpDecodedBody,
+                None,
+                accounting,
+                BrowserPayloadExtent::Complete,
+                additional,
+            ),
+            Err(BrowserByteReportError::ExtentMismatch),
+        );
+    }
+
+    let unknown_truncation = BrowserByteReport::truncated(
+        BrowserByteDomain::CdpDecodedBody,
+        None,
+        exact,
+        unknown,
+        unknown,
+    )
+    .expect("unknown complete extent and loss are valid");
+    let json = serde_json::to_string(&unknown_truncation).expect("serialize unknown truncation");
+    assert_eq!(
+        serde_json::from_str::<BrowserByteReport>(&json).expect("round-trip unknown truncation"),
+        unknown_truncation,
+    );
+
+    let exact_truncation = BrowserByteReport::truncated(
+        BrowserByteDomain::CdpDecodedBody,
+        None,
+        exact,
+        MeasuredBrowserBytes::Known { value: BrowserByteCount::new(7) },
+        MeasuredBrowserBytes::Known { value: BrowserByteCount::new(2) },
+    )
+    .expect("observed plus additional loss equals complete size");
+    let json = serde_json::to_string(&exact_truncation).expect("serialize exact truncation");
+    assert_eq!(
+        serde_json::from_str::<BrowserByteReport>(&json).expect("round-trip exact truncation"),
+        exact_truncation,
+    );
+
+    for (complete, additional, expected) in [
+        (5, 0, BrowserByteReportError::ExtentMismatch),
+        (4, 1, BrowserByteReportError::ExtentMismatch),
+        (8, 2, BrowserByteReportError::ExtentMismatch),
+        (
+            u64::MAX,
+            u64::MAX,
+            BrowserByteReportError::Accounting(BrowserByteAccountingError::Overflow),
+        ),
+    ] {
+        assert_eq!(
+            BrowserByteReport::truncated(
+                BrowserByteDomain::CdpDecodedBody,
+                None,
+                exact,
+                MeasuredBrowserBytes::Known { value: BrowserByteCount::new(complete) },
+                MeasuredBrowserBytes::Known { value: BrowserByteCount::new(additional) },
+            ),
+            Err(expected),
+        );
+    }
+}
+
+#[test]
+fn failed_partial_and_requested_unavailable_reports_round_trip() {
+    let unknown = MeasuredBrowserBytes::Unavailable {
+        reason: BrowserByteMeasurementUnavailableReason::CaptureEndedEarly,
+    };
+    let partial = BrowserByteAccounting::new(
+        BrowserByteCount::new(5),
+        BrowserByteCount::new(3),
+        MeasuredBrowserBytes::Known { value: BrowserByteCount::new(2) },
+    )
+    .expect("partial accounting");
+    let failed = BrowserByteReport::failed_with_accounting(
+        BrowserByteDomain::CdpDecodedBody,
+        Some(spec(4, BrowserBudgetScope::PerPayload)),
+        partial,
+        BrowserPayloadFailureReason::ProviderDisconnected,
+        unknown,
+    )
+    .expect("partial failed report");
+    let json = serde_json::to_string(&failed).expect("serialize partial failed report");
+    assert_eq!(serde_json::from_str::<BrowserByteReport>(&json).expect("round trip"), failed);
+
+    let unavailable = BrowserByteReport::unavailable_with_spec(
+        BrowserByteDomain::CdpDecodedBody,
+        Some(spec(4, BrowserBudgetScope::PerPayload)),
+        BrowserPayloadUnavailableReason::ProviderDidNotReport,
+    )
+    .expect("requested unavailable report");
+    assert!(unavailable.spec().is_some());
+    let json = serde_json::to_string(&unavailable).expect("serialize unavailable report");
+    assert_eq!(serde_json::from_str::<BrowserByteReport>(&json).expect("round trip"), unavailable,);
 }
 
 #[test]

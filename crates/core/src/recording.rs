@@ -152,11 +152,13 @@ use serde::Serialize;
 use tokio::{
     sync::{Mutex as AsyncMutex, OwnedMutexGuard, oneshot},
     task::{JoinHandle, spawn_blocking},
-    time::sleep,
+    time::{Instant as TokioInstant, sleep, sleep_until},
 };
 
 use crate::{
-    BrowserByteCount, BrowserByteDomain, BrowserByteReport, BrowserByteReportError, DocumentEpoch,
+    BrowserByteAccounting, BrowserByteAccountingError, BrowserByteCount, BrowserByteDomain,
+    BrowserByteMeasurementUnavailableReason, BrowserByteReport, BrowserByteReportError,
+    DocumentEpoch, MeasuredBrowserBytes,
     error::{Result, VoidCrawlError},
     page::{Bbox, Page},
     selector::{BrowserTarget, TargetResolution},
@@ -616,15 +618,48 @@ pub struct RecordedRegion {
     /// Human-readable name, derived from the selector (its `name`, else its
     /// `value`) or `"viewport"` / `"bbox"`. Also the on-disk subdirectory
     /// name when `write_frames` is set.
-    pub label:   String,
+    pub label:    String,
     /// The rectangle this region was cropped to, or `None` for the full
     /// frame. Resolved once at recording start — see the module docs on
     /// drift.
-    pub bbox:    Option<Bbox>,
+    pub bbox:     Option<Bbox>,
     /// The frames for this region, cropped.
-    pub frames:  Vec<Frame>,
+    pub frames:   Vec<Frame>,
     /// Encoded artifacts produced for this region, if any.
-    pub outputs: Vec<PathBuf>,
+    pub outputs:  Vec<PathBuf>,
+    /// File sizes observed immediately after each successful encoder returns,
+    /// in the same order as [`Self::outputs`]. Kept private and out of serde:
+    /// reports must describe capture-time artifacts, not files mutable by a
+    /// caller after this recording is returned.
+    #[serde(skip)]
+    output_sizes: Vec<BrowserByteCount>,
+}
+
+impl RecordedRegion {
+    /// Complete, unbounded accounting for all retained encoded frames in this
+    /// region. This is a measurement, not a byte-limit policy.
+    pub fn byte_report(&self) -> StdResult<BrowserByteReport, BrowserByteReportError> {
+        let bytes = checked_frame_bytes(&self.frames)?;
+        BrowserByteReport::from_known_extent(BrowserByteDomain::RecordingFrame, None, bytes, bytes)
+    }
+
+    /// Complete, unbounded accounting for every successfully encoded artifact
+    /// in [`Self::outputs`], in the same order. Sizes were captured when the
+    /// encoder completed; this does not read the output paths again.
+    pub fn output_byte_reports(&self) -> StdResult<Vec<BrowserByteReport>, BrowserByteReportError> {
+        self.output_sizes
+            .iter()
+            .copied()
+            .map(|bytes| {
+                BrowserByteReport::from_known_extent(
+                    BrowserByteDomain::EncodedRecording,
+                    None,
+                    bytes,
+                    bytes,
+                )
+            })
+            .collect()
+    }
 }
 
 /// The result of a recording.
@@ -677,6 +712,42 @@ pub struct Recording {
 }
 
 impl Recording {
+    /// Complete, unbounded accounting for retained encoded frames across all
+    /// regions. This is a measurement, not a byte-limit policy.
+    pub fn byte_report(&self) -> StdResult<BrowserByteReport, BrowserByteReportError> {
+        let bytes = self.regions.iter().try_fold(BrowserByteCount::new(0), |total, region| {
+            let region_bytes = checked_frame_bytes(&region.frames)?;
+            let bytes = total
+                .get()
+                .checked_add(region_bytes.get())
+                .ok_or(BrowserByteAccountingError::Overflow)?;
+            Ok::<_, BrowserByteReportError>(BrowserByteCount::new(bytes))
+        })?;
+        let has_unmeasured_frames =
+            self.frames_dropped > 0 || self.frame_decode_failures > 0 || self.stream_disconnected;
+        if !has_unmeasured_frames {
+            return BrowserByteReport::from_known_extent(
+                BrowserByteDomain::RecordingFrame,
+                None,
+                bytes,
+                bytes,
+            );
+        }
+        let zero = BrowserByteCount::new(0);
+        let accounting =
+            BrowserByteAccounting::new(bytes, bytes, MeasuredBrowserBytes::Known { value: zero })?;
+        let unknown = MeasuredBrowserBytes::Unavailable {
+            reason: BrowserByteMeasurementUnavailableReason::CaptureEndedEarly,
+        };
+        BrowserByteReport::truncated(
+            BrowserByteDomain::RecordingFrame,
+            None,
+            accounting,
+            unknown,
+            unknown,
+        )
+    }
+
     /// The measured frame rate actually achieved, which is at most
     /// [`RecordingOptions::fps`] and usually below it on a mostly-static
     /// page. Use this rather than the requested fps when reporting.
@@ -976,7 +1047,7 @@ impl Page {
     pub async fn record(&self, opts: RecordingOptions) -> Result<Recording> {
         let duration = opts.max_duration;
         let handle = self.start_recording(opts).await?;
-        sleep(duration).await;
+        sleep_until(TokioInstant::now() + duration).await;
         handle.stop(self).await
     }
 
@@ -1303,7 +1374,7 @@ fn spawn_collector(
         let mut stop_rx = stop_rx;
         // The hard stop is enforced here too, not just by `record`, so a
         // handle that is never stopped still releases the browser.
-        let deadline = sleep(max_duration);
+        let deadline = sleep_until(TokioInstant::now() + max_duration);
         tokio::pin!(deadline);
 
         loop {
@@ -1395,7 +1466,7 @@ fn spawn_mask_tracker(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut stop_rx = stop_rx;
-        let deadline = sleep(max_duration);
+        let deadline = sleep_until(TokioInstant::now() + max_duration);
         tokio::pin!(deadline);
 
         loop {
@@ -1403,6 +1474,7 @@ fn spawn_mask_tracker(
                 biased;
                 _ = &mut stop_rx => break,
                 () = &mut deadline => break,
+                // EVENT_DRIVEN_SLEEP_APPROVED: Tracked-mask refresh cadence is intrinsically periodic recording behavior with no browser invalidation event.
                 () = sleep(interval) => {}
             }
 
@@ -1568,6 +1640,17 @@ fn scale_rect(bbox: Bbox, scale: f64, img_w: u32, img_h: u32) -> Option<(u32, u3
     Some((x, y, w.min(img_w - x), h.min(img_h - y)))
 }
 
+fn checked_frame_bytes(frames: &[Frame]) -> StdResult<BrowserByteCount, BrowserByteReportError> {
+    frames.iter().try_fold(BrowserByteCount::new(0), |total, frame| {
+        let frame_bytes = BrowserByteCount::try_from_usize(frame.data.len())?;
+        let bytes = total
+            .get()
+            .checked_add(frame_bytes.get())
+            .ok_or(BrowserByteAccountingError::Overflow)?;
+        Ok(BrowserByteCount::new(bytes))
+    })
+}
+
 fn crop_regions(
     raw: &[RawFrame],
     regions: &[(String, Option<Bbox>)],
@@ -1593,7 +1676,13 @@ fn crop_regions(
                 frames
             }
         };
-        out.push(RecordedRegion { label: label.clone(), bbox: *bbox, frames, outputs: Vec::new() });
+        out.push(RecordedRegion {
+            label: label.clone(),
+            bbox: *bbox,
+            frames,
+            outputs: Vec::new(),
+            output_sizes: Vec::new(),
+        });
     }
     Ok(out)
 }
@@ -1680,7 +1769,16 @@ async fn write_artifacts(
         for encoding in &opts.encode {
             let path = dir.join(format!("{}.{}", region.label, encoding.extension()));
             encode_region(region, *encoding, &path, opts).await?;
+            let size = fs::metadata(&path)
+                .map_err(|e| {
+                    VoidCrawlError::RecordingEncodeError(format!(
+                        "stat encoded output {}: {e}",
+                        path.display()
+                    ))
+                })?
+                .len();
             region.outputs.push(path);
+            region.output_sizes.push(BrowserByteCount::new(size));
         }
     }
     Ok(())
@@ -1794,6 +1892,68 @@ mod tests {
         assert!(!recording.complete);
         assert_eq!(recording.frame_size_pixels, Some((10, 8)));
         assert_eq!(recording.capture_viewport_css, Some((10.0, 8.0)));
+    }
+
+    #[tokio::test]
+    async fn byte_reports_count_retained_frames_per_region_and_across_regions() {
+        let first = b"first frame".to_vec();
+        let second = b"a longer second frame".to_vec();
+        let expected_region = u64::try_from(first.len() + second.len()).unwrap();
+        let mut recording = build_regions(
+            CollectedFrames {
+                frames:              vec![
+                    RawFrame {
+                        offset:        Duration::ZERO,
+                        data:          first,
+                        masks:         Vec::new(),
+                        device_width:  1.0,
+                        device_height: 1.0,
+                    },
+                    RawFrame {
+                        offset:        Duration::from_millis(1),
+                        data:          second,
+                        masks:         Vec::new(),
+                        device_width:  1.0,
+                        device_height: 1.0,
+                    },
+                ],
+                dropped_by_rate:     0,
+                dropped_by_limit:    0,
+                decode_failures:     0,
+                ack_failures:        0,
+                stream_disconnected: false,
+            },
+            &[("left".into(), None), ("right".into(), None)],
+            Vec::new(),
+            &RecordingOptions::default(),
+            Duration::from_secs(1),
+            1.0,
+            false,
+            None,
+            DocumentEpoch::Known(1),
+        )
+        .await
+        .unwrap();
+
+        for region in &recording.regions {
+            let report = region.byte_report().unwrap();
+            assert_eq!(report.domain(), BrowserByteDomain::RecordingFrame);
+            assert_eq!(report.accounting().retained().get(), expected_region);
+        }
+        let aggregate = recording.byte_report().unwrap();
+        assert_eq!(aggregate.domain(), BrowserByteDomain::RecordingFrame);
+        assert_eq!(aggregate.accounting().retained().get(), expected_region * 2);
+        assert_eq!(aggregate.extent(), crate::BrowserPayloadExtent::Complete);
+
+        recording.frames_dropped = 1;
+        let incomplete = recording.byte_report().unwrap();
+        assert!(matches!(
+            incomplete.extent(),
+            crate::BrowserPayloadExtent::Truncated {
+                complete_bytes: MeasuredBrowserBytes::Unavailable { .. },
+            }
+        ));
+        assert!(matches!(incomplete.additional_loss(), MeasuredBrowserBytes::Unavailable { .. }));
     }
 
     #[test]

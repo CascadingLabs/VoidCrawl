@@ -98,6 +98,9 @@ from voidcrawl._ext import (
     RenderedDomSnapshot as RenderedDomSnapshot,
 )
 from voidcrawl._ext import (
+    ResponseCaptureReport as ResponseCaptureReport,
+)
+from voidcrawl._ext import (
     ResponseExpectation as ResponseExpectation,
 )
 from voidcrawl._ext import (
@@ -171,6 +174,11 @@ from voidcrawl.schema import (
 )
 
 Selector = Text
+PoolReleaseStrategy = Literal[
+    "blank_document_and_reuse_shared_state",
+    "dispose_tab_after_reset_failure",
+    "dispose_tab_after_pool_closed",
+]
 
 __all__ = [
     "AccessibilitySnapshot",
@@ -205,6 +213,7 @@ __all__ = [
     "PageResponse",
     "PoolConfig",
     "PoolReleaseReport",
+    "PoolReleaseStrategy",
     "PooledTab",
     "ProfileBusy",
     "ProfileHandle",
@@ -215,6 +224,7 @@ __all__ = [
     "Recording",
     "RecordingHandle",
     "RenderedDomSnapshot",
+    "ResponseCaptureReport",
     "ResponseExpectation",
     "ResponseTimeoutError",
     "ScaleProfile",

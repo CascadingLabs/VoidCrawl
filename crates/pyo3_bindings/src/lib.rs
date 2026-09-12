@@ -47,9 +47,9 @@ use void_crawl_core::{
     NavigationCaptureTermination, NetworkExtraInfoState, ObservationOptions, ObservationScope,
     Page, PageResponse, PoolConfig, PoolReleaseReport, PoolReleaseStrategy, PooledTab,
     ProfileHandle, ProfileInfo, ProfileRegistry, ResourceOutcome, ResponseCapture,
-    ResponseCaptureLimits, ScanConfig, ScanReport, ScrollTarget, StealthConfig,
-    TabInstrumentationState, Verdict, Viewport, acquire_profile, list_profiles, scan_bytes,
-    scan_path, viewport as viewport_mod,
+    ResponseCaptureLimits, ResponseCaptureReport, ResponseCaptureTermination, ScanConfig,
+    ScanReport, ScrollTarget, StealthConfig, TabInstrumentationState, Verdict, Viewport,
+    acquire_profile, list_profiles, scan_bytes, scan_path, viewport as viewport_mod,
 };
 
 // ── Error conversion ────────────────────────────────────────────────────
@@ -429,15 +429,15 @@ async fn environment_snapshot_value(page: &Page) -> void_crawl_core::Result<Valu
 #[derive(Debug, Clone)]
 pub struct PyAntibotVerdict {
     #[pyo3(get)]
-    pub vendors:          Vec<String>,
+    pub vendors: Vec<String>,
     #[pyo3(get)]
-    pub challenged:       bool,
+    pub challenged: bool,
     #[pyo3(get)]
     pub challenge_vendor: Option<String>,
     #[pyo3(get)]
-    pub corpus_version:   String,
+    pub corpus_version: String,
     #[pyo3(get)]
-    pub evidence:         String,
+    pub evidence: String,
 }
 
 #[pymethods]
@@ -458,11 +458,11 @@ impl From<AntibotVerdict> for PyAntibotVerdict {
             AntibotEvidence::Body => "body",
         };
         Self {
-            vendors:          v.vendors,
-            challenged:       v.challenged,
+            vendors: v.vendors,
+            challenged: v.challenged,
             challenge_vendor: v.challenge_vendor,
-            corpus_version:   v.corpus_version.to_string(),
-            evidence:         evidence.to_string(),
+            corpus_version: v.corpus_version.to_string(),
+            evidence: evidence.to_string(),
         }
     }
 }
@@ -519,7 +519,7 @@ impl PyPageResponse {
     fn __repr__(&self) -> String {
         format!(
             "PageResponse(url={:?}, status_code={:?}, redirected={}, html_len={}, endpoints={})",
-            self.url,
+            safe_exception_url(&self.url),
             self.status_code,
             self.redirected,
             self.html.len(),
@@ -655,7 +655,7 @@ impl PyCapturedResponse {
     fn __repr__(&self) -> String {
         format!(
             "CapturedResponse(url={:?}, status={}, body_state={:?}, body_len={})",
-            self.inner.url,
+            safe_exception_url(&self.inner.url),
             self.inner.status,
             self.inner.body_state.as_str(),
             self.inner.body().len(),
@@ -710,14 +710,15 @@ impl Drop for ActiveResponseExpectationGuard {
 /// ``PooledTab.expect_response(s)``.
 #[pyclass(name = "ResponseExpectation")]
 pub struct PyResponseExpectation {
-    owner:     ResponseExpectationOwner,
-    patterns:  Vec<(String, String)>,
-    timeout:   Duration,
-    limits:    ResponseCaptureLimits,
-    single:    bool,
+    owner: ResponseExpectationOwner,
+    patterns: Vec<(String, String)>,
+    timeout: Duration,
+    limits: ResponseCaptureLimits,
+    single: bool,
     lifecycle: Arc<Mutex<()>>,
-    capture:   Arc<Mutex<Option<ResponseCapture>>>,
-    result:    Arc<Mutex<Option<HashMap<String, CapturedResponse>>>>,
+    capture: Arc<Mutex<Option<ResponseCapture>>>,
+    result: Arc<Mutex<Option<HashMap<String, CapturedResponse>>>>,
+    report: Arc<Mutex<Option<ResponseCaptureReport>>>,
 }
 
 impl fmt::Debug for PyResponseExpectation {
@@ -788,6 +789,7 @@ impl PyResponseExpectation {
             lifecycle: Arc::new(Mutex::new(())),
             capture: Arc::new(Mutex::new(None)),
             result: Arc::new(Mutex::new(None)),
+            report: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -861,6 +863,10 @@ impl PyResponseExpectation {
         let lifecycle = Arc::clone(&self.lifecycle);
         let capture_slot = Arc::clone(&self.capture);
         let result_slot = Arc::clone(&self.result);
+        let report_slot = Arc::clone(&self.report);
+        let patterns =
+            self.patterns.iter().map(|(name, pattern)| format!("{name}={pattern}")).collect();
+        let timeout = self.timeout;
         future_into_py(py, async move {
             let _lifecycle = lifecycle.lock().await;
             let capture = capture_slot.lock().await.take();
@@ -874,8 +880,12 @@ impl PyResponseExpectation {
                 }
                 return Ok(false);
             }
-            let capture = capture
-                .ok_or_else(|| PyRuntimeError::new_err("response expectation was not entered"))?;
+            let Some(capture) = capture else {
+                if report_slot.lock().await.is_some() {
+                    return Ok(false);
+                }
+                return Err(PyRuntimeError::new_err("response expectation was not entered"));
+            };
             // Once the capture leaves its slot, cancellation drops the Rust future.
             // Keep decrement ownership in an RAII guard so a cancelled Python task
             // cannot permanently poison release of the borrowed tab.
@@ -885,8 +895,10 @@ impl PyResponseExpectation {
                 }
                 ResponseExpectationOwner::Page(_) => None,
             };
-            let responses = match owner {
-                ResponseExpectationOwner::Page(_) => capture.wait().await.map_err(to_py_err)?,
+            let report = match owner {
+                ResponseExpectationOwner::Page(_) => {
+                    capture.wait_report().await.map_err(to_py_err)?
+                }
                 ResponseExpectationOwner::PooledTab { tab: tab_slot, .. } => {
                     // Hold the checkout slot while waiting so the pool cannot release,
                     // reset, or lend this tab to another caller mid-expectation.
@@ -894,11 +906,49 @@ impl PyResponseExpectation {
                     if tab.is_none() {
                         return Err(PyRuntimeError::new_err("tab has been released"));
                     }
-                    capture.wait().await.map_err(to_py_err)?
+                    capture.wait_report().await.map_err(to_py_err)?
                 }
             };
-            *result_slot.lock().await = Some(responses);
-            Ok(false)
+            *result_slot.lock().await = Some(report.responses.clone());
+            *report_slot.lock().await = Some(report.clone());
+            match report.termination {
+                ResponseCaptureTermination::Complete => Ok(false),
+                ResponseCaptureTermination::DeadlineReached => {
+                    Err(to_py_err(void_crawl_core::VoidCrawlError::ResponseTimeout {
+                        patterns,
+                        timeout_secs: timeout.as_secs_f64(),
+                    }))
+                }
+                ResponseCaptureTermination::Cancelled => Err(to_py_err(
+                    void_crawl_core::VoidCrawlError::Other("response capture cancelled".into()),
+                )),
+                ResponseCaptureTermination::ProviderDisconnected => {
+                    Err(to_py_err(void_crawl_core::VoidCrawlError::BrowserClosed))
+                }
+            }
+        })
+    }
+
+    /// Wait for a terminal report without turning timeout/disconnect into an
+    /// exception. The expectation must first be armed with ``async with``.
+    fn wait_report<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.consume_report(py, false)
+    }
+
+    /// Cancel an armed expectation and return the partial terminal report.
+    fn cancel_report<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.consume_report(py, true)
+    }
+
+    #[getter]
+    fn report<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let report = Arc::clone(&self.report);
+        future_into_py(py, async move {
+            let report =
+                report.lock().await.clone().ok_or_else(|| {
+                    PyRuntimeError::new_err("response expectation has not completed")
+                })?;
+            Python::attach(|py| Py::new(py, PyResponseCaptureReport { report }).map(Py::into_any))
         })
     }
 
@@ -929,6 +979,97 @@ impl PyResponseExpectation {
                 })
             }
         })
+    }
+}
+
+impl PyResponseExpectation {
+    fn consume_report<'py>(&self, py: Python<'py>, cancel: bool) -> PyResult<Bound<'py, PyAny>> {
+        let owner = self.owner.clone();
+        let lifecycle = Arc::clone(&self.lifecycle);
+        let capture_slot = Arc::clone(&self.capture);
+        let result_slot = Arc::clone(&self.result);
+        let report_slot = Arc::clone(&self.report);
+        future_into_py(py, async move {
+            let _lifecycle = lifecycle.lock().await;
+            let capture = capture_slot.lock().await.take().ok_or_else(|| {
+                PyRuntimeError::new_err("response expectation was not entered or already consumed")
+            })?;
+            let _active_guard = match &owner {
+                ResponseExpectationOwner::PooledTab { active, .. } => {
+                    Some(ActiveResponseExpectationGuard(Arc::clone(active)))
+                }
+                ResponseExpectationOwner::Page(_) => None,
+            };
+            let report = match owner {
+                ResponseExpectationOwner::Page(_) if cancel => capture.cancel_report().await,
+                ResponseExpectationOwner::Page(_) => capture.wait_report().await,
+                ResponseExpectationOwner::PooledTab { tab, .. } if cancel => {
+                    let tab = tab.lock().await;
+                    if tab.is_none() {
+                        return Err(PyRuntimeError::new_err("tab has been released"));
+                    }
+                    capture.cancel_report().await
+                }
+                ResponseExpectationOwner::PooledTab { tab, .. } => {
+                    let tab = tab.lock().await;
+                    if tab.is_none() {
+                        return Err(PyRuntimeError::new_err("tab has been released"));
+                    }
+                    capture.wait_report().await
+                }
+            }
+            .map_err(to_py_err)?;
+            *result_slot.lock().await = Some(report.responses.clone());
+            *report_slot.lock().await = Some(report.clone());
+            Python::attach(|py| Py::new(py, PyResponseCaptureReport { report }).map(Py::into_any))
+        })
+    }
+}
+
+fn response_termination_name(termination: ResponseCaptureTermination) -> &'static str {
+    match termination {
+        ResponseCaptureTermination::Complete => "complete",
+        ResponseCaptureTermination::DeadlineReached => "deadline_reached",
+        ResponseCaptureTermination::Cancelled => "cancelled",
+        ResponseCaptureTermination::ProviderDisconnected => "provider_disconnected",
+    }
+}
+
+/// Terminal response-capture result. Unlike the legacy expectation context,
+/// terminal states preserve every response captured before the stop.
+#[pyclass(name = "ResponseCaptureReport", frozen, skip_from_py_object)]
+#[derive(Debug, Clone)]
+pub struct PyResponseCaptureReport {
+    report: ResponseCaptureReport,
+}
+
+#[pymethods]
+impl PyResponseCaptureReport {
+    #[getter]
+    fn termination(&self) -> &'static str {
+        response_termination_name(self.report.termination)
+    }
+
+    #[getter]
+    fn responses<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let dict = PyDict::new(py);
+        for (name, response) in &self.report.responses {
+            dict.set_item(name, Py::new(py, PyCapturedResponse::from(response.clone()))?)?;
+        }
+        Ok(dict.into_any())
+    }
+
+    #[getter]
+    fn byte_report<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        byte_report_dict(py, self.report.aggregate_bytes.clone())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ResponseCaptureReport(termination={:?}, responses={})",
+            response_termination_name(self.report.termination),
+            self.report.responses.len(),
+        )
     }
 }
 
@@ -1287,13 +1428,13 @@ impl PyObservationScope {
 )]
 pub struct PyTabInstrumentationState {
     #[pyo3(get)]
-    pub low_cdp:                bool,
+    pub low_cdp: bool,
     #[pyo3(get)]
-    pub network_enabled:        bool,
+    pub network_enabled: bool,
     #[pyo3(get)]
-    pub runtime_enabled:        bool,
+    pub runtime_enabled: bool,
     #[pyo3(get)]
-    pub utility_world_enabled:  bool,
+    pub utility_world_enabled: bool,
     #[pyo3(get)]
     pub pre_navigation_stealth: bool,
 }
@@ -1315,10 +1456,10 @@ impl PyTabInstrumentationState {
 impl From<TabInstrumentationState> for PyTabInstrumentationState {
     fn from(state: TabInstrumentationState) -> Self {
         Self {
-            low_cdp:                state.low_cdp,
-            network_enabled:        state.network_enabled,
-            runtime_enabled:        state.runtime_enabled,
-            utility_world_enabled:  state.utility_world_enabled,
+            low_cdp: state.low_cdp,
+            network_enabled: state.network_enabled,
+            runtime_enabled: state.runtime_enabled,
+            utility_world_enabled: state.utility_world_enabled,
             pre_navigation_stealth: state.pre_navigation_stealth,
         }
     }
@@ -1337,9 +1478,9 @@ impl From<TabInstrumentationState> for PyTabInstrumentationState {
 #[derive(Debug)]
 pub struct PyDownloadOutcome {
     #[pyo3(get)]
-    pub path:         String,
+    pub path: String,
     #[pyo3(get)]
-    pub bytes:        u64,
+    pub bytes: u64,
     #[pyo3(get)]
     pub content_type: Option<String>,
 }
@@ -1356,11 +1497,7 @@ impl PyDownloadOutcome {
 
 impl From<DownloadOutcome> for PyDownloadOutcome {
     fn from(o: DownloadOutcome) -> Self {
-        Self {
-            path:         o.path.display().to_string(),
-            bytes:        o.bytes,
-            content_type: o.content_type,
-        }
+        Self { path: o.path.display().to_string(), bytes: o.bytes, content_type: o.content_type }
     }
 }
 
@@ -1404,13 +1541,13 @@ impl PyDownloadCapture {
 #[derive(Debug)]
 pub struct PyScanReport {
     #[pyo3(get)]
-    pub verdict:       String,
+    pub verdict: String,
     #[pyo3(get)]
-    pub reason:        Option<String>,
+    pub reason: Option<String>,
     #[pyo3(get)]
     pub detected_mime: Option<String>,
     #[pyo3(get)]
-    pub size:          u64,
+    pub size: u64,
 }
 
 #[pymethods]
@@ -2873,15 +3010,15 @@ impl PyPage {
 #[derive(Debug)]
 pub struct PyInterruptInfo {
     #[pyo3(get)]
-    interrupt_id:  String,
+    interrupt_id: String,
     #[pyo3(get)]
-    target_id:     String,
+    target_id: String,
     #[pyo3(get)]
-    code:          String,
+    code: String,
     #[pyo3(get)]
-    summary:       String,
+    summary: String,
     #[pyo3(get)]
-    state:         String,
+    state: String,
     #[pyo3(get)]
     expires_in_ms: u64,
 }
@@ -2907,9 +3044,9 @@ impl From<InterruptInfo> for PyInterruptInfo {
 #[derive(Debug)]
 pub struct PyContextCleanupReport {
     #[pyo3(get)]
-    state_binding:    String,
+    state_binding: String,
     #[pyo3(get)]
-    disposal_state:   String,
+    disposal_state: String,
     #[pyo3(get)]
     cleanup_complete: bool,
 }
@@ -2922,8 +3059,8 @@ impl From<ContextCleanupReport> for PyContextCleanupReport {
             ContextDisposalState::ProviderRejected => "provider_rejected",
         };
         Self {
-            state_binding:    state_binding_name(report.state_binding).to_string(),
-            disposal_state:   disposal_state.to_string(),
+            state_binding: state_binding_name(report.state_binding).to_string(),
+            disposal_state: disposal_state.to_string(),
             cleanup_complete: report.cleanup_complete,
         }
     }
@@ -2933,7 +3070,7 @@ impl From<ContextCleanupReport> for PyContextCleanupReport {
 #[pyclass(name = "IsolatedBrowserContext")]
 pub struct PyIsolatedBrowserContext {
     inner: Arc<Mutex<Option<IsolatedBrowserContext>>>,
-    page:  Arc<Page>,
+    page: Arc<Page>,
 }
 
 impl fmt::Debug for PyIsolatedBrowserContext {
@@ -3019,16 +3156,16 @@ impl PyIsolatedBrowserContext {
 ///         html = await page.content()
 #[pyclass(name = "BrowserSession")]
 pub struct PyBrowserSession {
-    inner:             Arc<Mutex<Option<Arc<BrowserSession>>>>,
-    mode:              BrowserMode,
-    stealth_enabled:   bool,
-    no_sandbox:        bool,
-    proxy:             Option<String>,
+    inner: Arc<Mutex<Option<Arc<BrowserSession>>>>,
+    mode: BrowserMode,
+    stealth_enabled: bool,
+    no_sandbox: bool,
+    proxy: Option<String>,
     chrome_executable: Option<String>,
-    extra_args:        Vec<String>,
-    user_data_dir:     Option<String>,
-    port:              Option<u16>,
-    cdp_mode:          Option<CdpMode>,
+    extra_args: Vec<String>,
+    user_data_dir: Option<String>,
+    port: Option<u16>,
+    cdp_mode: Option<CdpMode>,
 }
 
 impl fmt::Debug for PyBrowserSession {
@@ -4281,19 +4418,19 @@ impl PyPoolContext {
 #[expect(clippy::struct_excessive_bools, reason = "mirrors explicit core cleanup facts")]
 pub struct PyPoolReleaseReport {
     #[pyo3(get)]
-    state_binding:           String,
+    state_binding: String,
     #[pyo3(get)]
-    strategy:                String,
+    strategy: String,
     #[pyo3(get)]
-    cleanup_complete:        bool,
+    cleanup_complete: bool,
     #[pyo3(get)]
-    tab_reused:              bool,
+    tab_reused: bool,
     #[pyo3(get)]
-    document_cleared:        bool,
+    document_cleared: bool,
     #[pyo3(get)]
     download_behavior_reset: bool,
     #[pyo3(get)]
-    shared_state_retained:   bool,
+    shared_state_retained: bool,
 }
 
 impl From<PoolReleaseReport> for PyPoolReleaseReport {
@@ -4303,15 +4440,16 @@ impl From<PoolReleaseReport> for PyPoolReleaseReport {
                 "blank_document_and_reuse_shared_state"
             }
             PoolReleaseStrategy::DisposeTabAfterResetFailure => "dispose_tab_after_reset_failure",
+            PoolReleaseStrategy::DisposeTabAfterPoolClosed => "dispose_tab_after_pool_closed",
         };
         Self {
-            state_binding:           state_binding_name(report.state_binding).to_string(),
-            strategy:                strategy.to_string(),
-            cleanup_complete:        report.cleanup_complete,
-            tab_reused:              report.tab_reused,
-            document_cleared:        report.document_cleared,
+            state_binding: state_binding_name(report.state_binding).to_string(),
+            strategy: strategy.to_string(),
+            cleanup_complete: report.cleanup_complete,
+            tab_reused: report.tab_reused,
+            document_cleared: report.document_cleared,
             download_behavior_reset: report.download_behavior_reset,
-            shared_state_retained:   report.shared_state_retained,
+            shared_state_retained: report.shared_state_retained,
         }
     }
 }
@@ -4488,22 +4626,22 @@ impl PyBrowserPool {
 #[allow(clippy::struct_excessive_bools)]
 #[pyclass(name = "_PoolParamsContext")]
 pub struct PyPoolParamsContext {
-    browsers:             usize,
-    tabs_per_browser:     usize,
-    tab_max_uses:         u32,
-    tab_max_idle_secs:    u64,
+    browsers: usize,
+    tabs_per_browser: usize,
+    tab_max_uses: u32,
+    tab_max_idle_secs: u64,
     acquire_timeout_secs: u64,
-    auto_evict:           bool,
-    headless:             bool,
-    no_sandbox:           bool,
-    stealth:              bool,
-    ws_urls:              Vec<String>,
-    proxy:                Option<String>,
-    chrome_executable:    Option<String>,
-    extra_args:           Vec<String>,
-    user_data_dir:        Option<String>,
-    cdp_mode:             Option<CdpMode>,
-    pool_slot:            Arc<Mutex<Option<Arc<BrowserPool>>>>,
+    auto_evict: bool,
+    headless: bool,
+    no_sandbox: bool,
+    stealth: bool,
+    ws_urls: Vec<String>,
+    proxy: Option<String>,
+    chrome_executable: Option<String>,
+    extra_args: Vec<String>,
+    user_data_dir: Option<String>,
+    cdp_mode: Option<CdpMode>,
+    pool_slot: Arc<Mutex<Option<Arc<BrowserPool>>>>,
 }
 
 impl fmt::Debug for PyPoolParamsContext {
@@ -4807,10 +4945,10 @@ impl Drop for ProfileSplitPreparation {
 #[derive(Debug)]
 pub struct PyManagedProfileSplit {
     source_id: String,
-    root:      Option<String>,
-    copies:    usize,
-    source:    ProfileSplitSource,
-    state:     Arc<StdMutex<ProfileSplitState>>,
+    root: Option<String>,
+    copies: usize,
+    source: ProfileSplitSource,
+    state: Arc<StdMutex<ProfileSplitState>>,
 }
 
 #[pymethods]
@@ -5014,7 +5152,7 @@ fn py_profile_pool_describe(name: &str, root: Option<String>) -> PyResult<String
 pub struct PyProfileHandle {
     inner: Arc<Mutex<Option<ProfileHandle>>>,
     #[pyo3(get)]
-    name:  String,
+    name: String,
 }
 
 impl fmt::Debug for PyProfileHandle {
@@ -5150,6 +5288,7 @@ fn _ext(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPageResponse>()?;
     m.add_class::<PyCapturedResponse>()?;
     m.add_class::<PyResponseExpectation>()?;
+    m.add_class::<PyResponseCaptureReport>()?;
     m.add_class::<PyObservationScope>()?;
     m.add_class::<PyNavigationCapture>()?;
     m.add_class::<PyNavigationCaptureReport>()?;

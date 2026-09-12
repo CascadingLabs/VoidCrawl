@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import urllib.parse
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -71,6 +71,9 @@ class TestRecording:
                 + rec.frames_dropped_by_limit
                 + rec.frame_decode_failures
             )
+            assert rec.byte_report["accounting"]["retained"] > 0
+            assert rec.regions[0].byte_report["accounting"]["retained"] > 0
+            assert rec.regions[0].output_byte_reports == []
 
             frames = rec.regions[0].frames
             assert len(frames) == rec.frames_captured
@@ -207,18 +210,21 @@ class TestRecording:
         ):
             await page.goto(ANIMATED_URL)
             rec = None
-            failure = None
+            failure: RuntimeError | None = None
             try:
                 rec = await page.record(
                     duration_secs=1, output_dir=str(tmp_path), encode=["gif"]
                 )
             except RuntimeError as exc:
-                failure = str(exc)
+                failure = exc
 
             if failure is not None:
-                # Built without the feature: the error must name it, so the
-                # caller knows what to enable rather than guessing.
-                assert "encode-gif" in failure
+                # Provider diagnostics stay local; consumers dispatch on the
+                # stable typed code rather than parsing the safe message.
+                error: Any = failure
+                assert str(error) == "recording encoding failed"
+                assert error.code == "voidcrawl.visual.recording_encode_failed"
+                assert error.category == "unsupported"
             else:
                 # Built with the feature on: the artifact must actually exist.
                 assert rec is not None

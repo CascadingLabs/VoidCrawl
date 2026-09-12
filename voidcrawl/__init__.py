@@ -63,6 +63,7 @@ from voidcrawl._ext import (
     Recording,
     RecordingHandle,
     RenderedDomSnapshot,
+    ResponseCaptureReport,
     ResponseExpectation,
     ResponseTimeoutError,
     ScanReport,
@@ -96,6 +97,11 @@ from voidcrawl.schema import Attr, Schema, Text, safe_url, strip_tags
 from voidcrawl.viewport import Viewport, list_device_presets
 
 Selector = Text
+PoolReleaseStrategy = Literal[
+    "blank_document_and_reuse_shared_state",
+    "dispose_tab_after_reset_failure",
+    "dispose_tab_after_pool_closed",
+]
 
 __all__ = [
     "AccessibilitySnapshot",
@@ -133,6 +139,7 @@ __all__ = [
     "PageResponse",
     "PoolConfig",
     "PoolReleaseReport",
+    "PoolReleaseStrategy",
     "PooledTab",
     "ProfileBusy",
     "ProfileHandle",
@@ -143,6 +150,7 @@ __all__ = [
     "Recording",
     "RecordingHandle",
     "RenderedDomSnapshot",
+    "ResponseCaptureReport",
     "ResponseExpectation",
     "ResponseTimeoutError",
     "ScaleProfile",
@@ -245,7 +253,11 @@ class BrowserConfig(BaseModel):
         proxy: Upstream HTTPS proxy URL, e.g. ``"http://proxy:8080"``.
         chrome_executable: Path to a custom Chrome/Chromium binary.
             When ``None``, the bundled Chromium discovery is used.
-        extra_args: Additional command-line flags forwarded to Chrome.
+        extra_args: Additional command-line flags forwarded to Chrome. Chrome's
+            GPU-process sandbox remains enabled by default. Add
+            ``"--disable-gpu-sandbox"`` only as a documented host-specific
+            graphics-driver workaround after confirming it is necessary:
+            Chromium warns that it reduces security and stability.
         user_data_dir: Persistent Chrome user data directory. Use this for
             same-profile anti-bot validation and long-lived local sessions.
         ws_url: Connect to an **already-running** Chrome instance via its

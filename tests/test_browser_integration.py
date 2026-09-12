@@ -451,6 +451,46 @@ class TestPageLifecycleAndResponses:
                     await page.close()
 
     @pytest.mark.asyncio
+    async def test_response_reprs_redact_query_credentials(
+        self, network_fixture_url: str
+    ) -> None:
+        secret = "query-secret"
+        async with (
+            BrowserSession(BrowserConfig()) as browser,
+            browser.page(network_fixture_url) as page,
+        ):
+            response = await page.goto(f"{network_fixture_url}?access_token={secret}")
+            assert secret not in repr(response)
+
+            async with page.expect_response("**/api/one*") as pending:
+                await page.evaluate_js(f"fetch('/api/one?access_token={secret}')")
+            captured = await pending.value
+            assert secret not in repr(captured)
+
+    @pytest.mark.asyncio
+    async def test_response_terminal_report_preserves_partial_matches(
+        self, network_fixture_url: str
+    ) -> None:
+        async with (
+            BrowserSession(BrowserConfig()) as browser,
+            browser.page(network_fixture_url) as page,
+        ):
+            pending = page.expect_responses(
+                {"one": "**/api/one", "missing": "**/api/missing"}, timeout=0.1
+            )
+            await pending.__aenter__()
+            await page.evaluate_js("fetch('/api/one')")
+            report = await pending.wait_report()
+            assert report.termination == "deadline_reached"
+            assert await report.responses["one"].json() == {"endpoint": "one"}
+            assert "missing" not in report.responses
+            assert report.byte_report["accounting"]["retained"] > 0
+            # Terminal reports do not erase the historical typed error path,
+            # and normal context exit remains a no-op after manual consumption.
+            assert (await pending.report).termination == "deadline_reached"
+            assert await pending.__aexit__(None, None, None) is False
+
+    @pytest.mark.asyncio
     async def test_response_expectation_timeout_is_typed(
         self, network_fixture_url: str
     ) -> None:

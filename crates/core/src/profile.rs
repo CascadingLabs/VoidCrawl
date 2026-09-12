@@ -243,6 +243,7 @@ pub async fn acquire_profile_in(
                 }
             });
         }
+        // EVENT_DRIVEN_SLEEP_APPROVED: OS advisory locks provide no asynchronous availability event; the lease deadline strictly bounds acquisition polling.
         sleep(Duration::from_millis(100)).await;
     };
 

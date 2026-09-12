@@ -24,6 +24,7 @@ use chromiumoxide::{
     listeners::EventStream,
 };
 use futures::StreamExt;
+use serde::Serialize;
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
@@ -33,7 +34,7 @@ use tokio::{
 use crate::{
     BrowserBudgetScope, BrowserByteCount, BrowserByteDomain, BrowserByteLimit, BrowserByteReport,
     BrowserByteReportError, BrowserByteSpec, BrowserLimitScope, BrowserPayloadUnavailableReason,
-    MeasuredCount, MeasurementUnavailableReason, ResponseBodyState, Result, VoidCrawlError,
+    MeasuredCount, ResponseBodyState, Result, VoidCrawlError,
 };
 
 /// Hard bounds for one navigation capture.
@@ -128,7 +129,7 @@ impl fmt::Debug for ProtectedHeaders {
 }
 
 /// Capture-local resource identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct ResourceId(pub u64);
 
 /// Capture-local frame identity.
@@ -207,6 +208,8 @@ pub struct MainDocumentSource {
     pub body_unavailable:    Option<SourceBodyUnavailableReason>,
     pub retained_bytes:      usize,
     pub complete_bytes:      Option<usize>,
+    /// Capture-local offset when the source outcome became owned.
+    pub captured_at_micros:  u64,
     body:                    Arc<[u8]>,
     max_source_bytes:        usize,
 }
@@ -216,13 +219,34 @@ impl MainDocumentSource {
         &self.body
     }
 
+    pub fn source_limit(&self) -> StdResult<BrowserByteLimit, crate::BrowserByteLimitError> {
+        BrowserByteLimit::try_from(self.max_source_bytes)
+    }
+
     pub fn byte_report(&self) -> StdResult<BrowserByteReport, BrowserByteReportError> {
         let spec = self.max_source_spec()?;
         match self.body_state {
-            ResponseBodyState::Unavailable => Ok(BrowserByteReport::unavailable(
-                BrowserByteDomain::CdpDecodedBody,
-                BrowserPayloadUnavailableReason::ProviderDidNotReport,
-            )),
+            ResponseBodyState::Unavailable => match self.body_unavailable {
+                Some(SourceBodyUnavailableReason::RequestFailed) => BrowserByteReport::failed(
+                    BrowserByteDomain::CdpDecodedBody,
+                    Some(spec),
+                    crate::BrowserPayloadFailureReason::ProviderRejected,
+                ),
+                Some(SourceBodyUnavailableReason::InvalidBase64) => BrowserByteReport::failed(
+                    BrowserByteDomain::CdpDecodedBody,
+                    Some(spec),
+                    crate::BrowserPayloadFailureReason::InvalidEncoding,
+                ),
+                Some(
+                    SourceBodyUnavailableReason::CdpBodyUnavailable
+                    | SourceBodyUnavailableReason::CaptureEndedBeforeBody,
+                )
+                | None => BrowserByteReport::unavailable_with_spec(
+                    BrowserByteDomain::CdpDecodedBody,
+                    Some(spec),
+                    BrowserPayloadUnavailableReason::ProviderDidNotReport,
+                ),
+            },
             ResponseBodyState::Available | ResponseBodyState::Truncated => {
                 Ok(BrowserByteReport::from_known_extent(
                     BrowserByteDomain::CdpDecodedBody,
@@ -262,8 +286,28 @@ impl fmt::Debug for MainDocumentSource {
             .field("body_unavailable", &self.body_unavailable)
             .field("retained_bytes", &self.retained_bytes)
             .field("complete_bytes", &self.complete_bytes)
+            .field("captured_at_micros", &self.captured_at_micros)
             .finish_non_exhaustive()
     }
+}
+
+/// Kind of browser network event received by the capture coordinator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NavigationEventKind {
+    Request,
+    Response,
+    Finished,
+    Failed,
+}
+
+/// One retained browser network event in coordinator receipt order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct NavigationEvent {
+    pub sequence:      u64,
+    pub offset_micros: u64,
+    pub kind:          NavigationEventKind,
+    pub resource_id:   Option<ResourceId>,
 }
 
 /// Why a bounded navigation capture stopped.
@@ -296,7 +340,9 @@ pub struct NavigationCaptureReport {
     pub redirects:               Vec<RedirectHop>,
     pub main_document:           Option<MainDocumentSource>,
     pub resources:               Vec<ResourceRecord>,
+    pub events:                  Vec<NavigationEvent>,
     pub events_admitted:         u64,
+    pub events_retained:         u64,
     pub events_dropped:          MeasuredCount,
     pub resources_dropped:       u64,
     pub additional_loss_unknown: bool,
@@ -358,13 +404,16 @@ impl NavigationCapture {
     }
 
     async fn join_worker(&mut self) -> Result<NavigationCaptureReport> {
-        let worker = self
-            .worker
-            .take()
-            .ok_or_else(|| VoidCrawlError::Other("navigation capture already consumed".into()))?;
-        worker.await.map_err(|error| {
-            VoidCrawlError::Other(format!("navigation capture worker failed: {error}"))
-        })
+        // Keep the handle in `self` across the await: if this outer future is
+        // cancelled, `Drop` still owns and aborts the coordinator, including
+        // an in-progress response-body retrieval.
+        self.worker
+            .as_mut()
+            .ok_or_else(|| VoidCrawlError::Other("navigation capture already consumed".into()))?
+            .await
+            .map_err(|error| {
+                VoidCrawlError::Other(format!("navigation capture worker failed: {error}"))
+            })
     }
 }
 
@@ -466,6 +515,7 @@ struct CaptureState {
     main_frame:        Option<ResourceFrameId>,
     main_index:        Option<usize>,
     main_document:     Option<MainDocumentSource>,
+    events:            Vec<NavigationEvent>,
     events_admitted:   u64,
     resources_dropped: u64,
 }
@@ -482,6 +532,7 @@ impl CaptureState {
             main_frame:        None,
             main_index:        None,
             main_document:     None,
+            events:            Vec::new(),
             events_admitted:   0,
             resources_dropped: 0,
         }
@@ -491,41 +542,84 @@ impl CaptureState {
         &mut self,
         event: RawNetworkEvent,
         options: NavigationCaptureOptions,
+        offset_micros: u64,
     ) -> EventResult {
         if matches!(event, RawNetworkEvent::StreamClosed) {
             return EventResult::StreamClosed;
         }
-        self.events_admitted = self.events_admitted.saturating_add(1);
-        match event {
-            RawNetworkEvent::Request(event) => self.on_request(&event, options),
-            RawNetworkEvent::Response(event) => self.on_response(&event),
-            RawNetworkEvent::Finished(event) => {
-                if let Some(request) = self.on_finished(&event) {
-                    return EventResult::CaptureBody(request);
-                }
+        let (kind, request_id) = match &event {
+            RawNetworkEvent::Request(event) => {
+                (NavigationEventKind::Request, event.request_id.inner().clone())
             }
-            RawNetworkEvent::Failed(event) => self.on_failed(&event),
+            RawNetworkEvent::Response(event) => {
+                (NavigationEventKind::Response, event.request_id.inner().clone())
+            }
+            RawNetworkEvent::Finished(event) => {
+                (NavigationEventKind::Finished, event.request_id.inner().clone())
+            }
+            RawNetworkEvent::Failed(event) => {
+                (NavigationEventKind::Failed, event.request_id.inner().clone())
+            }
             RawNetworkEvent::StreamClosed => return EventResult::StreamClosed,
-        }
-        EventResult::Continue
+        };
+        let result = match event {
+            RawNetworkEvent::Request(event) => {
+                self.on_request(&event, options);
+                EventResult::Continue
+            }
+            RawNetworkEvent::Response(event) => {
+                self.on_response(&event);
+                EventResult::Continue
+            }
+            RawNetworkEvent::Finished(event) => {
+                self.on_finished(&event).map_or(EventResult::Continue, EventResult::CaptureBody)
+            }
+            RawNetworkEvent::Failed(event) => {
+                self.on_failed(&event, options.max_source_bytes, offset_micros);
+                EventResult::Continue
+            }
+            RawNetworkEvent::StreamClosed => return EventResult::StreamClosed,
+        };
+        let resource_id = self
+            .by_request
+            .get(&request_id)
+            .and_then(|index| self.resources.get(*index))
+            .map(|resource| resource.id);
+        let sequence = self.events_admitted;
+        self.events.push(NavigationEvent { sequence, offset_micros, kind, resource_id });
+        self.events_admitted = self.events_admitted.saturating_add(1);
+        result
     }
 
     fn on_request(&mut self, event: &EventRequestWillBeSent, options: NavigationCaptureOptions) {
         let request_id = event.request_id.inner().clone();
         let redirect_from = self.by_request.get(&request_id).copied();
-        if let (Some(index), Some(response)) = (redirect_from, event.redirect_response.as_ref()) {
-            self.apply_response(index, response);
-            self.resources[index].outcome = ResourceOutcome::Redirected;
+        if let (Some(index), Some(response)) = (redirect_from, event.redirect_response.as_ref())
+            && let Some(resource) = self.resources.get_mut(index)
+        {
+            Self::apply_response(resource, response);
+            resource.outcome = ResourceOutcome::Redirected;
         }
 
         if self.resources.len() >= options.max_resources {
             self.resources_dropped = self.resources_dropped.saturating_add(1);
             self.by_request.remove(&request_id);
+            // A retained redirect response is not the final document. If its
+            // successor cannot be retained, do not expose stale final URL or
+            // main-document identity from the redirecting node.
+            if redirect_from == self.main_index
+                && event.redirect_response.is_some()
+                && matches!(event.r#type, Some(ResourceType::Document))
+            {
+                self.main_index = None;
+                self.main_document = None;
+            }
             return;
         }
 
         let id = ResourceId(u64::try_from(self.resources.len()).unwrap_or(u64::MAX));
-        let previous_id = redirect_from.map(|index| self.resources[index].id);
+        let previous_id =
+            redirect_from.and_then(|index| self.resources.get(index)).map(|resource| resource.id);
         let frame = event.frame_id.as_ref().map(|id| self.frame_id(id.inner()));
         let loader = Some(self.loader_id(event.loader_id.inner()));
         let resource_type = event
@@ -552,7 +646,9 @@ impl CaptureState {
         self.by_request.insert(request_id, index);
 
         if let Some(previous) = previous_id {
-            let status = redirect_from.and_then(|old| self.resources[old].status);
+            let status = redirect_from
+                .and_then(|old| self.resources.get(old))
+                .and_then(|resource| resource.status);
             self.redirects.push(RedirectHop { from: previous, to: id, status });
         }
         if is_document && self.main_frame.is_none() {
@@ -565,46 +661,60 @@ impl CaptureState {
     }
 
     fn on_response(&mut self, event: &EventResponseReceived) {
-        let Some(index) = self.by_request.get(event.request_id.inner()).copied() else {
+        let Some(resource) = self
+            .by_request
+            .get(event.request_id.inner())
+            .and_then(|index| self.resources.get_mut(*index))
+        else {
             return;
         };
-        self.apply_response(index, &event.response);
-        if !matches!(self.resources[index].outcome, ResourceOutcome::Failed { .. }) {
-            self.resources[index].outcome = ResourceOutcome::ResponseReceived;
+        Self::apply_response(resource, &event.response);
+        if !matches!(resource.outcome, ResourceOutcome::Failed { .. }) {
+            resource.outcome = ResourceOutcome::ResponseReceived;
         }
     }
 
     fn on_finished(&mut self, event: &EventLoadingFinished) -> Option<BodyCaptureRequest> {
         let index = self.by_request.get(event.request_id.inner()).copied()?;
-        if matches!(self.resources[index].outcome, ResourceOutcome::Failed { .. }) {
+        let resource = self.resources.get_mut(index)?;
+        if matches!(resource.outcome, ResourceOutcome::Failed { .. }) {
             return None;
         }
-        self.resources[index].encoded_data_length = whole_nonnegative(event.encoded_data_length);
-        self.resources[index].outcome = ResourceOutcome::Complete;
+        resource.encoded_data_length = whole_nonnegative(event.encoded_data_length);
+        resource.outcome = ResourceOutcome::Complete;
         (self.main_index == Some(index)).then(|| BodyCaptureRequest {
-            resource:   self.resources[index].clone(),
+            resource:   resource.clone(),
             request_id: event.request_id.clone(),
         })
     }
 
-    fn on_failed(&mut self, event: &EventLoadingFailed) {
+    fn on_failed(
+        &mut self,
+        event: &EventLoadingFailed,
+        max_source_bytes: usize,
+        captured_at_micros: u64,
+    ) {
         let Some(index) = self.by_request.get(event.request_id.inner()).copied() else {
             return;
         };
-        self.resources[index].outcome = ResourceOutcome::Failed {
+        let Some(resource) = self.resources.get_mut(index) else {
+            return;
+        };
+        resource.outcome = ResourceOutcome::Failed {
             cancelled: event.canceled.unwrap_or(false),
             blocked:   event.blocked_reason.is_some(),
         };
         if self.main_index == Some(index) {
             self.main_document = Some(unavailable_main_document(
-                &self.resources[index],
+                resource,
                 SourceBodyUnavailableReason::RequestFailed,
+                max_source_bytes,
+                captured_at_micros,
             ));
         }
     }
 
-    fn apply_response(&mut self, index: usize, response: &Response) {
-        let resource = &mut self.resources[index];
+    fn apply_response(resource: &mut ResourceRecord, response: &Response) {
         resource.url = ProtectedUrl(response.url.clone());
         resource.status = http_status(response.status);
         resource.mime_type = nonempty(response.mime_type.clone());
@@ -638,7 +748,7 @@ async fn run_capture(
     started: Instant,
     started_at_unix_ms: Option<u64>,
 ) -> NavigationCaptureReport {
-    let deadline = time::sleep(options.max_duration);
+    let deadline = time::sleep_until(time::Instant::now() + options.max_duration);
     tokio::pin!(deadline);
     let mut state = CaptureState::new();
 
@@ -656,7 +766,7 @@ async fn run_capture(
                 let Some(event) = event else {
                     break NavigationCaptureTermination::ProviderDisconnected;
                 };
-                match state.on_event(event, options) {
+                match state.on_event(event, options, duration_micros(started.elapsed())) {
                     EventResult::Continue => {}
                     EventResult::StreamClosed => {
                         break NavigationCaptureTermination::ProviderDisconnected;
@@ -678,6 +788,7 @@ async fn run_capture(
                                 &request.resource,
                                 request.request_id,
                                 options.max_source_bytes,
+                                started,
                             ) => state.main_document = Some(source),
                         }
                     }
@@ -692,13 +803,15 @@ async fn run_capture(
     collectors.shutdown().await;
     while usize::try_from(state.events_admitted).unwrap_or(usize::MAX) < options.max_events {
         let Ok(event) = events_rx.try_recv() else { break };
-        match state.on_event(event, options) {
+        match state.on_event(event, options, duration_micros(started.elapsed())) {
             EventResult::Continue => {}
             EventResult::StreamClosed => break,
             EventResult::CaptureBody(request) => {
                 state.main_document = Some(unavailable_main_document(
                     &request.resource,
                     SourceBodyUnavailableReason::CaptureEndedBeforeBody,
+                    options.max_source_bytes,
+                    duration_micros(started.elapsed()),
                 ));
             }
         }
@@ -719,6 +832,8 @@ async fn run_capture(
         state.main_document = Some(unavailable_main_document(
             resource,
             SourceBodyUnavailableReason::CaptureEndedBeforeBody,
+            options.max_source_bytes,
+            duration_micros(started.elapsed()),
         ));
     }
     let additional_loss_unknown = matches!(
@@ -736,10 +851,10 @@ async fn run_capture(
         redirects: state.redirects,
         main_document: state.main_document,
         resources: state.resources,
+        events: state.events,
         events_admitted: state.events_admitted,
-        events_dropped: MeasuredCount::Unavailable {
-            reason: MeasurementUnavailableReason::ProviderDidNotReport,
-        },
+        events_retained: state.events_admitted,
+        events_dropped: MeasuredCount::Known { value: 0 },
         resources_dropped: state.resources_dropped,
         additional_loss_unknown,
         network_extra_info: NetworkExtraInfoState::UnavailableInCurrentClient,
@@ -752,6 +867,7 @@ async fn capture_main_document(
     resource: &ResourceRecord,
     request_id: RequestId,
     max_source_bytes: usize,
+    started: Instant,
 ) -> MainDocumentSource {
     match page.execute(GetResponseBodyParams::new(request_id)).await {
         Ok(response) => {
@@ -761,7 +877,14 @@ async fn capture_main_document(
                 max_source_bytes,
             ) {
                 Ok(body) => body,
-                Err(reason) => return unavailable_main_document(resource, reason),
+                Err(reason) => {
+                    return unavailable_main_document(
+                        resource,
+                        reason,
+                        max_source_bytes,
+                        duration_micros(started.elapsed()),
+                    );
+                }
             };
             let retained_bytes = decoded.len();
             let body_state = if retained_bytes == complete_bytes {
@@ -782,13 +905,17 @@ async fn capture_main_document(
                 body_unavailable: None,
                 retained_bytes,
                 complete_bytes: Some(complete_bytes),
+                captured_at_micros: duration_micros(started.elapsed()),
                 body: Arc::from(mem::take(&mut decoded)),
                 max_source_bytes,
             }
         }
-        Err(_) => {
-            unavailable_main_document(resource, SourceBodyUnavailableReason::CdpBodyUnavailable)
-        }
+        Err(_) => unavailable_main_document(
+            resource,
+            SourceBodyUnavailableReason::CdpBodyUnavailable,
+            max_source_bytes,
+            duration_micros(started.elapsed()),
+        ),
     }
 }
 
@@ -825,22 +952,25 @@ fn decode_cdp_body(
 fn unavailable_main_document(
     resource: &ResourceRecord,
     reason: SourceBodyUnavailableReason,
+    max_source_bytes: usize,
+    captured_at_micros: u64,
 ) -> MainDocumentSource {
     MainDocumentSource {
-        resource_id:         resource.id,
-        url:                 resource.url.clone(),
-        status:              resource.status,
-        headers:             resource.headers.clone(),
-        mime_type:           resource.mime_type.clone(),
-        from_cache:          resource.from_cache,
+        resource_id: resource.id,
+        url: resource.url.clone(),
+        status: resource.status,
+        headers: resource.headers.clone(),
+        mime_type: resource.mime_type.clone(),
+        from_cache: resource.from_cache,
         from_service_worker: resource.from_service_worker,
-        body_layer:          None,
-        body_state:          ResponseBodyState::Unavailable,
-        body_unavailable:    Some(reason),
-        retained_bytes:      0,
-        complete_bytes:      None,
-        body:                Arc::from([]),
-        max_source_bytes:    1,
+        body_layer: None,
+        body_state: ResponseBodyState::Unavailable,
+        body_unavailable: Some(reason),
+        retained_bytes: 0,
+        complete_bytes: None,
+        captured_at_micros,
+        body: Arc::from([]),
+        max_source_bytes,
     }
 }
 
@@ -910,6 +1040,8 @@ fn duration_micros(duration: Duration) -> u64 {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
+    use std::future;
+
     use base64::Engine as _;
 
     use super::*;
@@ -931,6 +1063,50 @@ mod tests {
                 .validate()
                 .is_err()
         );
+    }
+
+    struct AbortSignal(Option<oneshot::Sender<()>>);
+
+    impl Drop for AbortSignal {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    fn pending_capture() -> (NavigationCapture, oneshot::Receiver<()>, oneshot::Receiver<()>) {
+        let (stop, _) = oneshot::channel();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (aborted_tx, aborted_rx) = oneshot::channel();
+        let worker = tokio::spawn(async move {
+            let _signal = AbortSignal(Some(aborted_tx));
+            let _ = started_tx.send(());
+            future::pending::<NavigationCaptureReport>().await
+        });
+        (NavigationCapture { stop: Some(stop), worker: Some(worker) }, started_rx, aborted_rx)
+    }
+
+    #[tokio::test]
+    async fn cancelling_terminal_joins_aborts_the_owned_body_capture_worker() {
+        macro_rules! assert_terminal_join_aborts_worker {
+            ($method:ident) => {{
+                let (capture, started, aborted) = pending_capture();
+                started.await.expect("worker started");
+                let terminal = tokio::spawn(async move { capture.$method().await });
+                tokio::task::yield_now().await;
+                terminal.abort();
+                let _ = terminal.await;
+                tokio::time::timeout(Duration::from_secs(1), aborted)
+                    .await
+                    .expect("capture drop did not abort worker")
+                    .expect("worker abort signal dropped");
+            }};
+        }
+
+        assert_terminal_join_aborts_worker!(wait);
+        assert_terminal_join_aborts_worker!(finish);
+        assert_terminal_join_aborts_worker!(cancel);
     }
 
     #[test]

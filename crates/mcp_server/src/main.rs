@@ -76,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
     let sessions = Arc::new(SessionRegistry::default());
 
     let state = if let Some(name) = profile_name.as_deref() {
-        tracing::info!(profile = name, headful, "acquiring Chrome profile");
+        tracing::info!(headful, "acquiring pinned Chrome profile");
         let mut handle = acquire_profile(name, Duration::from_secs(30), headless).await?;
         let session = handle.take_session().ok_or_else(|| {
             anyhow::anyhow!("profile handle returned without a session — should be unreachable")
@@ -87,12 +87,7 @@ async fn main() -> anyhow::Result<()> {
             .into_iter()
             .find(|b| b.join(name).is_dir())
             .unwrap_or_else(|| handle.path().to_path_buf());
-        tracing::info!(
-            profile = name,
-            path = %handle.path().display(),
-            user_data_root = %user_data_root.display(),
-            "profile acquired — pool will inherit its Chrome"
-        );
+        tracing::info!(headful, "pinned profile acquired; pool will inherit its Chrome");
         let pinned = PinnedProfile {
             handle,
             session: StdMutex::new(Some(session)),
@@ -110,8 +105,8 @@ async fn main() -> anyhow::Result<()> {
     let service = server.serve(stdio()).await?;
 
     tracing::info!("voidcrawl-mcp ready");
-    let quit = service.waiting().await?;
-    tracing::info!(reason = ?quit, "voidcrawl-mcp shutting down");
+    service.waiting().await?;
+    tracing::info!("voidcrawl-mcp shutting down");
 
     for handle in sessions.drain().await {
         if let Err(e) = close_handle(handle).await {
@@ -127,8 +122,8 @@ async fn main() -> anyhow::Result<()> {
     // `ProfileHandle` inside → its `fs2` advisory lock guard. Chrome
     // itself was already shut down via `pool.close()` above (the pool
     // owns the session that was extracted from the handle).
-    if let Some(ref pinned) = state.pinned {
-        tracing::info!(profile = %pinned.name, "releasing pinned profile");
+    if state.pinned.is_some() {
+        tracing::info!("releasing pinned profile");
     }
     drop(state);
 

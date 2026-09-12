@@ -73,6 +73,14 @@ pub enum VisualCaptureRegion {
     BrowserTarget { target_kind: BrowserTargetKind },
 }
 
+/// Sequential layout and raster observations from one document epoch.
+/// This does not guarantee simultaneous or atomic measurement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PairedLayoutVisualSnapshot {
+    pub layout: LayoutSnapshot,
+    pub visual: VisualSnapshot,
+}
+
 /// PNG bytes plus the facts needed to interpret their coordinate space.
 #[derive(Clone, PartialEq)]
 pub struct VisualSnapshot {
@@ -149,9 +157,16 @@ pub(crate) fn visual_snapshot(
 }
 
 fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    const SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    if bytes.get(..8)? != SIGNATURE
+        || bytes.get(8..12)? != [0, 0, 0, 13]
+        || bytes.get(12..16)? != b"IHDR"
+    {
+        return None;
+    }
     let width = bytes.get(16..20)?.try_into().ok().map(u32::from_be_bytes)?;
     let height = bytes.get(20..24)?.try_into().ok().map(u32::from_be_bytes)?;
-    Some((width, height))
+    (width > 0 && height > 0).then_some((width, height))
 }
 
 fn unix_millis() -> Option<u64> {
@@ -168,5 +183,18 @@ mod tests {
     #[test]
     fn png_dimensions_reject_short_payloads() {
         assert_eq!(png_dimensions(&[]), None);
+    }
+
+    #[test]
+    fn png_dimensions_require_signature_ihdr_and_nonzero_dimensions() {
+        let mut valid = vec![0_u8; 24];
+        valid[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        valid[8..12].copy_from_slice(&13_u32.to_be_bytes());
+        valid[12..16].copy_from_slice(b"IHDR");
+        valid[16..20].copy_from_slice(&2_u32.to_be_bytes());
+        valid[20..24].copy_from_slice(&3_u32.to_be_bytes());
+        assert_eq!(png_dimensions(&valid), Some((2, 3)));
+        valid[0] = 0;
+        assert_eq!(png_dimensions(&valid), None);
     }
 }

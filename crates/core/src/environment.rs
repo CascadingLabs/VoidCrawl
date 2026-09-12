@@ -108,6 +108,48 @@ pub enum EffectiveReducedMotion {
     NoPreference,
 }
 
+/// Provider-native color-scheme override applied through CDP emulation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColorSchemePreference {
+    Light,
+    Dark,
+    NoPreference,
+}
+
+/// Provider-native reduced-motion override applied through CDP emulation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReducedMotionPreference {
+    Reduce,
+    NoPreference,
+}
+
+/// Independently optional rendering preferences applied atomically in one CDP
+/// emulated-media command. An omitted preference is left unchanged.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct RenderingPreferences {
+    pub color_scheme:   Option<ColorSchemePreference>,
+    pub reduced_motion: Option<ReducedMotionPreference>,
+}
+
+impl RenderingPreferences {
+    pub const fn new(
+        color_scheme: Option<ColorSchemePreference>,
+        reduced_motion: Option<ReducedMotionPreference>,
+    ) -> Self {
+        Self { color_scheme, reduced_motion }
+    }
+
+    pub const fn color_scheme(color_scheme: ColorSchemePreference) -> Self {
+        Self::new(Some(color_scheme), None)
+    }
+
+    pub const fn reduced_motion(reduced_motion: ReducedMotionPreference) -> Self {
+        Self::new(None, Some(reduced_motion))
+    }
+}
+
 /// Representation-affecting facts observed in the page's main world.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BrowserRenderingEnvironment {

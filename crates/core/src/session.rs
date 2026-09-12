@@ -12,14 +12,24 @@ use std::{
 
 use chromiumoxide::{
     browser::{Browser, BrowserConfig, CdpMode},
-    cdp::browser_protocol::target::{
-        CreateBrowserContextParams, CreateTargetParams, DisposeBrowserContextParams, TargetId,
+    cdp::browser_protocol::{
+        browser::BrowserContextId,
+        target::{
+            CreateBrowserContextParams, CreateTargetParams, DisposeBrowserContextParams, TargetId,
+        },
     },
     handler::{Handler, HandlerConfig},
 };
 use rustls::crypto::ring::default_provider as ring_crypto_provider;
 use serde_json::Value;
-use tokio::{sync::Mutex, task::JoinHandle, time};
+use tokio::{
+    runtime::Handle,
+    sync::{Mutex, oneshot},
+    task::JoinHandle,
+    time,
+};
+
+const SESSION_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 
 use crate::{
     context_isolation::{BrowserStateBinding, IsolatedBrowserContext},
@@ -42,10 +52,11 @@ use crate::{
 /// 2. **Hardware GPU / WebGL** — new headless disables the GPU and falls back
 ///    to SwiftShader software WebGL, which `WEBGL_debug_renderer_info` reports
 ///    as "SwiftShader" — a strong bot signal Cloudflare Turnstile weighs. These
-///    force hardware acceleration through ANGLE. (`--disable-gpu-sandbox` lets
-///    the GPU process reach the DRI render node; on boxes with a stale Vulkan
-///    ICD you may also need to steer `VK_DRIVER_FILES` in the launch
-///    environment.) Harmless under headful — a real display already has a GPU.
+///    request hardware acceleration through ANGLE while preserving Chromium's
+///    GPU-process sandbox. Hosts with a demonstrated driver incompatibility may
+///    opt in to `--disable-gpu-sandbox` through [`BrowserSessionBuilder::arg`],
+///    but it is never a default because Chromium warns that it reduces security
+///    and stability.
 ///
 /// Flags are stored **without** the leading `--`: chromiumoxide's
 /// `BrowserConfig::arg` prepends `--` itself (it treats the whole string as a
@@ -86,7 +97,6 @@ pub(crate) const DEFAULT_CHROME_ARGS: &[&str] = &[
     // `enable-features=Vulkan` here; that force-enables Vulkan independently
     // and would silently defeat a caller's `use-angle` override.
     "use-angle=vulkan",
-    "disable-gpu-sandbox",
 ];
 
 /// Default `Browser::launch` timeout. chromiumoxide ships a 20s default, which
@@ -240,6 +250,12 @@ impl BrowserSessionBuilder {
         self
     }
 
+    /// Add one explicit Chrome command-line switch.
+    ///
+    /// VoidCrawl preserves Chromium's GPU-process sandbox by default. Use
+    /// `disable-gpu-sandbox` only as a host-specific, documented workaround
+    /// after confirming a graphics-driver incompatibility; Chrome warns that
+    /// it reduces security and stability.
     pub fn arg(mut self, arg: impl Into<String>) -> Self {
         self.extra_args.push(arg.into());
         self
@@ -350,31 +366,86 @@ impl BrowserSessionBuilder {
     }
 }
 
+struct PendingBrowserContext {
+    browser:    Arc<Mutex<Browser>>,
+    context_id: Option<BrowserContextId>,
+}
+
+impl PendingBrowserContext {
+    fn new(browser: Arc<Mutex<Browser>>, context_id: BrowserContextId) -> Self {
+        Self { browser, context_id: Some(context_id) }
+    }
+
+    fn disarm(&mut self) {
+        self.context_id = None;
+    }
+
+    async fn dispose(mut self) {
+        let Some(context_id) = self.context_id.take() else {
+            return;
+        };
+        let browser = Arc::clone(&self.browser);
+        let cleanup = tokio::spawn(async move {
+            let _ =
+                browser.lock().await.execute(DisposeBrowserContextParams::new(context_id)).await;
+        });
+        let _ = cleanup.await;
+    }
+}
+
+impl Drop for PendingBrowserContext {
+    fn drop(&mut self) {
+        let Some(context_id) = self.context_id.take() else {
+            return;
+        };
+        let Ok(runtime) = Handle::try_current() else {
+            return;
+        };
+        let browser = Arc::clone(&self.browser);
+        runtime.spawn(async move {
+            let _ =
+                browser.lock().await.execute(DisposeBrowserContextParams::new(context_id)).await;
+        });
+    }
+}
+
 /// A live browser session wrapping `chromiumoxide::Browser`.
 ///
 /// Use [`BrowserSessionBuilder`] or the convenience constructors to create one.
 pub struct BrowserSession {
-    browser:        Arc<Mutex<Browser>>,
-    browser_mode:   EnvironmentObservation<BrowserVisibilityMode>,
-    cdp_mode:       CdpMode,
-    interrupts:     Arc<InterruptRegistry>,
-    _handler_task:  JoinHandle<()>,
-    handler_alive:  Arc<AtomicBool>,
-    stealth:        StealthConfig,
+    browser:               Arc<Mutex<Browser>>,
+    browser_mode:          EnvironmentObservation<BrowserVisibilityMode>,
+    cdp_mode:              CdpMode,
+    interrupts:            Arc<InterruptRegistry>,
+    /// Retained until shutdown completes so cancellation of `close()` cannot
+    /// detach the handler task.
+    handler_task:          Mutex<Option<JoinHandle<()>>>,
+    /// Launched-browser shutdown is a one-way background operation. Retaining
+    /// its handle lets a later `close()` await the same work after
+    /// cancellation.
+    browser_shutdown_task: Mutex<Option<JoinHandle<Result<()>>>>,
+    handler_alive:         Arc<AtomicBool>,
+    /// Serializes close attempts. A cancelled close leaves this unlocked so a
+    /// later call can finish shutdown without issuing duplicate successful
+    /// work.
+    close_lock:            Mutex<()>,
+    close_started:         AtomicBool,
+    close_complete:        AtomicBool,
+    stealth:               StealthConfig,
     /// True when this session attached to an already-running Chrome via
     /// `BrowserMode::RemoteDebug`. In that case `close()` must NOT send
     /// `Browser.close` over CDP — doing so terminates the user's Chromium
     /// process, which we didn't spawn and have no business shutting down.
-    attached:       bool,
-    state_binding:  BrowserStateBinding,
+    attached:              bool,
+    state_binding:         BrowserStateBinding,
     /// Owns the temporary user data directory for launched browsers.
     /// `None` for remote-debug sessions (no local user data dir).
     /// Dropped after `browser` and `_handler_task`, so Chrome has already
     /// been signalled to close before the directory is deleted.
-    _user_data_dir: Option<tempfile::TempDir>,
+    _user_data_dir:        Option<tempfile::TempDir>,
     /// Shared with every `Page` this session creates, so screenshot capture
     /// is serialized per-browser rather than per-tab. See [`Page::screenshot`].
-    capture_lock:   Arc<Mutex<()>>,
+    capture_lock:          Arc<Mutex<()>>,
 }
 
 impl fmt::Debug for BrowserSession {
@@ -390,7 +461,7 @@ impl BrowserSession {
     /// the WebSocket connection has been lost — all subsequent CDP calls
     /// will fail.
     pub fn is_alive(&self) -> bool {
-        self.handler_alive.load(Ordering::Acquire)
+        !self.close_started.load(Ordering::Acquire) && self.handler_alive.load(Ordering::Acquire)
     }
 
     /// Check that the handler is still running; return `BrowserClosed` if not.
@@ -445,8 +516,9 @@ impl BrowserSession {
         let (browser, handler) = match &mode {
             BrowserMode::RemoteDebug { ws_url } => {
                 let ws = resolve_ws_url(ws_url).await?;
-                // `Browser::connect` hardcodes `HandlerConfig::default()`, which would
-                // re-read the environment and discard an explicit `cdp_mode`.
+                // `Browser::connect` hardcodes `HandlerConfig::default()`,
+                // which would re-read the environment and
+                // discard an explicit `cdp_mode`.
                 let handler_config = HandlerConfig { cdp_mode, ..HandlerConfig::default() };
                 Browser::connect_with_config(&ws, handler_config)
                     .await
@@ -547,8 +619,12 @@ impl BrowserSession {
             browser_mode,
             cdp_mode,
             interrupts: InterruptRegistry::new(),
-            _handler_task: handler_task,
+            handler_task: Mutex::new(Some(handler_task)),
+            browser_shutdown_task: Mutex::new(None),
             handler_alive: alive,
+            close_lock: Mutex::new(()),
+            close_started: AtomicBool::new(false),
+            close_complete: AtomicBool::new(false),
             stealth,
             attached: matches!(mode, BrowserMode::RemoteDebug { .. }),
             state_binding,
@@ -606,46 +682,80 @@ impl BrowserSession {
     /// attempting to reset those state families individually.
     pub async fn new_isolated_context(&self) -> Result<IsolatedBrowserContext> {
         self.check_alive()?;
-        let (context_id, cdp_page) = {
-            let browser = self.browser.lock().await;
-            let context_id = browser
-                .execute(CreateBrowserContextParams::builder().dispose_on_detach(true).build())
-                .await
-                .map_err(|e| VoidCrawlError::PageError(e.to_string()))?
-                .result
-                .browser_context_id;
-            let params = CreateTargetParams::builder()
-                .url("about:blank")
-                .browser_context_id(context_id.clone())
-                .build()
-                .map_err(VoidCrawlError::PageError)?;
-            match browser.new_page(params).await {
-                Ok(page) => (context_id, page),
-                Err(error) => {
-                    let _ = browser.execute(DisposeBrowserContextParams::new(context_id)).await;
-                    return Err(VoidCrawlError::PageError(error.to_string()));
+        let browser = Arc::clone(&self.browser);
+        let capture_lock = Arc::clone(&self.capture_lock);
+        let interrupts = Arc::clone(&self.interrupts);
+        let browser_mode = self.browser_mode.clone();
+        let handler_alive = Arc::clone(&self.handler_alive);
+        let stealth = self.stealth_for_session();
+        let cdp_mode = self.cdp_mode;
+        let attached = self.attached;
+
+        // Retain the entire construction beyond caller cancellation. The
+        // worker sends its result through a channel rather than returning an
+        // owned context as detached task output. If the caller disappears,
+        // the failed send gives the worker the context back for explicit
+        // awaited disposal.
+        let (result_tx, result_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let result = async move {
+                let (context_id, cdp_page, mut pending_context) = {
+                    let browser_guard = browser.lock().await;
+                    let context_id = browser_guard
+                        .execute(
+                            CreateBrowserContextParams::builder().dispose_on_detach(true).build(),
+                        )
+                        .await
+                        .map_err(|e| VoidCrawlError::PageError(e.to_string()))?
+                        .result
+                        .browser_context_id;
+                    let mut pending_context =
+                        PendingBrowserContext::new(Arc::clone(&browser), context_id.clone());
+                    let params = CreateTargetParams::builder()
+                        .url("about:blank")
+                        .browser_context_id(context_id.clone())
+                        .build()
+                        .map_err(VoidCrawlError::PageError)?;
+                    match browser_guard.new_page(params).await {
+                        Ok(page) => (context_id, page, pending_context),
+                        Err(error) => {
+                            let _ = browser_guard
+                                .execute(DisposeBrowserContextParams::new(context_id))
+                                .await;
+                            pending_context.disarm();
+                            return Err(VoidCrawlError::PageError(error.to_string()));
+                        }
+                    }
+                };
+                let page = Page::new(
+                    cdp_page,
+                    capture_lock,
+                    interrupts,
+                    browser_mode,
+                    cdp_mode,
+                    attached,
+                    BrowserStateBinding::IsolatedBrowserContext,
+                );
+                if let Some(stealth) = stealth
+                    && let Err(error) = page.apply_stealth(&stealth).await
+                {
+                    pending_context.dispose().await;
+                    return Err(error);
                 }
+                pending_context.disarm();
+                Ok(IsolatedBrowserContext::new(page, browser, context_id, handler_alive))
             }
-        };
-        let page =
-            self.wrap_page_with_binding(cdp_page, BrowserStateBinding::IsolatedBrowserContext);
-        if let Some(stealth) = self.stealth_for_session()
-            && let Err(error) = page.apply_stealth(&stealth).await
-        {
-            let _ = self
-                .browser
-                .lock()
-                .await
-                .execute(DisposeBrowserContextParams::new(context_id))
-                .await;
-            return Err(error);
-        }
-        Ok(IsolatedBrowserContext::new(
-            page,
-            Arc::clone(&self.browser),
-            context_id,
-            Arc::clone(&self.handler_alive),
-        ))
+            .await;
+
+            if let Err(unreceived) = result_tx.send(result)
+                && let Ok(context) = unreceived
+            {
+                let _ = context.dispose().await;
+            }
+        });
+        result_rx.await.map_err(|_| {
+            VoidCrawlError::Other("context construction task ended without a result".into())
+        })?
     }
 
     fn wrap_page(&self, page: chromiumoxide::Page) -> Page {
@@ -744,6 +854,8 @@ impl BrowserSession {
                 if pages.len() >= expected_pages || attempt == 19 {
                     return Ok(pages.into_iter().map(|page| self.wrap_page(page)).collect());
                 }
+                // EVENT_DRIVEN_SLEEP_APPROVED: CDP has no target-ready event;
+                // polling is bounded.
                 time::sleep(Duration::from_millis(25)).await;
             }
         }
@@ -777,6 +889,8 @@ impl BrowserSession {
         browser.fetch_targets().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
         // Targets are registered by `fetch_targets`, but the page handle may
         // need a beat to settle before it is usable.
+        // EVENT_DRIVEN_SLEEP_APPROVED: CDP has no target-ready event; delay is
+        // bounded.
         time::sleep(Duration::from_millis(100)).await;
         let cdp_page = browser
             .get_page(TargetId::new(target_id))
@@ -824,21 +938,88 @@ impl BrowserSession {
         Ok(info.product)
     }
 
-    /// Gracefully close the browser.
-    ///
-    /// For a launched session this signals Chrome to shut down over CDP and
-    /// cleans up the temporary user data directory when the session is
-    /// dropped. For an attached (`RemoteDebug`) session this is a no-op at
-    /// the CDP level — we only launched a WebSocket connection, not the
-    /// browser process, so we have no mandate to kill it. The connection
-    /// is released when the session is dropped.
+    /// Gracefully close the session. This operation is idempotent and may be
+    /// retried if its caller is cancelled. Launched sessions send
+    /// `Browser.close` once and wait at most [`SESSION_CLOSE_TIMEOUT`] for
+    /// the handler/process; attached sessions only disconnect their handler
+    /// and never close Chrome.
     pub async fn close(&self) -> Result<()> {
-        if self.attached {
+        if self.close_complete.load(Ordering::Acquire) {
             return Ok(());
         }
-        let mut browser = self.browser.lock().await;
-        browser.close().await.map_err(|e| VoidCrawlError::Other(e.to_string()))?;
+        self.close_started.store(true, Ordering::Release);
+        let _close = self.close_lock.lock().await;
+        if self.close_complete.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        if self.attached {
+            self.stop_handler().await?;
+            self.close_complete.store(true, Ordering::Release);
+            return Ok(());
+        }
+
+        // Do not await Browser.close directly: cancelling this caller after
+        // Chrome accepted the request would otherwise make a retry send a
+        // duplicate close. The retained task also performs the mandatory child
+        // reap before this session may report successful shutdown.
+        {
+            let mut shutdown_task = self.browser_shutdown_task.lock().await;
+            if shutdown_task.is_none() {
+                *shutdown_task =
+                    Some(tokio::spawn(shutdown_launched_browser(Arc::clone(&self.browser))));
+            }
+            let Some(task) = shutdown_task.as_mut() else {
+                return Err(VoidCrawlError::Other(
+                    "browser shutdown task was not installed".into(),
+                ));
+            };
+            let outcome = task.await;
+            // The completed handle must be consumed before either returning or
+            // retrying; polling a completed JoinHandle panics. A failed task is
+            // deliberately forgotten so the next close launches fresh work.
+            shutdown_task.take();
+            match outcome {
+                Ok(result) => result?,
+                Err(error) => {
+                    return Err(VoidCrawlError::Other(format!(
+                        "browser shutdown task failed: {error}"
+                    )));
+                }
+            }
+        }
+
+        self.stop_handler().await?;
+        self.close_complete.store(true, Ordering::Release);
         Ok(())
+    }
+
+    /// Stop and retain the handler task. Retention is intentional: cancellation
+    /// while awaiting it must leave the handle available to the next close.
+    async fn stop_handler(&self) -> Result<()> {
+        let mut handler_task = self.handler_task.lock().await;
+        if let Some(task) = handler_task.as_mut() {
+            task.abort();
+            if time::timeout(SESSION_CLOSE_TIMEOUT, task).await.is_err() {
+                return Err(VoidCrawlError::Timeout(
+                    "browser session close timed out stopping the CDP handler".into(),
+                ));
+            }
+            handler_task.take();
+        }
+        self.handler_alive.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    /// Close and reap this session no later than `deadline`.
+    ///
+    /// Timing out cancels only this waiter. The retained shutdown task remains
+    /// owned by the session, so a later `close` or `close_before` can safely
+    /// resume the same idempotent shutdown.
+    pub async fn close_before(&self, deadline: time::Instant) -> Result<()> {
+        time::timeout_at(deadline, self.close())
+            .await
+            .map_err(|_| VoidCrawlError::Timeout("browser session close deadline reached".into()))?
     }
 
     /// True when this session was attached to an already-running browser
@@ -886,6 +1067,41 @@ fn spawn_handler(mut handler: Handler, alive: Arc<AtomicBool>) -> JoinHandle<()>
         while handler.next().await.is_some() {}
         alive.store(false, Ordering::Release);
     })
+}
+
+/// Close and reap a Chromium process. Every process operation is bounded; if
+/// graceful close or its reap stalls, `kill` is bounded too and reaps the child
+/// itself per chromiumoxide's contract.
+async fn shutdown_launched_browser(browser: Arc<Mutex<Browser>>) -> Result<()> {
+    let _close = time::timeout(SESSION_CLOSE_TIMEOUT, async {
+        browser.lock().await.close().await.map_err(|error| error.to_string())
+    })
+    .await;
+
+    let exited = time::timeout(SESSION_CLOSE_TIMEOUT, async {
+        browser.lock().await.wait().await.map_err(|error| error.to_string())
+    })
+    .await;
+    if matches!(exited, Ok(Ok(_))) {
+        return Ok(());
+    }
+
+    match time::timeout(SESSION_CLOSE_TIMEOUT, async {
+        match browser.lock().await.kill().await {
+            Some(Ok(())) | None => Ok(()),
+            Some(Err(error)) => Err(error.to_string()),
+        }
+    })
+    .await
+    {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(VoidCrawlError::Other(format!(
+            "browser session close could not reap Chromium: {error}"
+        ))),
+        Err(_) => {
+            Err(VoidCrawlError::Timeout("browser session close timed out killing Chromium".into()))
+        }
+    }
 }
 
 /// If the user gives us `http://host:port` (Chrome's debug HTTP endpoint),
@@ -974,11 +1190,11 @@ mod tests {
             "use-angle=vulkan",
             "enable-gpu",
             "ignore-gpu-blocklist",
-            "disable-gpu-sandbox",
         ] {
             assert!(args.iter().any(|a| a == expected), "missing default flag: {expected}");
         }
         for removed in [
+            "disable-gpu-sandbox",
             "disable-blink-features=AutomationControlled",
             "disable-infobars",
             "disable-background-networking",
@@ -993,12 +1209,20 @@ mod tests {
     /// and appended.
     #[test]
     fn novel_extra_args_are_normalized_and_appended() {
-        let extra = vec!["--proxy-bypass-list=*".to_string(), "lang=fr".to_string()];
+        let extra = vec![
+            "--proxy-bypass-list=*".to_string(),
+            "lang=fr".to_string(),
+            "--disable-gpu-sandbox".to_string(),
+        ];
         let args = assemble_chrome_args(&extra);
         // Both forms (with/without `--`) land un-prefixed and last.
         assert_eq!(
-            &args[args.len() - 2..],
-            &["proxy-bypass-list=*".to_string(), "lang=fr".to_string()][..]
+            &args[args.len() - 3..],
+            &[
+                "proxy-bypass-list=*".to_string(),
+                "lang=fr".to_string(),
+                "disable-gpu-sandbox".to_string(),
+            ][..]
         );
         assert_eq!(args.len(), DEFAULT_CHROME_ARGS.len() + extra.len());
     }

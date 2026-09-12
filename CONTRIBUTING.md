@@ -137,7 +137,11 @@ uv run mypy .
 - Never use `unittest` -always `pytest`
 - Use `tenacity` for retries -never `time.sleep()` in loops
 
-CI runs clippy, cargo test, and ruff on every push and PR. Your PR must pass all checks.
+CI runs clippy, cargo test, ruff, and the event-driven wait gate on every push and PR. Your PR must pass all checks.
+
+### Event-driven waits
+
+Production Rust (`crates/*/src`) and Python (`voidcrawl/`) must wait on browser/CDP events, channels, or owned task completion rather than `sleep(...)`. The `scripts/check-event-driven-waits.py` gate rejects unqualified and qualified sleep calls; `timeout`, `timeout_at`, and `sleep_until` remain valid bounds or deadline waits. A rare exception needs an immediately preceding contiguous comment block containing `EVENT_DRIVEN_SLEEP_APPROVED:` and at least 40 non-whitespace rationale characters. These approvals require maintainer review and should be rare.
 
 ## Issues
 

@@ -47,7 +47,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::page::Bbox;
+use crate::{
+    error::{Result, VoidCrawlError},
+    page::Bbox,
+};
 
 /// Browser target strategies understood by VoidCrawl geometry operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +93,71 @@ impl BrowserTarget {
     /// Whether this target kind can resolve to visual geometry.
     pub const fn supports_geometry(&self) -> bool {
         !matches!(self.kind, BrowserTargetKind::Jsonld | BrowserTargetKind::Regex)
+    }
+
+    /// Validate the target shape before any browser/CDP resolution.
+    ///
+    /// Reasons are static so invalid caller input is never reflected in an
+    /// error. Optional `name` remains supported for compatibility, but when
+    /// supplied it must identify something.
+    pub fn validate(&self) -> Result<()> {
+        let requires_value = !matches!(self.kind, BrowserTargetKind::Visual);
+        if requires_value && self.value.is_empty() {
+            return Err(VoidCrawlError::InvalidInput {
+                operation: "browser_target",
+                reason:    "target kind requires a non-empty selector value",
+            });
+        }
+        if self.name.as_deref().is_some_and(str::is_empty) {
+            return Err(VoidCrawlError::InvalidInput {
+                operation: "browser_target",
+                reason:    "target name must be non-empty when supplied",
+            });
+        }
+
+        match self.kind {
+            BrowserTargetKind::Visual => {
+                let (Some(x), Some(y)) = (self.x, self.y) else {
+                    return Err(VoidCrawlError::InvalidInput {
+                        operation: "browser_target",
+                        reason:    "visual target requires both x and y coordinates",
+                    });
+                };
+                if !x.is_finite() || !y.is_finite() {
+                    return Err(VoidCrawlError::InvalidInput {
+                        operation: "browser_target",
+                        reason:    "visual target coordinates must be finite",
+                    });
+                }
+                if x < 0.0 || y < 0.0 {
+                    return Err(VoidCrawlError::InvalidInput {
+                        operation: "browser_target",
+                        reason:    "visual target coordinates must be non-negative",
+                    });
+                }
+                if self.nth.is_some() {
+                    return Err(VoidCrawlError::InvalidInput {
+                        operation: "browser_target",
+                        reason:    "visual target does not support nth",
+                    });
+                }
+            }
+            BrowserTargetKind::Jsonld | BrowserTargetKind::Regex if self.nth.is_some() => {
+                return Err(VoidCrawlError::InvalidInput {
+                    operation: "browser_target",
+                    reason:    "non-visual target does not support nth",
+                });
+            }
+            _ => {
+                if self.x.is_some() || self.y.is_some() {
+                    return Err(VoidCrawlError::InvalidInput {
+                        operation: "browser_target",
+                        reason:    "coordinates are only supported by visual targets",
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -263,6 +331,78 @@ mod tests {
 
     fn rect(x: f64, y: f64, w: f64, h: f64) -> RawRect {
         RawRect { x, y, width: w, height: h }
+    }
+
+    fn target(kind: BrowserTargetKind) -> BrowserTarget {
+        BrowserTarget {
+            kind,
+            value: "target".into(),
+            regex: None,
+            name: None,
+            nth: None,
+            x: None,
+            y: None,
+        }
+    }
+
+    #[test]
+    fn validation_matrix_rejects_invalid_target_shapes() {
+        let mut cases = Vec::new();
+
+        let mut empty_css = target(BrowserTargetKind::Css);
+        empty_css.value.clear();
+        cases.push((empty_css, "target kind requires a non-empty selector value"));
+
+        let mut empty_name = target(BrowserTargetKind::Role);
+        empty_name.name = Some(String::new());
+        cases.push((empty_name, "target name must be non-empty when supplied"));
+
+        cases.push((
+            target(BrowserTargetKind::Visual),
+            "visual target requires both x and y coordinates",
+        ));
+
+        let mut non_finite = target(BrowserTargetKind::Visual);
+        non_finite.x = Some(f64::NAN);
+        non_finite.y = Some(1.0);
+        cases.push((non_finite, "visual target coordinates must be finite"));
+
+        let mut negative = target(BrowserTargetKind::Visual);
+        negative.x = Some(-1.0);
+        negative.y = Some(1.0);
+        cases.push((negative, "visual target coordinates must be non-negative"));
+
+        let mut visual_nth = target(BrowserTargetKind::Visual);
+        visual_nth.x = Some(1.0);
+        visual_nth.y = Some(1.0);
+        visual_nth.nth = Some(0);
+        cases.push((visual_nth, "visual target does not support nth"));
+
+        let mut regex_nth = target(BrowserTargetKind::Regex);
+        regex_nth.nth = Some(0);
+        cases.push((regex_nth, "non-visual target does not support nth"));
+
+        let mut css_coordinates = target(BrowserTargetKind::Css);
+        css_coordinates.x = Some(1.0);
+        cases.push((css_coordinates, "coordinates are only supported by visual targets"));
+
+        for (entry, reason) in cases {
+            match entry.validate() {
+                Err(VoidCrawlError::InvalidInput { operation, reason: actual }) => {
+                    assert_eq!(operation, "browser_target");
+                    assert_eq!(actual, reason);
+                }
+                other => panic!("expected InvalidInput, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn validation_preserves_documented_optional_name_compatibility() {
+        for kind in [BrowserTargetKind::Attr, BrowserTargetKind::GlobalId, BrowserTargetKind::Role]
+        {
+            assert!(target(kind).validate().is_ok(), "{kind:?} name remains optional");
+        }
     }
 
     #[test]

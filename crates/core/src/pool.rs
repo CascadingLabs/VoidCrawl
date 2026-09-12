@@ -15,7 +15,7 @@ use std::{
     env, fmt,
     sync::{
         Arc, Mutex as StdMutex, PoisonError,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -24,10 +24,41 @@ use futures::future;
 use serde::Serialize;
 use tokio::{
     runtime::Handle,
-    sync::{Mutex, OwnedSemaphorePermit, Semaphore},
+    sync::{Mutex, Notify, OwnedSemaphorePermit, RwLock, Semaphore},
     task::JoinHandle,
-    time::{sleep, timeout},
+    time::{interval, timeout},
 };
+
+/// Shutdown is bounded so a forgotten checkout cannot hang process teardown.
+/// After this interval sessions are closed even if a caller still holds a tab.
+const POOL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+const TAB_CLOSE_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Default)]
+struct CleanupTracker {
+    active:  AtomicUsize,
+    changed: Notify,
+}
+
+impl CleanupTracker {
+    fn start(self: &Arc<Self>) -> CleanupGuard {
+        self.active.fetch_add(1, Ordering::AcqRel);
+        CleanupGuard(Arc::clone(self))
+    }
+
+    fn is_idle(&self) -> bool {
+        self.active.load(Ordering::Acquire) == 0
+    }
+}
+
+struct CleanupGuard(Arc<CleanupTracker>);
+
+impl Drop for CleanupGuard {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::AcqRel);
+        self.0.changed.notify_waiters();
+    }
+}
 
 use crate::{
     context_isolation::BrowserStateBinding,
@@ -93,6 +124,7 @@ pub struct PooledTab {
     pub(crate) browser_idx: usize,
     /// Checkout ownership. Dropping an unreleased tab restores pool capacity.
     permit:                 Option<OwnedSemaphorePermit>,
+    cleanup_tracker:        Arc<CleanupTracker>,
 }
 
 impl PooledTab {
@@ -112,7 +144,9 @@ impl Drop for PooledTab {
             return;
         };
         let page = self.page.clone_handle();
+        let cleanup_guard = self.cleanup_tracker.start();
         runtime.spawn(async move {
+            let _cleanup_guard = cleanup_guard;
             let _ = page.close().await;
         });
     }
@@ -126,7 +160,7 @@ impl fmt::Debug for PooledTab {
             .field("last_used", &self.last_used)
             .field("browser_idx", &self.browser_idx)
             .field("checked_out", &self.permit.is_some())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -139,6 +173,8 @@ pub enum PoolReleaseStrategy {
     BlankDocumentAndReuseSharedState,
     /// The tab could not be reset safely and was disposed instead of reused.
     DisposeTabAfterResetFailure,
+    /// Shutdown began while the tab was being returned, so it was disposed.
+    DisposeTabAfterPoolClosed,
 }
 
 /// Observable result of returning a shared-state tab to the pool.
@@ -181,15 +217,26 @@ pub struct PoolReleaseReport {
 /// # }
 /// ```
 pub struct BrowserPool {
-    sessions:      Vec<BrowserSession>,
-    ready:         Arc<Mutex<VecDeque<PooledTab>>>,
-    semaphore:     Arc<Semaphore>,
-    config:        PoolConfig,
+    sessions:          Arc<Vec<BrowserSession>>,
+    ready:             Arc<Mutex<VecDeque<PooledTab>>>,
+    semaphore:         Arc<Semaphore>,
+    config:            PoolConfig,
     /// Round-robin counter for distributing new tabs across sessions.
-    next_session:  AtomicUsize,
+    next_session:      AtomicUsize,
     /// Background eviction task handle.  `StdMutex` (not tokio) because we
     /// only set/take the handle in sync contexts — no `.await` inside the lock.
-    eviction_task: StdMutex<Option<JoinHandle<()>>>,
+    eviction_task:     Arc<StdMutex<Option<JoinHandle<()>>>>,
+    /// Retained owned shutdown work, so cancelling a close caller cannot lose
+    /// drained ready tabs or detach teardown.
+    shutdown_task:     Mutex<Option<JoinHandle<Result<()>>>>,
+    /// Prevents a checkout from crossing the boundary where shutdown begins.
+    lifecycle:         Arc<RwLock<()>>,
+    /// Shared with detached release workers so they cannot repopulate a closed
+    /// pool.
+    closed:            Arc<AtomicBool>,
+    shutdown_complete: Arc<AtomicBool>,
+    /// Includes detached release and abandoned-checkout cleanup workers.
+    cleanup_tracker:   Arc<CleanupTracker>,
 }
 
 impl fmt::Debug for BrowserPool {
@@ -210,13 +257,18 @@ impl BrowserPool {
     pub fn new(config: PoolConfig, sessions: Vec<BrowserSession>) -> Self {
         let total_tabs = config.browsers * config.tabs_per_browser;
         Self {
-            sessions,
+            sessions: Arc::new(sessions),
             ready: Arc::new(Mutex::new(VecDeque::with_capacity(total_tabs))),
             // Permits = max concurrency. Tabs created lazily within this limit.
             semaphore: Arc::new(Semaphore::new(total_tabs)),
             config,
             next_session: AtomicUsize::new(0),
-            eviction_task: StdMutex::new(None),
+            eviction_task: Arc::new(StdMutex::new(None)),
+            shutdown_task: Mutex::new(None),
+            lifecycle: Arc::new(RwLock::new(())),
+            closed: Arc::new(AtomicBool::new(false)),
+            shutdown_complete: Arc::new(AtomicBool::new(false)),
+            cleanup_tracker: Arc::new(CleanupTracker::default()),
         }
     }
 
@@ -257,7 +309,8 @@ impl BrowserPool {
             env::var("CDP_PORT_BASE").ok().and_then(|v| v.parse().ok());
 
         let sessions = if let Ok(urls) = env::var("CHROME_WS_URLS") {
-            // Connect mode: attach to pre-existing Chrome instances **in parallel**
+            // Connect mode: attach to pre-existing Chrome instances **in
+            // parallel**
             let futs: Vec<_> = urls
                 .split(',')
                 .map(str::trim)
@@ -341,6 +394,7 @@ impl BrowserPool {
             last_used: Instant::now(),
             browser_idx: idx,
             permit: None,
+            cleanup_tracker: Arc::clone(&self.cleanup_tracker),
         })
     }
 
@@ -353,10 +407,15 @@ impl BrowserPool {
     /// This is **optional** — if not called, tabs are created lazily on
     /// first [`acquire()`](Self::acquire).
     pub async fn warmup(&self) -> Result<()> {
+        let _lifecycle = self.lifecycle.read().await;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(VoidCrawlError::Other("browser pool is closed".into()));
+        }
         // Build futures for all tabs across all sessions
         let mut futs = Vec::with_capacity(self.config.browsers * self.config.tabs_per_browser);
         for (idx, session) in self.sessions.iter().enumerate() {
             for _ in 0..self.config.tabs_per_browser {
+                let cleanup_tracker = Arc::clone(&self.cleanup_tracker);
                 futs.push(async move {
                     let page = session.new_blank_page().await?;
                     Ok::<_, VoidCrawlError>(PooledTab {
@@ -365,6 +424,7 @@ impl BrowserPool {
                         last_used: Instant::now(),
                         browser_idx: idx,
                         permit: None,
+                        cleanup_tracker,
                     })
                 });
             }
@@ -418,6 +478,10 @@ impl BrowserPool {
     /// Surfaced to MCP clients so an agent can tell when it has oversubscribed
     /// the pool and should throttle or cap a batch at `max_tabs`.
     pub async fn acquire_timed(&self) -> Result<(PooledTab, u64)> {
+        let _lifecycle = self.lifecycle.read().await;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(VoidCrawlError::Other("browser pool is closed".into()));
+        }
         let wait_start = Instant::now();
         let permit = if self.config.acquire_timeout_secs == 0 {
             // No timeout — wait indefinitely (legacy behaviour).
@@ -441,6 +505,9 @@ impl BrowserPool {
                 }
             }
         };
+        if self.closed.load(Ordering::Acquire) {
+            return Err(VoidCrawlError::Other("browser pool is closed".into()));
+        }
         // Pure semaphore queueing time — captured before the ready-queue pop
         // and any lazy `create_tab()` round-trip, so tab-creation latency is
         // never misreported as contention.
@@ -460,6 +527,7 @@ impl BrowserPool {
         // Hard recycle if this tab is worn out
         if tab.use_count >= self.config.tab_max_uses {
             let browser_idx = tab.browser_idx;
+            let cleanup_tracker = Arc::clone(&tab.cleanup_tracker);
             let _ = tab.page.close().await;
             match self.sessions[browser_idx].new_blank_page().await {
                 Ok(page) => {
@@ -470,6 +538,7 @@ impl BrowserPool {
                             last_used: Instant::now(),
                             browser_idx,
                             permit: Some(permit),
+                            cleanup_tracker,
                         },
                         waited_ms,
                     ));
@@ -479,8 +548,9 @@ impl BrowserPool {
         }
 
         // No about:blank cleanup — the caller's navigate(url) will replace
-        // the prior page content, and stealth scripts persist across navigations.
-        // This saves 50-200ms of CDP round-trip per reused tab.
+        // the prior page content, and stealth scripts persist across
+        // navigations. This saves 50-200ms of CDP round-trip per reused
+        // tab.
         let mut tab = tab;
         tab.permit = Some(permit);
         Ok((tab, waited_ms))
@@ -505,13 +575,16 @@ impl BrowserPool {
         tab.last_used = Instant::now();
         let state_binding = tab.state_binding();
         let ready = Arc::clone(&self.ready);
+        let closed = Arc::clone(&self.closed);
         let permit = tab.permit.take();
+        let cleanup_guard = self.cleanup_tracker.start();
 
         // Cleanup owns the checked-out slot in a detached task. Cancelling the
         // caller's await therefore cannot drop the tab before restoring pool
         // capacity. The permit guard also restores capacity if cleanup panics
         // or the runtime drops the task before its first poll.
         let worker = tokio::spawn(async move {
+            let _cleanup_guard = cleanup_guard;
             let _permit = permit;
             let download_behavior_reset = if tab.page.is_download_armed() {
                 tab.page.reset_download_behavior_checked().await.is_ok()
@@ -519,23 +592,30 @@ impl BrowserPool {
                 true
             };
             let document_cleared = tab.page.navigate("about:blank").await.is_ok();
-            let cleanup_complete = download_behavior_reset && document_cleared;
-
-            if cleanup_complete {
-                ready.lock().await.push_back(tab);
+            let reset_complete = download_behavior_reset && document_cleared;
+            // The queue-lock recheck is authoritative: shutdown can begin
+            // between the optimistic check and queue insertion, in which case
+            // this tab is disposed and the report must say so.
+            let (strategy, tab_reused) = if reset_complete {
+                let mut ready = ready.lock().await;
+                if closed.load(Ordering::Acquire) {
+                    drop(ready);
+                    let _ = tab.page.close().await;
+                    (PoolReleaseStrategy::DisposeTabAfterPoolClosed, false)
+                } else {
+                    ready.push_back(tab);
+                    (PoolReleaseStrategy::BlankDocumentAndReuseSharedState, true)
+                }
             } else {
                 let _ = tab.page.close().await;
-            }
+                (PoolReleaseStrategy::DisposeTabAfterResetFailure, false)
+            };
 
             PoolReleaseReport {
                 state_binding,
-                strategy: if cleanup_complete {
-                    PoolReleaseStrategy::BlankDocumentAndReuseSharedState
-                } else {
-                    PoolReleaseStrategy::DisposeTabAfterResetFailure
-                },
-                cleanup_complete,
-                tab_reused: cleanup_complete,
+                strategy,
+                cleanup_complete: reset_complete,
+                tab_reused,
                 document_cleared,
                 download_behavior_reset,
                 shared_state_retained: true,
@@ -558,6 +638,10 @@ impl BrowserPool {
     ///
     /// Intended to be called periodically from a background tokio task.
     pub async fn evict_idle(&self) -> Result<()> {
+        let _lifecycle = self.lifecycle.read().await;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(VoidCrawlError::Other("browser pool is closed".into()));
+        }
         let max_idle = Duration::from_secs(self.config.tab_max_idle_secs);
         let now = Instant::now();
 
@@ -588,6 +672,7 @@ impl BrowserPool {
             .map(|tab| {
                 let browser_idx = tab.browser_idx;
                 let session = &self.sessions[browser_idx];
+                let cleanup_tracker = Arc::clone(&tab.cleanup_tracker);
                 async move {
                     if !session.is_alive() {
                         // Session is dead — return the old tab unchanged so
@@ -602,6 +687,7 @@ impl BrowserPool {
                             last_used: Instant::now(),
                             browser_idx,
                             permit: None,
+                            cleanup_tracker,
                         }),
                         Err(e) => Err(e),
                     }
@@ -614,7 +700,10 @@ impl BrowserPool {
         let mut first_err: Option<VoidCrawlError> = None;
         for result in results {
             match result {
-                Ok(tab) => ready.push_back(tab),
+                Ok(tab) if !self.closed.load(Ordering::Acquire) => ready.push_back(tab),
+                Ok(tab) => {
+                    let _ = tab.page.close().await;
+                }
                 // Replacement failed — the old tab is already closed, so
                 // this slot is lost.  The semaphore still has its permit,
                 // so acquire() can still create a tab on-demand if the
@@ -657,6 +746,9 @@ impl BrowserPool {
     ///
     /// Must be called from within a Tokio runtime context.
     pub fn start_eviction_task(self: Arc<Self>) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
         // Recover from a poisoned mutex: if a previous panic occurred while
         // holding this lock, the inner value is still usable.
         let mut slot = self.eviction_task.lock().unwrap_or_else(PoisonError::into_inner);
@@ -664,10 +756,13 @@ impl BrowserPool {
             return; // Already running — ignore duplicate call.
         }
         let pool = Arc::clone(&self);
-        let interval = Duration::from_secs((self.config.tab_max_idle_secs / 2).max(1));
+        let cadence = Duration::from_secs((self.config.tab_max_idle_secs / 2).max(1));
         let handle = tokio::spawn(async move {
+            let mut ticker = interval(cadence);
+            // Tokio intervals tick immediately; eviction's first run remains one full cadence away.
+            ticker.tick().await;
             loop {
-                sleep(interval).await;
+                ticker.tick().await;
                 // Ignore errors — a single eviction failure (e.g. a tab
                 // failing to close) should not kill the background task.
                 let _ = pool.evict_idle().await;
@@ -692,38 +787,118 @@ impl BrowserPool {
     /// but always attempts to close everything regardless of individual
     /// failures.
     pub async fn close(&self) -> Result<()> {
-        // Stop the eviction task before closing so it doesn't race with tab
-        // and session teardown.
-        self.stop_eviction_task();
-        // Drain the ready queue
-        let tabs: Vec<PooledTab> = {
-            let mut ready = self.ready.lock().await;
-            ready.drain(..).collect()
+        if self.shutdown_complete.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        // The transition is synchronous and one-way, immediately waking
+        // queued acquires. All state moved during shutdown belongs to the
+        // retained task rather than this cancellable caller future.
+        self.closed.store(true, Ordering::Release);
+        self.semaphore.close();
+
+        let mut slot = self.shutdown_task.lock().await;
+        if slot.is_none() {
+            let state = PoolShutdownState {
+                sessions:          Arc::clone(&self.sessions),
+                ready:             Arc::clone(&self.ready),
+                semaphore:         Arc::clone(&self.semaphore),
+                eviction_task:     Arc::clone(&self.eviction_task),
+                lifecycle:         Arc::clone(&self.lifecycle),
+                cleanup_tracker:   Arc::clone(&self.cleanup_tracker),
+                shutdown_complete: Arc::clone(&self.shutdown_complete),
+                total_tabs:        self
+                    .config
+                    .browsers
+                    .saturating_mul(self.config.tabs_per_browser),
+            };
+            *slot = Some(tokio::spawn(shutdown_pool(state)));
+        }
+        let Some(task) = slot.as_mut() else {
+            return Err(VoidCrawlError::Other("pool shutdown task was not installed".into()));
         };
-
-        let mut first_err: Option<VoidCrawlError> = None;
-
-        // Close all tabs in parallel
-        let tab_futs: Vec<_> =
-            tabs.into_iter().map(|tab| async move { tab.page.close().await }).collect();
-        for result in future::join_all(tab_futs).await {
-            if let Err(e) = result
-                && first_err.is_none()
-            {
-                first_err = Some(e);
-            }
+        let outcome = task.await;
+        // Keep the handle in the slot throughout a cancellable await, then
+        // consume it exactly once after completion. Failures remain truthful:
+        // shutdown_complete is false and the next call launches a retry.
+        slot.take();
+        match outcome {
+            Ok(result) => result,
+            Err(error) => Err(VoidCrawlError::Other(format!("pool shutdown task failed: {error}"))),
         }
-
-        // Close all browser sessions in parallel
-        let session_futs: Vec<_> = self.sessions.iter().map(BrowserSession::close).collect();
-        for result in future::join_all(session_futs).await {
-            if let Err(e) = result
-                && first_err.is_none()
-            {
-                first_err = Some(e);
-            }
-        }
-
-        if let Some(e) = first_err { Err(e) } else { Ok(()) }
     }
+}
+
+struct PoolShutdownState {
+    sessions:          Arc<Vec<BrowserSession>>,
+    ready:             Arc<Mutex<VecDeque<PooledTab>>>,
+    semaphore:         Arc<Semaphore>,
+    eviction_task:     Arc<StdMutex<Option<JoinHandle<()>>>>,
+    lifecycle:         Arc<RwLock<()>>,
+    cleanup_tracker:   Arc<CleanupTracker>,
+    shutdown_complete: Arc<AtomicBool>,
+    total_tabs:        usize,
+}
+
+async fn shutdown_pool(state: PoolShutdownState) -> Result<()> {
+    let eviction = state.eviction_task.lock().unwrap_or_else(PoisonError::into_inner).take();
+    if let Some(task) = eviction {
+        task.abort();
+        let _ = task.await;
+    }
+
+    let _lifecycle = state.lifecycle.write().await;
+    let mut first_err = None;
+    let wait_for_cleanup = async {
+        loop {
+            // Register before checking state so a cleanup notification cannot
+            // race between the condition check and awaiting the notification.
+            let changed = state.cleanup_tracker.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if state.cleanup_tracker.is_idle()
+                && state.semaphore.available_permits() == state.total_tabs
+            {
+                return;
+            }
+            changed.await;
+        }
+    };
+    if timeout(POOL_SHUTDOWN_TIMEOUT, wait_for_cleanup).await.is_err() {
+        first_err = Some(VoidCrawlError::Timeout(
+            "browser pool shutdown timed out waiting for checked-out tabs and cleanup workers"
+                .into(),
+        ));
+    }
+
+    let tabs: Vec<PooledTab> = state.ready.lock().await.drain(..).collect();
+    let tab_futs = tabs.into_iter().map(|tab| async move {
+        match timeout(TAB_CLOSE_TIMEOUT, tab.page.close()).await {
+            Ok(result) => result,
+            Err(_) => {
+                Err(VoidCrawlError::Timeout("browser pool shutdown timed out closing a tab".into()))
+            }
+        }
+    });
+    for result in future::join_all(tab_futs).await {
+        if let Err(error) = result
+            && first_err.is_none()
+        {
+            first_err = Some(error);
+        }
+    }
+
+    for result in future::join_all(state.sessions.iter().map(BrowserSession::close)).await {
+        if let Err(error) = result
+            && first_err.is_none()
+        {
+            first_err = Some(error);
+        }
+    }
+
+    if let Some(error) = first_err {
+        return Err(error);
+    }
+    state.shutdown_complete.store(true, Ordering::Release);
+    Ok(())
 }

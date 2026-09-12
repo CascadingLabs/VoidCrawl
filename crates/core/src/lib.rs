@@ -23,6 +23,7 @@ pub mod pool;
 pub mod profile;
 pub mod recording;
 pub mod response;
+#[cfg(feature = "scanner")]
 pub mod scanner;
 pub mod selector;
 pub mod session;
@@ -58,15 +59,17 @@ pub use context_isolation::{
 };
 pub use cookie_jar::{CookieLease, CookieProvenance, LeaseScope, fork_scoped};
 pub use document_snapshot::{
+    AccessibilityCaptureMode, AccessibilityIgnoredNodePolicy, AccessibilityPayloadSchema,
     AccessibilitySnapshot, AccessibilitySnapshotOptions, DocumentEpoch, DocumentFrameScope,
     DocumentScope, RenderedDomSnapshot, SnapshotState, SnapshotUnavailableReason,
 };
 pub use environment::{
     BrowserCaptureCapabilities, BrowserEnvironmentSnapshot, BrowserRenderingEnvironment,
     BrowserVisibilityMode, CapabilityDisabledReason, CapabilityState, CapabilityUnavailableReason,
-    CapabilityUnsupportedReason, ControllerVersion, EffectiveColorScheme, EffectiveReducedMotion,
-    EffectiveViewport, EnvironmentObservation, EnvironmentOmissionReason,
-    EnvironmentUnavailableReason, InstrumentationMode, InstrumentationSnapshot, RendererVersion,
+    CapabilityUnsupportedReason, ColorSchemePreference, ControllerVersion, EffectiveColorScheme,
+    EffectiveReducedMotion, EffectiveViewport, EnvironmentObservation, EnvironmentOmissionReason,
+    EnvironmentUnavailableReason, InstrumentationMode, InstrumentationSnapshot,
+    ReducedMotionPreference, RendererVersion, RenderingPreferences,
 };
 pub use error::{
     Result, VoidCrawlError, VoidCrawlErrorCategory, VoidCrawlErrorCode, VoidCrawlErrorSummary,
@@ -79,15 +82,15 @@ pub use managed_profile::{
 };
 pub use navigation_capture::{
     BrowserBodyLayer, MainDocumentSource, NavigationCapture, NavigationCaptureOptions,
-    NavigationCaptureReport, NavigationCaptureTermination, NetworkExtraInfoState, ProtectedHeaders,
-    ProtectedUrl, RedirectHop, ResourceFrameId, ResourceId, ResourceLoaderId, ResourceOutcome,
-    ResourceRecord, SourceBodyUnavailableReason,
+    NavigationCaptureReport, NavigationCaptureTermination, NavigationEvent, NavigationEventKind,
+    NetworkExtraInfoState, ProtectedHeaders, ProtectedUrl, RedirectHop, ResourceFrameId,
+    ResourceId, ResourceLoaderId, ResourceOutcome, ResourceRecord, SourceBodyUnavailableReason,
 };
 pub use observation::{
-    MeasuredCount, MeasurementUnavailableReason, ObservationAccounting, ObservationCountAccounting,
-    ObservationEvent, ObservationEventKind, ObservationOptions, ObservationReport,
-    ObservationScope, ObservationTermination, ProtectedDiagnosticText, RuntimeDiagnostic,
-    RuntimeDiagnosticKind,
+    MeasuredCount, MeasurementUnavailableReason, ObservationAccounting, ObservationCheckpoint,
+    ObservationCountAccounting, ObservationEvent, ObservationEventKind, ObservationOptions,
+    ObservationReport, ObservationScope, ObservationTermination, ProtectedDiagnosticText,
+    QuietSettlementProof, QuietWaitError, RuntimeDiagnostic, RuntimeDiagnosticKind,
 };
 pub use page::{
     Bbox, DownloadCapture, DownloadOutcome, Page, PageResponse, ScreenshotOptions,
@@ -104,8 +107,10 @@ pub use recording::{
 };
 pub use response::{
     CapturedResponse, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_MAX_TOTAL_RESPONSE_BYTES,
-    ResponseBodyState, ResponseCapture, ResponseCaptureLimits,
+    ResponseBodyState, ResponseCapture, ResponseCaptureLimits, ResponseCaptureReport,
+    ResponseCaptureTermination,
 };
+#[cfg(feature = "scanner")]
 pub use scanner::{DEFAULT_MAX_BYTES, ScanConfig, ScanReport, Verdict, scan_bytes, scan_path};
 pub use selector::{BrowserTarget, BrowserTargetKind, TargetResolution};
 #[allow(deprecated)]
@@ -114,6 +119,6 @@ pub use session::{BrowserMode, BrowserSession, BrowserSessionBuilder};
 pub use stealth::StealthConfig;
 pub use viewport::{ScrollTarget, Viewport, all_presets, preset as viewport_preset, preset_names};
 pub use visual_snapshot::{
-    ContentSizeMetrics, LayoutSnapshot, LayoutViewportMetrics, VisualCaptureRegion, VisualFormat,
-    VisualSnapshot, VisualViewportMetrics,
+    ContentSizeMetrics, LayoutSnapshot, LayoutViewportMetrics, PairedLayoutVisualSnapshot,
+    VisualCaptureRegion, VisualFormat, VisualSnapshot, VisualViewportMetrics,
 };

@@ -377,6 +377,7 @@ pub async fn wait_for_resolution(
                 captcha_still_present: None,
             });
         }
+        // EVENT_DRIVEN_SLEEP_APPROVED: External challenge resolvers expose no completion channel to this process; the request deadline bounds status polling.
         sleep(Duration::from_millis(250)).await;
     }
 }

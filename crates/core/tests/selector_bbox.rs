@@ -292,13 +292,16 @@ async fn visual_selector_resolves_to_exact_1x1_box() {
 }
 
 #[tokio::test]
-async fn visual_selector_missing_coords_is_empty() {
+async fn visual_selector_missing_coords_is_invalid_input() {
     let session = headless_session().await;
     let page = page_with(FIXTURE, &session).await;
 
-    match page.resolve_target(&entry(BrowserTargetKind::Visual, "")).await.expect("resolve ok") {
-        TargetResolution::Empty { reason } => assert!(reason.contains("requires both x and y")),
-        other => panic!("expected Empty, got {other:?}"),
+    match page.resolve_target(&entry(BrowserTargetKind::Visual, "")).await {
+        Err(VoidCrawlError::InvalidInput { operation, reason }) => {
+            assert_eq!(operation, "browser_target");
+            assert_eq!(reason, "visual target requires both x and y coordinates");
+        }
+        other => panic!("expected InvalidInput, got {other:?}"),
     }
 
     page.close().await.ok();

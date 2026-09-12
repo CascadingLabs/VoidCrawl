@@ -1,6 +1,9 @@
 //! Deterministic layout and visual metadata tests (CAS-316).
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
+use std::{env, time::Duration};
+
+use tokio::time::timeout;
 use void_crawl_core::{
     BrowserSession, BrowserTarget, BrowserTargetKind, DocumentEpoch, ScreenshotOptions, Viewport,
     VisualCaptureRegion,
@@ -72,6 +75,35 @@ async fn visual_snapshot_pairs_png_bytes_with_dimensions_and_scope() {
 
     page.close().await.expect("close page");
     browser.close().await.expect("close browser");
+}
+
+#[tokio::test]
+async fn known_headful_visual_capture_does_not_wait_for_target_activation() {
+    if env::var_os("DISPLAY").is_none() && env::var_os("WAYLAND_DISPLAY").is_none() {
+        return;
+    }
+    let browser = BrowserSession::builder()
+        .headful()
+        .no_sandbox()
+        .viewport(800, 600)
+        .launch()
+        .await
+        .expect("launch headful Chromium");
+    let page = browser
+        .new_page(&data_url("<main>headful visual</main>"))
+        .await
+        .expect("headful visual fixture");
+    let snapshot = timeout(
+        Duration::from_secs(15),
+        page.visual_snapshot(ScreenshotOptions::default().viewport_only()),
+    )
+    .await
+    .expect("headful visual capture stalled")
+    .expect("headful visual capture failed");
+    assert!(snapshot.complete);
+    assert!(!snapshot.bytes().is_empty());
+    page.close().await.expect("close headful page");
+    browser.close().await.expect("close headful browser");
 }
 
 #[tokio::test]

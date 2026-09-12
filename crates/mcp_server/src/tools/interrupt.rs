@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration};
 use rmcp::ErrorData;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::time::sleep;
+use tokio::time::{Instant, sleep_until};
 use void_crawl_core::{InterruptInfo, InterruptRequest, InterruptState};
 
 use crate::{
@@ -134,7 +134,7 @@ fn schedule_expiry_cleanup(
     ttl: Duration,
 ) {
     tokio::spawn(async move {
-        sleep(ttl).await;
+        sleep_until(Instant::now() + ttl).await;
         let Some(handle) = sessions.get(&session_id).await else {
             return;
         };

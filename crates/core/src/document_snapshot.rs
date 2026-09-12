@@ -114,9 +114,30 @@ impl Default for AccessibilitySnapshotOptions {
     }
 }
 
-/// Bounded raw CDP accessibility-tree serialization.
+/// Provider schema of the accessibility node payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum AccessibilityPayloadSchema {
+    ChromiumCdpAxNodeJson,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum AccessibilityCaptureMode {
+    FullTree,
+    DepthLimited,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum AccessibilityIgnoredNodePolicy {
+    Included,
+}
+
+/// Bounded, explicitly schema-bound CDP accessibility-tree serialization.
 #[derive(Clone, PartialEq, Eq)]
 pub struct AccessibilitySnapshot {
+    pub payload_schema:       AccessibilityPayloadSchema,
+    pub payload_version:      u32,
+    pub capture_mode:         AccessibilityCaptureMode,
+    pub ignored_node_policy:  AccessibilityIgnoredNodePolicy,
     pub scope:                DocumentScope,
     pub generated_at_unix_ms: Option<u64>,
     pub state:                SnapshotState,
@@ -137,10 +158,11 @@ impl AccessibilitySnapshot {
     /// Canonical accounting for the accessibility JSON UTF-8 payload.
     pub fn byte_report(&self) -> StdResult<BrowserByteReport, BrowserByteReportError> {
         if matches!(self.state, SnapshotState::Unavailable { .. }) {
-            return Ok(BrowserByteReport::unavailable(
+            return BrowserByteReport::unavailable_with_spec(
                 BrowserByteDomain::AccessibilityJsonUtf8,
+                Some(self.byte_spec),
                 BrowserPayloadUnavailableReason::ProviderDidNotReport,
-            ));
+            );
         }
         BrowserByteReport::from_known_extent(
             BrowserByteDomain::AccessibilityJsonUtf8,
@@ -156,6 +178,10 @@ impl fmt::Debug for AccessibilitySnapshot {
         formatter
             .debug_struct("AccessibilitySnapshot")
             .field("scope", &self.scope)
+            .field("payload_schema", &self.payload_schema)
+            .field("payload_version", &self.payload_version)
+            .field("capture_mode", &self.capture_mode)
+            .field("ignored_node_policy", &self.ignored_node_policy)
             .field("generated_at_unix_ms", &self.generated_at_unix_ms)
             .field("state", &self.state)
             .field("requested_depth", &self.requested_depth)
@@ -205,11 +231,18 @@ pub(crate) fn accessibility(
     options: AccessibilitySnapshotOptions,
 ) -> StdResult<AccessibilitySnapshot, BrowserByteLimitError> {
     let byte_limit = BrowserByteLimit::try_from(options.max_bytes)?;
+    if options.max_bytes < 2 {
+        return Ok(unavailable_accessibility(
+            scope,
+            options,
+            SnapshotUnavailableReason::SerializationFailed,
+        ));
+    }
     let nodes_observed = nodes.len();
     let Ok(complete) = serde_json::to_vec(nodes) else {
         return Ok(unavailable_accessibility(
             scope,
-            options.depth,
+            options,
             SnapshotUnavailableReason::SerializationFailed,
         ));
     };
@@ -221,14 +254,20 @@ pub(crate) fn accessibility(
         let Ok(encoded) = serde_json::to_vec(node) else {
             return Ok(unavailable_accessibility(
                 scope,
-                options.depth,
+                options,
                 SnapshotUnavailableReason::SerializationFailed,
             ));
         };
         let separator = usize::from(nodes_retained > 0);
-        if payload.len().saturating_add(separator).saturating_add(encoded.len()).saturating_add(1)
-            > options.max_bytes
-        {
+        let Some(candidate_len) = payload
+            .len()
+            .checked_add(separator)
+            .and_then(|value| value.checked_add(encoded.len()))
+            .and_then(|value| value.checked_add(1))
+        else {
+            break;
+        };
+        if candidate_len > options.max_bytes {
             break;
         }
         if separator == 1 {
@@ -240,6 +279,14 @@ pub(crate) fn accessibility(
     payload.push(b']');
     let truncated = nodes_retained < nodes_observed;
     Ok(AccessibilitySnapshot {
+        payload_schema: AccessibilityPayloadSchema::ChromiumCdpAxNodeJson,
+        payload_version: 1,
+        capture_mode: if options.depth.is_some() {
+            AccessibilityCaptureMode::DepthLimited
+        } else {
+            AccessibilityCaptureMode::FullTree
+        },
+        ignored_node_policy: AccessibilityIgnoredNodePolicy::Included,
         scope,
         generated_at_unix_ms: unix_millis(),
         state: if truncated { SnapshotState::Truncated } else { SnapshotState::Complete },
@@ -260,14 +307,22 @@ pub(crate) fn accessibility(
 
 pub(crate) fn unavailable_accessibility(
     scope: DocumentScope,
-    requested_depth: Option<i64>,
+    options: AccessibilitySnapshotOptions,
     reason: SnapshotUnavailableReason,
 ) -> AccessibilitySnapshot {
     AccessibilitySnapshot {
+        payload_schema: AccessibilityPayloadSchema::ChromiumCdpAxNodeJson,
+        payload_version: 1,
+        capture_mode: if options.depth.is_some() {
+            AccessibilityCaptureMode::DepthLimited
+        } else {
+            AccessibilityCaptureMode::FullTree
+        },
+        ignored_node_policy: AccessibilityIgnoredNodePolicy::Included,
         scope,
         generated_at_unix_ms: unix_millis(),
         state: SnapshotState::Unavailable { reason },
-        requested_depth,
+        requested_depth: options.depth,
         nodes_observed: 0,
         nodes_retained: 0,
         retained_bytes: 0,
@@ -275,7 +330,7 @@ pub(crate) fn unavailable_accessibility(
         payload: Arc::from([]),
         byte_spec: BrowserByteSpec::new(
             BrowserByteDomain::AccessibilityJsonUtf8,
-            BrowserByteLimit::one(),
+            BrowserByteLimit::try_from(options.max_bytes).unwrap_or(BrowserByteLimit::one()),
             BrowserLimitScope::RetentionAfterProviderMaterialization,
             BrowserBudgetScope::PerPayload,
         ),
@@ -313,6 +368,25 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
+    fn accessibility_never_exceeds_a_too_small_json_bound() {
+        let snapshot = accessibility(
+            &[],
+            DocumentScope {
+                epoch: DocumentEpoch::Known(1),
+                frame: DocumentFrameScope::TopLevel,
+                url:   None,
+            },
+            AccessibilitySnapshotOptions { depth: None, max_nodes: 1, max_bytes: 1 },
+        )
+        .expect("positive byte limit");
+        assert!(matches!(snapshot.state, SnapshotState::Unavailable { .. }));
+        assert!(snapshot.bytes().is_empty());
+        assert_eq!(snapshot.retained_bytes, 0);
+        assert_eq!(snapshot.byte_spec.limit().get(), 1);
+    }
+
+    #[test]
     fn unavailable_accessibility_has_no_payload() {
         let snapshot = unavailable_accessibility(
             DocumentScope {
@@ -320,7 +394,7 @@ mod tests {
                 frame: DocumentFrameScope::TopLevel,
                 url:   None,
             },
-            None,
+            AccessibilitySnapshotOptions::default(),
             SnapshotUnavailableReason::BrowserDidNotReport,
         );
         assert!(snapshot.bytes().is_empty());

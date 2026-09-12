@@ -12,7 +12,7 @@ use tokio::{
     sync::Mutex,
     time::{sleep, timeout},
 };
-use void_crawl_core::BrowserSession;
+use void_crawl_core::{BrowserSession, VoidCrawlError};
 use voidcrawl_mcp::{
     AppState, VoidCrawlServer,
     sessions::{DedicatedSession, SessionRegistry},
@@ -25,6 +25,13 @@ use voidcrawl_mcp::{
 };
 
 const SID: &str = "recording-session";
+
+fn recording_error_detail(error: &VoidCrawlError) -> &str {
+    match error {
+        VoidCrawlError::RecordingError(detail) => detail,
+        other => panic!("expected RecordingError, got {other:?}"),
+    }
+}
 
 fn data_url(html: &str) -> String {
     let encoded = html
@@ -64,15 +71,15 @@ async fn server_with_page() -> VoidCrawlServer {
         BrowserSession::builder().headless().no_sandbox().launch().await.expect("launch chromium");
     let page = session.new_page(&data_url(&fixture_html())).await.expect("navigate fixture");
     let handle = Arc::new(DedicatedSession {
-        session:                 Arc::new(session),
-        page:                    Mutex::new(page),
-        profile_lease:           None,
-        last_navigation:         Mutex::new(None),
-        challenge:               Mutex::new(None),
-        pending_download:        Mutex::new(None),
+        session: Arc::new(session),
+        page: Mutex::new(page),
+        profile_lease: None,
+        last_navigation: Mutex::new(None),
+        challenge: Mutex::new(None),
+        pending_download: Mutex::new(None),
         pending_network_capture: Mutex::new(None),
-        pending_recording:       Mutex::new(None),
-        cookie_leases:           Mutex::new(HashMap::new()),
+        pending_recording: Mutex::new(None),
+        cookie_leases: Mutex::new(HashMap::new()),
     });
     let sessions = Arc::new(SessionRegistry::default());
     sessions.insert(SID.to_string(), handle).await;
@@ -95,13 +102,13 @@ fn start_args(dir: &Path) -> SessionRecordStartArgs {
 
 fn css(value: &str) -> SelectorArg {
     SelectorArg {
-        kind:  SelectorKindArg::Css,
+        kind: SelectorKindArg::Css,
         value: Some(value.to_string()),
         regex: None,
-        name:  None,
-        nth:   None,
-        x:     None,
-        y:     None,
+        name: None,
+        nth: None,
+        x: None,
+        y: None,
     }
 }
 
@@ -179,6 +186,15 @@ async fn records_a_session_and_writes_frames_to_disk() {
     assert_eq!(result.regions.len(), 1);
     assert_eq!(result.regions[0].label, "viewport");
     assert_eq!(result.regions[0].frame_count, result.frames_captured);
+    let aggregate_retained = result.byte_report["accounting"]["retained"]
+        .as_u64()
+        .expect("aggregate retained byte count");
+    let region_retained = result.regions[0].byte_report["accounting"]["retained"]
+        .as_u64()
+        .expect("region retained byte count");
+    assert!(aggregate_retained > 0);
+    assert_eq!(aggregate_retained, region_retained);
+    assert!(result.regions[0].output_byte_reports.is_empty());
     assert_eq!(result.format, "jpeg");
     assert!(result.started_at_unix_ms.is_some());
     assert!(result.document_epoch.is_some());
@@ -242,7 +258,7 @@ async fn a_second_start_is_rejected_while_one_is_running() {
     let err = recording::session_start(&server, start_args(dir.path()))
         .await
         .expect_err("second start must be rejected");
-    assert!(err.to_string().contains("already running"), "got {err}");
+    assert!(recording_error_detail(&err).contains("already running"), "got {err:?}");
 
     recording::session_stop(&server, SessionRecordStopArgs { session_id: SID.to_string() })
         .await
@@ -258,7 +274,7 @@ async fn stop_without_start_is_an_error() {
         recording::session_stop(&server, SessionRecordStopArgs { session_id: SID.to_string() })
             .await
             .expect_err("stop without start must fail");
-    assert!(err.to_string().contains("no recording is running"), "got {err}");
+    assert!(recording_error_detail(&err).contains("no recording is running"), "got {err:?}");
 
     teardown(&server).await;
 }
@@ -280,7 +296,7 @@ async fn bbox_and_selectors_together_are_rejected() {
     )
     .await
     .expect_err("bbox + selectors must be rejected");
-    assert!(err.to_string().contains("mutually exclusive"), "got {err}");
+    assert!(recording_error_detail(&err).contains("mutually exclusive"), "got {err:?}");
 
     teardown(&server).await;
 }
@@ -296,7 +312,7 @@ async fn duration_beyond_the_cap_is_rejected() {
     )
     .await
     .expect_err("an over-long recording must be rejected");
-    assert!(err.to_string().contains("maximum"), "got {err}");
+    assert!(recording_error_detail(&err).contains("maximum"), "got {err:?}");
 
     teardown(&server).await;
 }
@@ -402,7 +418,8 @@ async fn a_mask_matching_nothing_fails_before_any_frame_is_captured() {
     )
     .await
     .expect_err("an unresolvable mask must be rejected");
-    assert!(err.to_string().contains("mask"), "got {err}");
+    assert_eq!(err.code().as_str(), "voidcrawl.target.element_not_visible");
+    assert_eq!(err.to_string(), "target element was not visible");
 
     // And nothing was left running to leak the capture lock.
     recording::session_stop(&server, SessionRecordStopArgs { session_id: SID.to_string() })
@@ -432,7 +449,7 @@ async fn a_mask_with_both_bbox_and_selector_is_rejected() {
     )
     .await
     .expect_err("an ambiguous mask must be rejected");
-    assert!(err.to_string().contains("not both"), "got {err}");
+    assert!(recording_error_detail(&err).contains("not both"), "got {err:?}");
 
     teardown(&server).await;
 }
@@ -451,7 +468,7 @@ async fn an_empty_mask_is_rejected_rather_than_silently_covering_nothing() {
     )
     .await
     .expect_err("a mask with neither field must be rejected");
-    assert!(err.to_string().contains("needs either"), "got {err}");
+    assert!(recording_error_detail(&err).contains("needs either"), "got {err:?}");
 
     teardown(&server).await;
 }

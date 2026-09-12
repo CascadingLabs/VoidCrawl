@@ -232,15 +232,19 @@ pub struct SessionRecordStopArgs {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct RegionResult {
     /// "viewport", "bbox", or a name derived from the selector.
-    pub label:       String,
+    pub label:               String,
     /// [x, y, width, height] in CSS pixels, or null for the whole frame.
-    pub bbox:        Option<[u32; 4]>,
-    pub frame_count: usize,
+    pub bbox:                Option<[u32; 4]>,
+    pub frame_count:         usize,
     /// Directory holding this region's numbered frames, when frames were
     /// written.
-    pub frames_dir:  Option<String>,
+    pub frames_dir:          Option<String>,
     /// Encoded artifacts written for this region.
-    pub outputs:     Vec<String>,
+    pub outputs:             Vec<String>,
+    /// Retained encoded-frame byte accounting for this region.
+    pub byte_report:         serde_json::Value,
+    /// Encoded-artifact byte reports, aligned by index with `outputs`.
+    pub output_byte_reports: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -249,6 +253,8 @@ pub struct RecordResult {
     pub started_at_unix_ms:      Option<u64>,
     pub document_epoch:          Option<u64>,
     pub regions:                 Vec<RegionResult>,
+    /// Aggregate retained encoded-frame byte accounting across all regions.
+    pub byte_report:             serde_json::Value,
     /// One entry per requested mask. An empty list means nothing was asked to
     /// be covered — not that there was nothing worth covering.
     pub masks:                   Vec<MaskResult>,
@@ -432,7 +438,7 @@ pub async fn run(
     pool.release(tab).await;
 
     let (recording, encode_error) = result?;
-    Ok(to_result(&recording, &output_dir, encode_error))
+    to_result(&recording, &output_dir, encode_error)
 }
 
 /// Begin recording an open session's page; the caller drives it and then
@@ -514,7 +520,7 @@ pub async fn session_stop(
 
     let page = session.page.lock().await;
     let recording = handle.stop(&page).await?;
-    Ok(to_result(&recording, &output_dir, None))
+    to_result(&recording, &output_dir, None)
 }
 
 /// Run a recording, downgrading an encode failure to a reported warning so a
@@ -537,18 +543,42 @@ async fn record_capturing_encode_errors(
     }
 }
 
-fn to_result(rec: &Recording, output_dir: &Path, encode_error: Option<String>) -> RecordResult {
+fn to_result(
+    rec: &Recording,
+    output_dir: &Path,
+    encode_error: Option<String>,
+) -> Result<RecordResult, VoidCrawlError> {
     let regions = rec
         .regions
         .iter()
-        .map(|r| RegionResult {
-            label:       r.label.clone(),
-            bbox:        r.bbox.map(|b| [b.x, b.y, b.width, b.height]),
-            frame_count: r.frames.len(),
-            frames_dir:  Some(output_dir.join(&r.label).display().to_string()),
-            outputs:     r.outputs.iter().map(|p| p.display().to_string()).collect(),
+        .map(|r| {
+            let byte_report = r
+                .byte_report()
+                .map_err(|error| VoidCrawlError::RecordingError(error.to_string()))?;
+            let output_byte_reports = r
+                .output_byte_reports()
+                .map_err(|error| VoidCrawlError::RecordingError(error.to_string()))?
+                .into_iter()
+                .map(|report| {
+                    serde_json::to_value(report)
+                        .map_err(|error| VoidCrawlError::RecordingError(error.to_string()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(RegionResult {
+                label: r.label.clone(),
+                bbox: r.bbox.map(|b| [b.x, b.y, b.width, b.height]),
+                frame_count: r.frames.len(),
+                frames_dir: Some(output_dir.join(&r.label).display().to_string()),
+                outputs: r.outputs.iter().map(|p| p.display().to_string()).collect(),
+                byte_report: serde_json::to_value(byte_report)
+                    .map_err(|error| VoidCrawlError::RecordingError(error.to_string()))?,
+                output_byte_reports,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, VoidCrawlError>>()?;
+    let byte_report = rec
+        .byte_report()
+        .map_err(|error| VoidCrawlError::RecordingError(error.to_string()))?;
 
     let masks = rec
         .masks
@@ -562,7 +592,7 @@ fn to_result(rec: &Recording, output_dir: &Path, encode_error: Option<String>) -
         })
         .collect();
 
-    RecordResult {
+    Ok(RecordResult {
         output_dir: output_dir.display().to_string(),
         started_at_unix_ms: rec.started_at_unix_ms,
         document_epoch: match rec.document_epoch {
@@ -570,6 +600,8 @@ fn to_result(rec: &Recording, output_dir: &Path, encode_error: Option<String>) -
             DocumentEpoch::UnavailableForAttachedPage => None,
         },
         regions,
+        byte_report: serde_json::to_value(byte_report)
+            .map_err(|error| VoidCrawlError::RecordingError(error.to_string()))?,
         masks,
         format: match rec.format {
             FrameFormat::Jpeg => "jpeg".into(),
@@ -590,5 +622,5 @@ fn to_result(rec: &Recording, output_dir: &Path, encode_error: Option<String>) -
         device_pixel_ratio: rec.device_pixel_ratio,
         foregrounded: rec.foregrounded,
         encode_error,
-    }
+    })
 }

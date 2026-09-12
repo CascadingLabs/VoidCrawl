@@ -13,6 +13,7 @@
 )]
 
 use std::{
+    collections::HashSet,
     io::{Read, Write},
     net::TcpListener,
     sync::Arc,
@@ -22,7 +23,7 @@ use std::{
 
 use tokio::{
     task::yield_now,
-    time::{sleep, timeout},
+    time::{Instant, sleep, timeout},
 };
 use void_crawl_core::{
     BrowserPool, BrowserSession, BrowserStateBinding, ContextDisposalState, PoolConfig,
@@ -88,6 +89,18 @@ impl Drop for Fixture {
 
 async fn session() -> BrowserSession {
     BrowserSession::builder().headless().no_sandbox().launch().await.expect("launch Chromium")
+}
+
+#[tokio::test]
+async fn session_close_before_reaps_the_launched_browser() {
+    let browser = timeout(Duration::from_secs(20), BrowserSession::launch_headless())
+        .await
+        .expect("browser launch deadline")
+        .expect("launch browser");
+    browser
+        .close_before(Instant::now() + Duration::from_secs(15))
+        .await
+        .expect("bounded close and reap");
 }
 
 #[tokio::test]
@@ -227,6 +240,145 @@ async fn cancelling_explicit_context_disposal_does_not_leak_the_context() {
         sleep(Duration::from_millis(25)).await;
     }
     panic!("cancelled isolated-context disposal left its target alive");
+}
+
+#[tokio::test]
+async fn cancelling_context_creation_after_the_cdp_request_disposes_the_context() {
+    let browser = Arc::new(session().await);
+    // Chromium's initial about:blank target can arrive asynchronously after
+    // launch. Establish a stable baseline so it is not mistaken for a leaked
+    // isolated-context target.
+    let mut existing_targets = HashSet::new();
+    let mut stable_samples = 0_u8;
+    for _ in 0..100 {
+        let current: HashSet<_> = browser
+            .pages()
+            .await
+            .expect("list initial pages")
+            .into_iter()
+            .map(|page| page.target_id())
+            .collect();
+        if current == existing_targets {
+            stable_samples = stable_samples.saturating_add(1);
+            if stable_samples >= 4 {
+                break;
+            }
+        } else {
+            existing_targets = current;
+            stable_samples = 0;
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+    let creating_browser = Arc::clone(&browser);
+
+    let creating = tokio::spawn(async move { creating_browser.new_isolated_context().await });
+    let mut created_targets = HashSet::new();
+    for _ in 0..400 {
+        created_targets = browser
+            .pages()
+            .await
+            .expect("list pages during context creation")
+            .into_iter()
+            .map(|page| page.target_id())
+            .filter(|target| !existing_targets.contains(target))
+            .collect();
+        if !created_targets.is_empty() {
+            break;
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+    assert!(!created_targets.is_empty(), "context construction never exposed its target");
+
+    creating.abort();
+    let _ = creating.await;
+
+    // Cancellation happens only after the new target is observable. The
+    // retained construction worker must recover an unreceived context and
+    // dispose it rather than leaving that target in Chromium.
+    for _ in 0..400 {
+        let pages = browser.pages().await.expect("list pages after cancellation");
+        if pages.iter().all(|page| !created_targets.contains(&page.target_id())) {
+            browser.close().await.expect("close browser");
+            return;
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+    panic!("cancelled context creation leaked a target");
+}
+
+#[tokio::test]
+async fn cancelling_session_close_can_be_retried() {
+    let browser = Arc::new(session().await);
+    let closing_browser = Arc::clone(&browser);
+    let closing = tokio::spawn(async move { closing_browser.close().await });
+    yield_now().await;
+    closing.abort();
+    let _ = closing.await;
+
+    timeout(Duration::from_secs(15), browser.close())
+        .await
+        .expect("retried close timed out")
+        .expect("retried close failed");
+    browser.close().await.expect("completed close is idempotent");
+}
+
+#[tokio::test]
+async fn cancelling_pool_close_after_shutdown_starts_can_be_retried() {
+    let config = PoolConfig {
+        browsers:             1,
+        tabs_per_browser:     1,
+        tab_max_uses:         50,
+        tab_max_idle_secs:    60,
+        acquire_timeout_secs: 2,
+        auto_evict:           false,
+    };
+    let pool = Arc::new(BrowserPool::new(config, vec![session().await]));
+    let held = pool.acquire().await.expect("hold checkout during shutdown");
+    let closing_pool = Arc::clone(&pool);
+    let closing = tokio::spawn(async move { closing_pool.close().await });
+
+    // acquire() can fail only after close made its one-way transition and
+    // closed the semaphore. The retained worker is then deterministically
+    // blocked waiting for this checkout, so cancellation cannot race ahead of
+    // shutdown-task installation.
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if pool.acquire().await.is_err() {
+                break;
+            }
+            yield_now().await;
+        }
+    })
+    .await
+    .expect("pool shutdown did not start");
+    assert!(!closing.is_finished(), "close unexpectedly finished with a held checkout");
+    closing.abort();
+    let _ = closing.await;
+
+    drop(held);
+    timeout(Duration::from_secs(15), pool.close())
+        .await
+        .expect("retried pool close timed out")
+        .expect("retried pool close failed");
+    pool.close().await.expect("completed pool close is idempotent");
+}
+
+#[tokio::test]
+async fn pool_close_is_one_way_and_rejects_new_work() {
+    let config = PoolConfig {
+        browsers:             1,
+        tabs_per_browser:     1,
+        tab_max_uses:         50,
+        tab_max_idle_secs:    60,
+        acquire_timeout_secs: 2,
+        auto_evict:           false,
+    };
+    let pool = BrowserPool::new(config, vec![session().await]);
+    pool.close().await.expect("close pool");
+    assert!(pool.acquire().await.is_err(), "closed pool accepted acquire");
+    assert!(pool.warmup().await.is_err(), "closed pool accepted warmup");
+    assert!(pool.evict_idle().await.is_err(), "closed pool accepted eviction");
+    pool.close().await.expect("idempotent pool close");
 }
 
 #[tokio::test]

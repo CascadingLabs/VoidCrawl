@@ -82,6 +82,15 @@ class CapturedResponse:
     async def text(self) -> str: ...
     async def json(self) -> Any: ...
 
+class ResponseCaptureReport:
+    """Terminal response-capture result, including partial responses."""
+
+    termination: Literal[
+        "complete", "deadline_reached", "cancelled", "provider_disconnected"
+    ]
+    responses: dict[str, CapturedResponse]
+    byte_report: dict[str, Any]
+
 class ResponseExpectation:
     """Async context returned by ``Page`` or ``PooledTab.expect_response(s)``."""
 
@@ -89,6 +98,10 @@ class ResponseExpectation:
     async def __aexit__(
         self, exc_type: object, exc_val: object, exc_tb: object
     ) -> bool: ...
+    async def wait_report(self) -> ResponseCaptureReport: ...
+    async def cancel_report(self) -> ResponseCaptureReport: ...
+    @property
+    def report(self) -> Any: ...
     @property
     def value(self) -> Any: ...
 
@@ -243,9 +256,15 @@ class ScanReport:
     detected_mime: str | None
     size: int
 
+PoolReleaseStrategy = Literal[
+    "blank_document_and_reuse_shared_state",
+    "dispose_tab_after_reset_failure",
+    "dispose_tab_after_pool_closed",
+]
+
 class PoolReleaseReport:
     state_binding: str
-    strategy: str
+    strategy: PoolReleaseStrategy
     cleanup_complete: bool
     tab_reused: bool
     document_cleared: bool
@@ -758,6 +777,8 @@ class RecordedRegion:
     frames: list[Frame]
     outputs: list[str]
     """Paths of encoded artifacts written for this region."""
+    byte_report: dict[str, Any]
+    output_byte_reports: list[dict[str, Any]]
 
 class MaskReport:
     """What one mask of a :class:`Recording` covered.
@@ -806,6 +827,7 @@ class Recording:
     capture_viewport_css: tuple[float, float] | None
     device_pixel_ratio: float
     foregrounded: bool
+    byte_report: dict[str, Any]
     """Whether the recording pinned its tab to the foreground and held the
     browser's capture lock. ``False`` means it ran concurrently."""
 

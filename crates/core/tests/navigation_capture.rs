@@ -14,10 +14,14 @@ use std::{
 };
 
 use flate2::{Compression, write::GzEncoder};
-use tokio::time::{sleep, timeout};
+use tokio::{
+    task::yield_now,
+    time::{sleep, timeout},
+};
 use void_crawl_core::{
-    BrowserBodyLayer, BrowserSession, NavigationCaptureOptions, NavigationCaptureTermination,
-    NetworkExtraInfoState, ResourceOutcome, ResponseBodyState, SourceBodyUnavailableReason,
+    BrowserBodyLayer, BrowserSession, MeasuredCount, NavigationCaptureOptions,
+    NavigationCaptureTermination, NavigationEventKind, NetworkExtraInfoState, ResourceOutcome,
+    ResponseBodyState, SourceBodyUnavailableReason,
 };
 
 struct Fixture {
@@ -209,10 +213,68 @@ async fn redirects_and_final_response_are_explicit_but_debug_is_redacted() {
         "raw Set-Cookie is unavailable without response ExtraInfo"
     );
     assert_eq!(report.network_extra_info, NetworkExtraInfoState::UnavailableInCurrentClient);
+    assert_eq!(report.events_admitted, report.events_retained);
+    assert_eq!(report.events_retained, report.events.len() as u64);
+    assert_eq!(report.events_dropped, MeasuredCount::Known { value: 0 });
+    assert!(report.events.windows(2).all(|pair| {
+        pair[0].sequence + 1 == pair[1].sequence && pair[0].offset_micros <= pair[1].offset_micros
+    }));
+    assert!(report.events.iter().any(|event| event.kind == NavigationEventKind::Request));
+    assert!(report.events.iter().any(|event| event.kind == NavigationEventKind::Response));
+    assert!(report.events.iter().any(|event| event.kind == NavigationEventKind::Finished));
+    assert!(source.captured_at_micros <= report.elapsed_micros);
+    let serialized_events = serde_json::to_string(&report.events).expect("serialize safe events");
+    assert!(!serialized_events.contains("access_token"));
+    assert!(!serialized_events.contains("secret"));
     let debug = format!("{report:?}");
     assert!(!debug.contains("access_token"));
     assert!(!debug.contains("auth=secret"));
     assert!(!debug.contains("final-source"));
+
+    page.close().await.expect("close page");
+    browser.close().await.expect("close browser");
+}
+
+#[tokio::test]
+async fn dropped_main_redirect_successor_does_not_leave_stale_document_identity() {
+    let fixture = Fixture::start();
+    let browser = session().await;
+    let page = browser.new_blank_page().await.expect("blank page");
+    let report = capture(
+        &page,
+        &fixture.url("/redirect"),
+        NavigationCaptureOptions { max_resources: 1, ..NavigationCaptureOptions::default() },
+    )
+    .await;
+
+    assert_eq!(report.resources.len(), 1);
+    assert_eq!(report.resources[0].outcome, ResourceOutcome::Redirected);
+    assert!(report.resources_dropped > 0, "redirect successor loss is explicit");
+    assert!(report.final_url.is_none());
+    assert!(report.main_document.is_none());
+
+    page.close().await.expect("close page");
+    browser.close().await.expect("close browser");
+}
+
+#[tokio::test]
+async fn clean_cancel_has_exact_zero_event_loss() {
+    let fixture = Fixture::start();
+    let browser = session().await;
+    let page = browser.new_blank_page().await.expect("blank page");
+    let capture = page
+        .arm_navigation_capture(NavigationCaptureOptions::default())
+        .await
+        .expect("arm capture");
+    page.navigate(&fixture.url("/")).await.expect("navigate");
+    sleep(Duration::from_millis(100)).await;
+    let report = capture.cancel().await.expect("cancel capture");
+
+    assert_eq!(report.termination, NavigationCaptureTermination::Cancelled);
+    assert_eq!(report.events_admitted, report.events_retained);
+    assert_eq!(report.events_retained, report.events.len() as u64);
+    assert_eq!(report.events_dropped, MeasuredCount::Known { value: 0 });
+    assert!(!report.additional_loss_unknown);
 
     page.close().await.expect("close page");
     browser.close().await.expect("close browser");
@@ -343,11 +405,57 @@ async fn resource_and_event_limits_are_hard_and_loss_is_explicit() {
     let events = events.wait().await.expect("wait for event limit");
     assert_eq!(events.termination, NavigationCaptureTermination::EventLimitReached);
     assert_eq!(events.events_admitted, 1);
+    assert_eq!(events.events_retained, 1);
+    assert_eq!(events.events.len(), 1);
+    assert_eq!(events.events[0].sequence, 0);
+    assert_eq!(events.events_dropped, MeasuredCount::Known { value: 0 });
     assert!(events.additional_loss_unknown);
     assert_eq!(
         events.main_document.expect("partial main document").body_unavailable,
         Some(SourceBodyUnavailableReason::CaptureEndedBeforeBody)
     );
+
+    page.close().await.expect("close page");
+    browser.close().await.expect("close browser");
+}
+
+#[tokio::test]
+async fn cancelled_terminal_joins_do_not_poison_later_body_capture() {
+    let fixture = Fixture::start();
+    let browser = session().await;
+    let page = browser.new_blank_page().await.expect("blank page");
+
+    let waiting = page
+        .arm_navigation_capture(NavigationCaptureOptions::default())
+        .await
+        .expect("arm waiting capture");
+    let waiting = tokio::spawn(async move { waiting.wait().await });
+    yield_now().await;
+    waiting.abort();
+    let _ = waiting.await;
+
+    let finishing = page
+        .arm_navigation_capture(NavigationCaptureOptions::default())
+        .await
+        .expect("arm finishing capture");
+    let finishing = tokio::spawn(async move { finishing.finish().await });
+    yield_now().await;
+    finishing.abort();
+    let _ = finishing.await;
+
+    let cancelling = page
+        .arm_navigation_capture(NavigationCaptureOptions::default())
+        .await
+        .expect("arm cancelling capture");
+    let cancelling = tokio::spawn(async move { cancelling.cancel().await });
+    yield_now().await;
+    cancelling.abort();
+    let _ = cancelling.await;
+
+    let report = capture(&page, &fixture.url("/"), NavigationCaptureOptions::default()).await;
+    let source = report.main_document.expect("body capture after cancelled joins");
+    assert_eq!(source.body_state, ResponseBodyState::Available);
+    assert!(source.body().windows(b"source-original".len()).any(|body| body == b"source-original"));
 
     page.close().await.expect("close page");
     browser.close().await.expect("close browser");

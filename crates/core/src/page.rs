@@ -23,10 +23,10 @@ use chromiumoxide::{
             },
             dom::{BackendNodeId, GetBoxModelParams, GetDocumentParams, ResolveNodeParams},
             emulation::{
-                ClearDeviceMetricsOverrideParams, SetDeviceMetricsOverrideParams,
-                SetGeolocationOverrideParams, SetLocaleOverrideParams, SetTimezoneOverrideParams,
-                SetTouchEmulationEnabledParams, SetUserAgentOverrideParams, UserAgentBrandVersion,
-                UserAgentMetadata,
+                ClearDeviceMetricsOverrideParams, MediaFeature, SetDeviceMetricsOverrideParams,
+                SetEmulatedMediaParams, SetGeolocationOverrideParams, SetLocaleOverrideParams,
+                SetTimezoneOverrideParams, SetTouchEmulationEnabledParams,
+                SetUserAgentOverrideParams, UserAgentBrandVersion, UserAgentMetadata,
             },
             input::{
                 DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams,
@@ -39,12 +39,15 @@ use chromiumoxide::{
             },
             page::{
                 AddScriptToEvaluateOnNewDocumentParams, CaptureScreenshotFormat,
-                EventLifecycleEvent, FrameId, PrintToPdfParams, SetBypassCspParams,
+                EventLifecycleEvent, Frame, FrameId, FrameTree, GetFrameTreeParams,
+                PrintToPdfParams, SetBypassCspParams, StopLoadingParams,
                 Viewport as CdpClipViewport,
             },
             target::GetTargetsParams,
         },
-        js_protocol::runtime::{CallFunctionOnParams, EvaluateParams, ExecutionContextId},
+        js_protocol::runtime::{
+            CallFunctionOnParams, EvaluateParams, EventExecutionContextCreated, ExecutionContextId,
+        },
     },
     page::ScreenshotParams,
 };
@@ -63,8 +66,9 @@ use crate::{
     },
     environment::{
         BrowserCaptureCapabilities, BrowserEnvironmentSnapshot, BrowserVisibilityMode,
-        ControllerVersion, ENVIRONMENT_SNAPSHOT_JS, EnvironmentObservation,
-        InstrumentationSnapshot, RendererVersion, rendering_environment,
+        ColorSchemePreference, ControllerVersion, ENVIRONMENT_SNAPSHOT_JS, EnvironmentObservation,
+        InstrumentationSnapshot, ReducedMotionPreference, RendererVersion, RenderingPreferences,
+        rendering_environment,
     },
     error::{Result, VoidCrawlError},
     input::{HumanizeOptions, Rng, humanized_path},
@@ -76,8 +80,8 @@ use crate::{
     stealth::StealthConfig,
     viewport::{ScrollTarget, Viewport},
     visual_snapshot::{
-        ContentSizeMetrics, LayoutSnapshot, LayoutViewportMetrics, VisualCaptureRegion,
-        VisualSnapshot, VisualViewportMetrics, visual_snapshot,
+        ContentSizeMetrics, LayoutSnapshot, LayoutViewportMetrics, PairedLayoutVisualSnapshot,
+        VisualCaptureRegion, VisualSnapshot, VisualViewportMetrics, visual_snapshot,
     },
 };
 
@@ -97,6 +101,8 @@ fn validate_accessibility_options(options: AccessibilitySnapshotOptions) -> Resu
     Ok(())
 }
 
+const EXECUTION_CONTEXT_WAIT: Duration = Duration::from_secs(1);
+
 fn unix_millis_now() -> Option<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -109,6 +115,20 @@ fn positive_u32(value: f64) -> u32 {
         return 0;
     }
     format!("{value:.0}").parse().unwrap_or(0)
+}
+
+/// Classify the in-page selector-wait status without inspecting provider error
+/// text. A rejected promise/CDP failure is handled separately as `JsEvalError`.
+fn selector_wait_status(status: Option<&Value>, selector: &str, timeout_ms: u64) -> Result<()> {
+    match status.and_then(Value::as_bool) {
+        Some(true) => Ok(()),
+        Some(false) => Err(VoidCrawlError::Timeout(format!(
+            "selector {selector:?} did not appear within {timeout_ms}ms"
+        ))),
+        None => Err(VoidCrawlError::JsEvalError(
+            "wait_for_selector returned a non-boolean status".into(),
+        )),
+    }
 }
 
 /// Wall-clock-derived seed for live humanized pointer paths. Tests seed the
@@ -224,7 +244,8 @@ const MAX_ENDPOINTS: usize = 256;
 /// normalization is the *consumer's* fingerprint concern; this function's job
 /// is only to keep secrets out while staying a faithful, generic observation.
 pub fn safe_endpoint(raw_url: &str) -> Option<String> {
-    // Cut everything from the first `?` or `#` — query and fragment never enter.
+    // Cut everything from the first `?` or `#` — query and fragment never
+    // enter.
     let head = raw_url.split(['?', '#']).next().unwrap_or("");
 
     let (scheme, rest) = head.split_once("://")?;
@@ -324,7 +345,8 @@ fn is_safe_segment(seg: &str) -> bool {
     if !seg.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~')) {
         return false;
     }
-    // Long segments are tokens/blobs, not template words (`recommendations` is 15).
+    // Long segments are tokens/blobs, not template words (`recommendations` is
+    // 15).
     if seg.len() > 15 {
         return false;
     }
@@ -652,6 +674,38 @@ const DOCUMENT_SNAPSHOT_JS: &str = r#"
 })()
 "#;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CdpDocumentIdentity {
+    frame_id:  FrameId,
+    loader_id: String,
+    url:       String,
+}
+
+impl CdpDocumentIdentity {
+    fn from_frame(frame: &Frame) -> Self {
+        Self {
+            frame_id:  frame.id.clone(),
+            loader_id: frame.loader_id.inner().clone(),
+            url:       format!("{}{}", frame.url, frame.url_fragment.as_deref().unwrap_or("")),
+        }
+    }
+
+    fn same_document(&self, other: &Self) -> bool {
+        self.frame_id == other.frame_id && self.loader_id == other.loader_id
+    }
+}
+
+fn identity_in_tree(tree: &FrameTree, frame_id: &FrameId) -> Option<CdpDocumentIdentity> {
+    if &tree.frame.id == frame_id {
+        return Some(CdpDocumentIdentity::from_frame(&tree.frame));
+    }
+    tree.child_frames
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .find_map(|child| identity_in_tree(child, frame_id))
+}
+
 /// Thin wrapper over `chromiumoxide::Page` exposing a clean async API.
 #[derive(Debug)]
 pub struct Page {
@@ -680,12 +734,13 @@ pub struct Page {
     /// restores this so a temporary override never leaks to later calls on the
     /// same page.
     viewport_override:      Mutex<Option<Viewport>>,
+    rendering_preferences:  AsyncMutex<RenderingPreferences>,
     network_enabled:        AtomicBool,
     runtime_enabled:        AtomicBool,
     pre_navigation_stealth: AtomicBool,
     document_epoch:         AtomicU64,
     document_epoch_known:   AtomicBool,
-    document_url:           Mutex<Option<String>>,
+    document_loader:        Mutex<Option<String>>,
 }
 
 impl Page {
@@ -714,9 +769,10 @@ impl Page {
             pre_navigation_stealth: AtomicBool::new(false),
             document_epoch: AtomicU64::new(0),
             document_epoch_known: AtomicBool::new(!attached_browser),
-            document_url: Mutex::new(None),
+            document_loader: Mutex::new(None),
             capture_lock,
             viewport_override: Mutex::new(None),
+            rendering_preferences: AsyncMutex::new(RenderingPreferences::default()),
         }
     }
 
@@ -750,7 +806,8 @@ impl Page {
         clone
             .document_epoch_known
             .store(self.document_epoch_known.load(Ordering::Relaxed), Ordering::Relaxed);
-        if let (Ok(current), Ok(mut target)) = (self.document_url.lock(), clone.document_url.lock())
+        if let (Ok(current), Ok(mut target)) =
+            (self.document_loader.lock(), clone.document_loader.lock())
         {
             target.clone_from(&current);
         }
@@ -853,22 +910,21 @@ impl Page {
         self.state_binding
     }
 
-    fn observe_document_url(
+    fn observe_document_identity(
         &self,
-        url: Option<&str>,
+        identity: &CdpDocumentIdentity,
         controlled_navigation: bool,
     ) -> Result<DocumentEpoch> {
         let mut current = self
-            .document_url
+            .document_loader
             .lock()
-            .map_err(|_| VoidCrawlError::Other("document URL lock poisoned".into()))?;
-        if current.as_deref() != url {
-            if self.document_epoch_known.load(Ordering::Relaxed) || controlled_navigation {
-                self.document_epoch.fetch_add(1, Ordering::Relaxed);
-                self.document_epoch_known.store(true, Ordering::Relaxed);
-            }
-            *current = url.map(str::to_string);
+            .map_err(|_| VoidCrawlError::Other("document loader lock poisoned".into()))?;
+        let changed = current.as_deref().is_some_and(|loader| loader != identity.loader_id);
+        if changed || (controlled_navigation && current.is_none()) {
+            self.document_epoch.fetch_add(1, Ordering::Relaxed);
+            self.document_epoch_known.store(true, Ordering::Relaxed);
         }
+        *current = Some(identity.loader_id.clone());
         if self.document_epoch_known.load(Ordering::Relaxed) {
             Ok(DocumentEpoch::Known(self.document_epoch.load(Ordering::Relaxed)))
         } else {
@@ -876,14 +932,59 @@ impl Page {
         }
     }
 
-    pub(crate) async fn top_level_document_scope(&self) -> Result<DocumentScope> {
-        let url = self.url().await?;
-        let epoch = self.observe_document_url(url.as_deref(), false)?;
+    async fn frame_tree(&self) -> Result<FrameTree> {
+        self.inner
+            .execute(GetFrameTreeParams::default())
+            .await
+            .map(|response| response.result.frame_tree)
+            .map_err(|error| VoidCrawlError::PageError(error.to_string()))
+    }
+
+    async fn top_level_document_identity(&self) -> Result<CdpDocumentIdentity> {
+        Ok(CdpDocumentIdentity::from_frame(&self.frame_tree().await?.frame))
+    }
+
+    fn scope_for_identity(
+        &self,
+        identity: &CdpDocumentIdentity,
+        controlled_navigation: bool,
+    ) -> Result<DocumentScope> {
         Ok(DocumentScope {
-            epoch,
+            epoch: self.observe_document_identity(identity, controlled_navigation)?,
             frame: DocumentFrameScope::TopLevel,
-            url: url.map(ProtectedUrl::new),
+            url:   Some(ProtectedUrl::new(identity.url.clone())),
         })
+    }
+
+    pub(crate) async fn top_level_document_scope(&self) -> Result<DocumentScope> {
+        let identity = self.top_level_document_identity().await?;
+        self.scope_for_identity(&identity, false)
+    }
+
+    async fn wait_for_main_execution_context(&self) -> Result<()> {
+        let mut created = self
+            .inner
+            .event_listener::<EventExecutionContextCreated>()
+            .await
+            .map_err(|error| VoidCrawlError::PageError(error.to_string()))?;
+        time::timeout(EXECUTION_CONTEXT_WAIT, async {
+            loop {
+                if self
+                    .inner
+                    .execution_context()
+                    .await
+                    .map_err(|error| VoidCrawlError::PageError(error.to_string()))?
+                    .is_some()
+                {
+                    return Ok(());
+                }
+                if created.next().await.is_none() {
+                    return Err(VoidCrawlError::BrowserClosed);
+                }
+            }
+        })
+        .await
+        .map_err(|_| VoidCrawlError::Timeout("main execution context was not ready".into()))?
     }
 
     /// Observe the effective browser environment and active VoidCrawl capture
@@ -900,6 +1001,10 @@ impl Page {
             .await
             .map(|response| RendererVersion::from(response.result))
             .map_err(|error| VoidCrawlError::PageError(error.to_string()))?;
+        // A newly created headful target can be visible before its main world
+        // exists. Wait on Runtime execution-context events instead of timing a
+        // retry; persistent evaluation failures remain typed JS errors.
+        self.wait_for_main_execution_context().await?;
         let result = self
             .inner
             .evaluate(ENVIRONMENT_SNAPSHOT_JS)
@@ -967,23 +1072,33 @@ impl Page {
         frame_url_pattern: &str,
     ) -> Result<ExecutionContextId> {
         self.ensure_runtime_enabled().await?;
-        for attempt in 0..20 {
-            if let Some(context_id) = self
-                .inner
-                .frame_execution_context(frame_id.clone())
-                .await
-                .map_err(|e| VoidCrawlError::JsEvalError(e.to_string()))?
-            {
-                return Ok(context_id);
+        let mut created = self
+            .inner
+            .event_listener::<EventExecutionContextCreated>()
+            .await
+            .map_err(|error| VoidCrawlError::JsEvalError(error.to_string()))?;
+        time::timeout(EXECUTION_CONTEXT_WAIT, async {
+            loop {
+                if let Some(context_id) = self
+                    .inner
+                    .frame_execution_context(frame_id.clone())
+                    .await
+                    .map_err(|error| VoidCrawlError::JsEvalError(error.to_string()))?
+                {
+                    return Ok(context_id);
+                }
+                if created.next().await.is_none() {
+                    return Err(VoidCrawlError::BrowserClosed);
+                }
             }
-            if attempt < 19 {
-                time::sleep(Duration::from_millis(50)).await;
-            }
-        }
-        Err(VoidCrawlError::FrameNotFound(format!(
-            "{frame_url_pattern:?}: matched frame has no scriptable execution context \
-             (sandboxed without allow-scripts, cross-process, or not yet loaded)"
-        )))
+        })
+        .await
+        .map_err(|_| {
+            VoidCrawlError::FrameNotFound(format!(
+                "{frame_url_pattern:?}: matched frame has no scriptable execution context \
+                 (sandboxed without allow-scripts, cross-process, or detached)"
+            ))
+        })?
     }
 
     /// Apply stealth settings to this page.
@@ -1125,13 +1240,21 @@ impl Page {
 
     // ── Navigation ──────────────────────────────────────────────────────
 
+    /// Stop an in-progress document load.
+    pub async fn stop_loading(&self) -> Result<()> {
+        self.inner
+            .execute(StopLoadingParams::default())
+            .await
+            .map_err(|error| VoidCrawlError::PageError(error.to_string()))?;
+        Ok(())
+    }
+
     /// Navigate to `url` and wait for the CDP response.
     pub async fn navigate(&self, url: &str) -> Result<()> {
         self.ensure_active().await?;
         self.inner.goto(url).await.map_err(|e| VoidCrawlError::NavigationFailed(e.to_string()))?;
-        let current =
-            self.inner.url().await.map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
-        self.observe_document_url(current.as_deref(), true)?;
+        let identity = self.top_level_document_identity().await?;
+        self.observe_document_identity(&identity, true)?;
         Ok(())
     }
 
@@ -1205,7 +1328,7 @@ impl Page {
         // Start navigation (non-blocking CDP command)
         self.inner.goto(url).await.map_err(|e| VoidCrawlError::NavigationFailed(e.to_string()))?;
 
-        let deadline = time::sleep(timeout);
+        let deadline = time::sleep_until(time::Instant::now() + timeout);
         tokio::pin!(deadline);
 
         let mut status_code: Option<u16> = None;
@@ -1294,7 +1417,8 @@ impl Page {
 
         let html = self.content().await?;
         let final_url = self.url().await?.unwrap_or_default();
-        self.observe_document_url(Some(&final_url), true)?;
+        let identity = self.top_level_document_identity().await?;
+        self.observe_document_identity(&identity, true)?;
         let antibot = status_code.map(|c| antibot::classify(c, &headers, &html));
         Ok(PageResponse {
             html,
@@ -1340,7 +1464,7 @@ impl Page {
             .await
             .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
 
-        let deadline = time::sleep(timeout);
+        let deadline = time::sleep_until(time::Instant::now() + timeout);
         tokio::pin!(deadline);
 
         // Track the best event we've seen so far
@@ -1371,14 +1495,15 @@ impl Page {
 
     /// Wait until `document.querySelector(selector)` matches an element,
     /// driven by a `MutationObserver` inside the page — no Rust-side polling.
-    /// Resolves immediately if the element is already present. Rejects with
-    /// `VoidCrawlError::Timeout` after `timeout`.
+    /// Resolves immediately if the element is already present. The in-page
+    /// promise returns a typed timeout status after `timeout`; CDP/JS failures
+    /// remain [`VoidCrawlError::JsEvalError`].
     pub async fn wait_for_selector(&self, selector: &str, timeout: Duration) -> Result<()> {
         let sel_lit = serde_json::to_string(selector)
             .map_err(|e| VoidCrawlError::Other(format!("selector encode: {e}")))?;
         let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
         let js = format!(
-            "new Promise((resolve, reject) => {{\
+            "new Promise((resolve) => {{\
               const sel = {sel_lit};\
               if (document.querySelector(sel)) return resolve(true);\
               const root = document.documentElement || document.body;\
@@ -1392,7 +1517,7 @@ impl Page {
               obs.observe(root, {{ childList: true, subtree: true }});\
               const t = setTimeout(() => {{\
                 obs.disconnect();\
-                reject(new Error('wait_for_selector timeout: ' + sel));\
+                resolve(false);\
               }}, {timeout_ms});\
             }})"
         );
@@ -1402,19 +1527,12 @@ impl Page {
             .await_promise(true)
             .build()
             .map_err(VoidCrawlError::JsEvalError)?;
-        match self.inner.evaluate_expression(params).await {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("wait_for_selector timeout") {
-                    Err(VoidCrawlError::Timeout(format!(
-                        "selector {selector:?} did not appear within {timeout_ms}ms"
-                    )))
-                } else {
-                    Err(VoidCrawlError::JsEvalError(msg))
-                }
-            }
-        }
+        let result = self
+            .inner
+            .evaluate_expression(params)
+            .await
+            .map_err(|error| VoidCrawlError::JsEvalError(error.to_string()))?;
+        selector_wait_status(result.value(), selector, timeout_ms)
     }
 
     // ── Content ─────────────────────────────────────────────────────────
@@ -1436,12 +1554,29 @@ impl Page {
                 reason:    "max_bytes must be positive",
             });
         }
-        let html = self.content().await?;
-        let scope = self.top_level_document_scope().await?;
-        rendered_dom(html, scope, max_bytes).map_err(|_| VoidCrawlError::InvalidInput {
-            operation: "rendered_dom_snapshot",
-            reason:    "max_bytes does not fit browser byte accounting",
-        })
+        for attempt in 0..2 {
+            let before = self.top_level_document_identity().await?;
+            let html = self.content().await?;
+            let after = self.top_level_document_identity().await?;
+            if before.same_document(&after) {
+                let scope = self.scope_for_identity(&after, false)?;
+                return rendered_dom(html, scope, max_bytes).map_err(|_| {
+                    VoidCrawlError::InvalidInput {
+                        operation: "rendered_dom_snapshot",
+                        reason:    "max_bytes does not fit browser byte accounting",
+                    }
+                });
+            }
+            // Record the newly observed document even when this attempt raced,
+            // so a subsequent snapshot receives the advanced epoch.
+            self.observe_document_identity(&after, false)?;
+            if attempt == 1 {
+                return Err(VoidCrawlError::PageError(
+                    "document changed during rendered DOM capture".into(),
+                ));
+            }
+        }
+        Err(VoidCrawlError::PageError("document changed during rendered DOM capture".into()))
     }
 
     /// Capture the current rendered DOM using a validated browser byte limit.
@@ -1794,10 +1929,28 @@ impl Page {
                 ));
             }
         };
-        let scope = self.top_level_document_scope().await?;
-        visual_snapshot(bytes, scope, region, capture_viewport, device_scale_factor).ok_or_else(
-            || VoidCrawlError::ScreenshotError("PNG dimensions were unavailable".into()),
-        )
+        visual_snapshot(bytes, layout.scope, region, capture_viewport, device_scale_factor)
+            .ok_or_else(|| {
+                VoidCrawlError::ScreenshotError("PNG signature/IHDR/dimensions were invalid".into())
+            })
+    }
+
+    /// Sequentially capture layout and visual evidence in one document epoch.
+    /// The two factual observations are not simultaneous or atomically
+    /// correlated. Chromium materializes the PNG before callers can enforce
+    /// a retention bound; consumers must all-or-discard the returned PNG.
+    pub async fn paired_layout_visual_snapshot(
+        &self,
+        opts: ScreenshotOptions,
+    ) -> Result<PairedLayoutVisualSnapshot> {
+        let layout = self.layout_snapshot().await?;
+        let visual = self.visual_snapshot(opts).await?;
+        if layout.scope != visual.scope {
+            return Err(VoidCrawlError::PageError(
+                "document epoch changed during paired visual capture".into(),
+            ));
+        }
+        Ok(PairedLayoutVisualSnapshot { layout, visual })
     }
 
     /// Capture a full-page PNG screenshot, returned as raw bytes.
@@ -1807,7 +1960,9 @@ impl Page {
     pub async fn screenshot_png(&self) -> Result<Vec<u8>> {
         match self.screenshot(ScreenshotOptions::default()).await? {
             ScreenshotOutput::Bytes(b) => Ok(b),
-            ScreenshotOutput::Path(_) => unreachable!("no path supplied"),
+            ScreenshotOutput::Path(_) => Err(VoidCrawlError::ScreenshotError(
+                "screenshot unexpectedly wrote to disk".into(),
+            ))?,
         }
     }
 
@@ -1938,14 +2093,22 @@ impl Page {
         // foregrounded tab. With several tabs sharing one browser process
         // (the pool's normal case), an un-guarded capture on a backgrounded
         // tab can fail with CDP -32000 ("Unable to capture screenshot").
-        // Hold the browser-wide capture lock only for the activate+capture
-        // instant — navigation, JS, and extraction on other tabs stay fully
-        // concurrent; they just take turns for this one step.
+        // Headful Chromium already composites its visible target and can stall
+        // indefinitely while acknowledging Target.activateTarget, so do not
+        // issue that headless workaround in known headful mode. Attached mode
+        // remains conservative because its visibility is unknown.
         let capture_guard = self.capture_lock.lock().await;
-        self.inner
-            .bring_to_front()
-            .await
-            .map_err(|e| VoidCrawlError::ScreenshotError(e.to_string()))?;
+        if !matches!(
+            &self.browser_mode,
+            EnvironmentObservation::Known {
+                value: BrowserVisibilityMode::Headful
+            }
+        ) {
+            self.inner
+                .bring_to_front()
+                .await
+                .map_err(|e| VoidCrawlError::ScreenshotError(e.to_string()))?;
+        }
         let bytes = self
             .inner
             .screenshot(builder.build())
@@ -2146,15 +2309,17 @@ impl Page {
         self.download_armed.store(true, Ordering::Relaxed);
 
         // Land on the target's origin so the in-page fetch below is same-origin
-        // (no CORS wall, cookies included). Best-effort: a 4xx/5xx on the origin
-        // root is fine, we only need a document in the right security context.
+        // (no CORS wall, cookies included). Best-effort: a 4xx/5xx on the
+        // origin root is fine, we only need a document in the right
+        // security context.
         if let Some(origin) = origin_of(url) {
             let _ = self.inner.goto(&origin).await;
         }
 
         // Kick off the streaming fetch→blob→anchor-click download. The IIFE
-        // returns synchronously (so `evaluate_js` doesn't await a pending value)
-        // and stashes progress on `window.__vcDl` for the poll loop to read.
+        // returns synchronously (so `evaluate_js` doesn't await a pending
+        // value) and stashes progress on `window.__vcDl` for the poll
+        // loop to read.
         let url_json = serde_json::to_string(url).unwrap_or_else(|_| "''".to_string());
         let js =
             DOWNLOAD_JS.replace("__URL__", &url_json).replace("__MAX__", &max_bytes.to_string());
@@ -2193,6 +2358,7 @@ impl Page {
                     timeout.as_secs()
                 )));
             }
+            // EVENT_DRIVEN_SLEEP_APPROVED: Browser download completion exposes no CDP filesystem settlement event; the caller timeout strictly bounds polling.
             time::sleep(POLL).await;
         }
     }
@@ -2224,12 +2390,30 @@ impl Page {
         options: AccessibilitySnapshotOptions,
     ) -> Result<AccessibilitySnapshot> {
         validate_accessibility_options(options)?;
-        let nodes = self.full_ax_nodes(options.depth, None).await?;
-        let scope = self.top_level_document_scope().await?;
-        accessibility(&nodes, scope, options).map_err(|_| VoidCrawlError::InvalidInput {
-            operation: "accessibility_snapshot",
-            reason:    "max_bytes does not fit browser byte accounting",
-        })
+        for attempt in 0..2 {
+            let before = self.top_level_document_identity().await?;
+            let nodes = self.full_ax_nodes(options.depth, None).await?;
+            let after = self.top_level_document_identity().await?;
+            if before.same_document(&after) {
+                let scope = self.scope_for_identity(&after, false)?;
+                return accessibility(&nodes, scope, options).map_err(|_| {
+                    VoidCrawlError::InvalidInput {
+                        operation: "accessibility_snapshot",
+                        reason:    "max_bytes does not fit browser byte accounting",
+                    }
+                });
+            }
+            self.observe_document_identity(&after, false)?;
+            if attempt == 1 {
+                let scope = self.scope_for_identity(&after, false)?;
+                return Ok(unavailable_accessibility(
+                    scope,
+                    options,
+                    SnapshotUnavailableReason::BrowserDidNotReport,
+                ));
+            }
+        }
+        Err(VoidCrawlError::PageError("document changed during accessibility capture".into()))
     }
 
     /// Capture the top-level accessibility tree using a validated byte limit.
@@ -2258,18 +2442,41 @@ impl Page {
     ) -> Result<AccessibilitySnapshot> {
         validate_accessibility_options(options)?;
         let frame_id = self.resolve_frame(frame_url_pattern).await?;
-        let frame_url = self
-            .inner
-            .frame_url(frame_id.clone())
-            .await
-            .map_err(|error| VoidCrawlError::PageError(error.to_string()))?;
-        let top = self.top_level_document_scope().await?;
+        let before_tree = self.frame_tree().await?;
+        let before_top = CdpDocumentIdentity::from_frame(&before_tree.frame);
+        let Some(before_frame) = identity_in_tree(&before_tree, &frame_id) else {
+            let top = self.scope_for_identity(&before_top, false)?;
+            return Ok(unavailable_accessibility(
+                DocumentScope {
+                    epoch: top.epoch,
+                    frame: DocumentFrameScope::Frame { url: None },
+                    url:   top.url,
+                },
+                options,
+                SnapshotUnavailableReason::FrameUnavailable,
+            ));
+        };
+        let nodes = self.full_ax_nodes(options.depth, Some(frame_id.clone())).await;
+        let after_tree = self.frame_tree().await?;
+        let after_top = CdpDocumentIdentity::from_frame(&after_tree.frame);
+        let after_frame = identity_in_tree(&after_tree, &frame_id);
+        let top = self.scope_for_identity(&after_top, false)?;
+        let frame_url = after_frame.as_ref().unwrap_or(&before_frame).url.clone();
         let scope = DocumentScope {
             epoch: top.epoch,
-            frame: DocumentFrameScope::Frame { url: frame_url.map(ProtectedUrl::new) },
+            frame: DocumentFrameScope::Frame { url: Some(ProtectedUrl::new(frame_url)) },
             url:   top.url,
         };
-        match self.full_ax_nodes(options.depth, Some(frame_id)).await {
+        if !before_top.same_document(&after_top)
+            || !after_frame.as_ref().is_some_and(|after| before_frame.same_document(after))
+        {
+            return Ok(unavailable_accessibility(
+                scope,
+                options,
+                SnapshotUnavailableReason::FrameUnavailable,
+            ));
+        }
+        match nodes {
             Ok(nodes) => {
                 accessibility(&nodes, scope, options).map_err(|_| VoidCrawlError::InvalidInput {
                     operation: "accessibility_snapshot",
@@ -2278,7 +2485,7 @@ impl Page {
             }
             Err(_) => Ok(unavailable_accessibility(
                 scope,
-                options.depth,
+                options,
                 SnapshotUnavailableReason::FrameUnavailable,
             )),
         }
@@ -2407,7 +2614,8 @@ impl Page {
         })?;
 
         if humanize {
-            // Scroll into view, then a trusted compositor click at the box centre.
+            // Scroll into view, then a trusted compositor click at the box
+            // centre.
             let scroll = CallFunctionOnParams::builder()
                 .object_id(object_id)
                 .function_declaration(
@@ -2439,8 +2647,9 @@ impl Page {
             return self.click_xy(cx, cy, true).await;
         }
 
-        // Default: the element's own click() — avoids box-model math and survives
-        // elements that are off-screen until scrolled into view.
+        // Default: the element's own click() — avoids box-model math and
+        // survives elements that are off-screen until scrolled into
+        // view.
         let call = CallFunctionOnParams::builder()
             .object_id(object_id)
             .function_declaration(
@@ -2465,6 +2674,7 @@ impl Page {
     /// outcome into an actionable `Err`, since a screenshot fundamentally
     /// needs a rectangle.
     pub async fn resolve_target(&self, entry: &BrowserTarget) -> Result<TargetResolution> {
+        entry.validate()?;
         match entry.kind {
             BrowserTargetKind::Jsonld => Ok(TargetResolution::Empty {
                 reason: "jsonld selectors address non-visual structured data (a <script> tag \
@@ -2492,19 +2702,15 @@ impl Page {
     }
 
     /// `visual`: an exact 1x1 CSS-pixel box at `(x, y)` — no invented
-    /// hit-radius. `Empty` when coordinates are missing or fall outside the
-    /// current viewport (`window.innerWidth`/`innerHeight`).
+    /// hit-radius. Coordinates have already passed [`BrowserTarget::validate`];
+    /// `Empty` means the point is outside the current viewport.
     async fn resolve_visual_selector(&self, entry: &BrowserTarget) -> Result<TargetResolution> {
         let (Some(x), Some(y)) = (entry.x, entry.y) else {
-            return Ok(TargetResolution::Empty {
-                reason: "visual selector requires both x and y".into(),
+            return Err(VoidCrawlError::InvalidInput {
+                operation: "browser_target",
+                reason:    "visual target requires both x and y coordinates",
             });
         };
-        if x < 0.0 || y < 0.0 {
-            return Ok(TargetResolution::Empty {
-                reason: format!("visual point ({x}, {y}) has a negative coordinate"),
-            });
-        }
         let dims = self
             .evaluate_js("[window.innerWidth, window.innerHeight]")
             .await?
@@ -2515,7 +2721,7 @@ impl Page {
             dims.first().and_then(Value::as_f64).unwrap_or(f64::INFINITY),
             dims.get(1).and_then(Value::as_f64).unwrap_or(f64::INFINITY),
         );
-        if x > vw || y > vh {
+        if x >= vw || y >= vh {
             return Ok(TargetResolution::Empty {
                 reason: format!(
                     "visual point ({x}, {y}) is outside the current viewport ({vw}x{vh})"
@@ -2777,6 +2983,7 @@ impl Page {
             let mut rng = Rng::seed(runtime_seed());
             let path = humanized_path(start, (x, y), &HumanizeOptions::default(), &mut rng);
             for step in path {
+                // EVENT_DRIVEN_SLEEP_APPROVED: Humanized pointer pacing intentionally models elapsed physical movement time between CDP input events.
                 time::sleep(Duration::from_millis(step.delay_ms)).await;
                 self.dispatch_mouse_event(
                     DispatchMouseEventType::MouseMoved,
@@ -2883,6 +3090,45 @@ impl Page {
         Ok(())
     }
 
+    /// Apply independently optional rendering preferences in one CDP command.
+    pub async fn set_rendering_preferences(&self, preferences: RenderingPreferences) -> Result<()> {
+        self.ensure_active().await?;
+        if preferences.color_scheme.is_none() && preferences.reduced_motion.is_none() {
+            return Ok(());
+        }
+        let mut tracked = self.rendering_preferences.lock().await;
+        let mut candidate = *tracked;
+        if preferences.color_scheme.is_some() {
+            candidate.color_scheme = preferences.color_scheme;
+        }
+        if preferences.reduced_motion.is_some() {
+            candidate.reduced_motion = preferences.reduced_motion;
+        }
+        let mut features = Vec::with_capacity(2);
+        if let Some(preference) = candidate.color_scheme {
+            let value = match preference {
+                ColorSchemePreference::Light => "light",
+                ColorSchemePreference::Dark => "dark",
+                ColorSchemePreference::NoPreference => "no-preference",
+            };
+            features.push(MediaFeature::new("prefers-color-scheme", value));
+        }
+        if let Some(preference) = candidate.reduced_motion {
+            let value = match preference {
+                ReducedMotionPreference::Reduce => "reduce",
+                ReducedMotionPreference::NoPreference => "no-preference",
+            };
+            features.push(MediaFeature::new("prefers-reduced-motion", value));
+        }
+        let params = SetEmulatedMediaParams::builder().features(features).build();
+        self.inner
+            .execute(params)
+            .await
+            .map_err(|error| VoidCrawlError::PageError(error.to_string()))?;
+        *tracked = candidate;
+        Ok(())
+    }
+
     /// Override the JS locale and `Accept-Language` (e.g. `"en-US"`,
     /// `"fr-FR"`). This is the lever that shifts region-aware content like
     /// Google Maps results or localized pricing.
@@ -2943,7 +3189,8 @@ impl Page {
     /// One entry is returned per matched element; void elements yield `""`.
     pub async fn query_selector_all(&self, selector: &str) -> Result<Vec<String>> {
         // Single JS eval returns all innerHTML at once — avoids N serial CDP
-        // round-trips (one per element) that the old find_elements approach needed.
+        // round-trips (one per element) that the old find_elements approach
+        // needed.
         let js = format!("[...document.querySelectorAll({selector:?})].map(e => e.innerHTML)");
         let val: Value = self
             .inner
@@ -3302,6 +3549,7 @@ async fn wait_for_new_download(
                 timeout.as_secs()
             )));
         }
+        // EVENT_DRIVEN_SLEEP_APPROVED: Legacy filesystem download discovery has no owned watcher/event surface; the caller timeout strictly bounds polling.
         time::sleep(POLL).await;
     }
 }
@@ -3511,11 +3759,33 @@ mod download_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, reason = "test harness")]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "test harness")]
 mod tests {
     use std::collections::HashSet;
 
-    use super::{client_hints_for_ua, dehead, finalize_endpoints, safe_endpoint};
+    use serde_json::json;
+
+    use super::{
+        client_hints_for_ua, dehead, finalize_endpoints, safe_endpoint, selector_wait_status,
+    };
+    use crate::VoidCrawlError;
+
+    #[test]
+    fn selector_wait_status_classifies_typed_timeout_without_provider_text() {
+        assert!(selector_wait_status(Some(&json!(true)), "#ready", 10).is_ok());
+
+        match selector_wait_status(Some(&json!(false)), "#missing", 10) {
+            Err(VoidCrawlError::Timeout(message)) => assert!(message.contains("#missing")),
+            other => panic!("expected Timeout, got {other:?}"),
+        }
+
+        match selector_wait_status(Some(&json!("unexpected")), "#bad", 10) {
+            Err(VoidCrawlError::JsEvalError(message)) => {
+                assert_eq!(message, "wait_for_selector returned a non-boolean status");
+            }
+            other => panic!("expected JsEvalError, got {other:?}"),
+        }
+    }
 
     #[test]
     fn safe_endpoint_strips_query_and_fragment() {

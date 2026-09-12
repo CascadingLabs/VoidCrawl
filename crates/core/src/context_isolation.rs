@@ -19,7 +19,7 @@ use chromiumoxide::{
     cdp::browser_protocol::{browser::BrowserContextId, target::DisposeBrowserContextParams},
 };
 use serde::Serialize;
-use tokio::{runtime::Handle, sync::Mutex};
+use tokio::{runtime::Handle, sync::Mutex, time};
 
 use crate::Page;
 
@@ -143,19 +143,46 @@ impl IsolatedBrowserContext {
     /// Dispose the entire context, atomically deleting all pages and mutable
     /// context state without running page `beforeunload` handlers.
     pub async fn dispose(self) -> ContextCleanupReport {
+        self.dispose_inner(None).await
+    }
+
+    /// Dispose the context no later than one absolute monotonic deadline.
+    ///
+    /// If Chromium does not acknowledge disposal in time, the detached CDP
+    /// task is aborted and joined before this method returns. This releases
+    /// its browser lock so the owning session can immediately close or be
+    /// dropped for process-level termination.
+    pub async fn dispose_before(self, deadline: time::Instant) -> ContextCleanupReport {
+        self.dispose_inner(Some(deadline)).await
+    }
+
+    async fn dispose_inner(self, deadline: Option<time::Instant>) -> ContextCleanupReport {
         let browser = Arc::clone(&self.browser);
         let context_id = self.context_id.clone();
         let handler_alive = Arc::clone(&self.handler_alive);
-        // Detach cleanup from the caller's future before the first await. If
-        // the caller is cancelled while waiting, Chromium disposal continues
-        // and `Drop` does not race a duplicate request.
-        let cleanup = tokio::spawn(async move {
+        // Detach cleanup before the first await so cancellation of the caller
+        // cannot race `Drop` into issuing a duplicate disposal request.
+        let mut cleanup = tokio::spawn(async move {
             browser.lock().await.execute(DisposeBrowserContextParams::new(context_id)).await
         });
         self.disposed.store(true, Ordering::Release);
-        match cleanup.await {
-            Ok(Ok(_)) => ContextCleanupReport::disposed(),
-            Ok(Err(_)) | Err(_) => {
+        let result = match deadline {
+            Some(deadline) => {
+                tokio::select! {
+                    result = &mut cleanup => Some(result),
+                    () = time::sleep_until(deadline) => None,
+                }
+            }
+            None => Some((&mut cleanup).await),
+        };
+        match result {
+            Some(Ok(Ok(_))) => ContextCleanupReport::disposed(),
+            Some(Ok(Err(_)) | Err(_)) => {
+                ContextCleanupReport::failed(!handler_alive.load(Ordering::Acquire))
+            }
+            None => {
+                cleanup.abort();
+                let _ = cleanup.await;
                 ContextCleanupReport::failed(!handler_alive.load(Ordering::Acquire))
             }
         }

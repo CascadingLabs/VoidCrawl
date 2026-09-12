@@ -10,7 +10,7 @@ use std::{
     result::Result as StdResult,
     str,
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use chromiumoxide::{
@@ -28,15 +28,16 @@ use chromiumoxide::{
 use futures::StreamExt;
 use serde::Serialize;
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{broadcast, mpsc, oneshot},
     task::JoinHandle,
-    time,
+    time::{self, Instant},
 };
 
 use crate::{
-    BrowserBudgetScope, BrowserByteBudget, BrowserByteCount, BrowserByteDomain, BrowserByteLimit,
-    BrowserByteReport, BrowserByteReportError, BrowserByteSpec, BrowserLimitScope, Result,
-    VoidCrawlError,
+    BrowserBudgetScope, BrowserByteAccounting, BrowserByteBudget, BrowserByteCount,
+    BrowserByteDomain, BrowserByteLimit, BrowserByteMeasurementUnavailableReason,
+    BrowserByteReport, BrowserByteReportError, BrowserByteSpec, BrowserLimitScope,
+    MeasuredBrowserBytes, Result, VoidCrawlError,
 };
 
 /// Collectors and hard bounds for one observation scope.
@@ -223,9 +224,42 @@ pub struct ObservationCountAccounting {
 /// Terminal accounting for one provider observation scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ObservationAccounting {
+    /// All observation events, including network lifecycle events.
     pub events:             ObservationCountAccounting,
-    pub bytes:              ObservationCountAccounting,
+    /// Runtime console and exception events only.
+    pub runtime_events:     ObservationCountAccounting,
+    /// Runtime diagnostic UTF-8 bytes only.
+    pub runtime_bytes:      ObservationCountAccounting,
     pub in_flight_requests: MeasuredCount,
+}
+
+/// Owned, secret-safe terminal result of one observation scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct QuietSettlementProof {
+    /// Start of the event-free interval, relative to observation arming.
+    pub quiet_since_offset_micros: u64,
+    /// Time at which the provider established settlement, relative to arming.
+    pub satisfied_offset_micros:   u64,
+    /// Relevant requests still in flight when settlement was established.
+    pub relevant_in_flight:        u64,
+    /// Accounting scoped to `(quiet_since_offset_micros,
+    /// satisfied_offset_micros]`.
+    pub event_accounting:          ObservationCountAccounting,
+}
+
+/// A terminal, non-success outcome from live quiet settlement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum QuietWaitError {
+    #[error("quiet duration must be positive")]
+    InvalidQuietDuration,
+    #[error("relevant in-flight accounting requires network collection")]
+    NetworkAccountingUnavailable,
+    #[error("quiet-settlement deadline reached")]
+    DeadlineReached,
+    #[error("observation terminated before quiet settlement: {0:?}")]
+    ObservationTerminated(ObservationTermination),
+    #[error("quiet-settlement progress was lost")]
+    ProgressLost,
 }
 
 /// Owned, secret-safe terminal result of one observation scope.
@@ -250,9 +284,20 @@ pub struct ObservationReport {
 /// Dropping the scope, including by cancelling a future that owns it, aborts
 /// the coordinator. Its task guard then aborts every collector so listeners
 /// cannot outlive the scope.
+/// Latest secret-safe progress visible without consuming the observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObservationCheckpoint {
+    pub last_event_offset_micros: u64,
+    pub termination:              Option<ObservationTermination>,
+}
+
 pub struct ObservationScope {
-    stop:   Option<oneshot::Sender<StopRequest>>,
-    worker: Option<JoinHandle<ObservationReport>>,
+    stop:             Option<oneshot::Sender<StopRequest>>,
+    worker:           Option<JoinHandle<ObservationReport>>,
+    progress:         broadcast::Receiver<ObservationProgress>,
+    latest_progress:  Option<ObservationProgress>,
+    armed_at:         Instant,
+    collects_network: bool,
 }
 
 impl fmt::Debug for ObservationScope {
@@ -309,6 +354,8 @@ impl ObservationScope {
 
         let collectors = streams.spawn(event_tx);
         let (stop, stop_rx) = oneshot::channel();
+        let progress_capacity = options.max_events.clamp(1, 1_024).saturating_add(1);
+        let (progress_tx, progress) = broadcast::channel(progress_capacity);
         let worker = tokio::spawn(run_scope(
             event_rx,
             stop_rx,
@@ -316,8 +363,81 @@ impl ObservationScope {
             options,
             started,
             started_at_unix_ms,
+            progress_tx,
         ));
-        Ok(Self { stop: Some(stop), worker: Some(worker) })
+        Ok(Self {
+            stop: Some(stop),
+            worker: Some(worker),
+            progress,
+            latest_progress: None,
+            armed_at: started,
+            collects_network: options.collect_network,
+        })
+    }
+
+    /// Wait until every admitted relevant event has been followed by `quiet`
+    /// and the relevant in-flight count is at most `maximum_in_flight`.
+    ///
+    /// The absolute deadline is caller-owned. This method borrows the scope so
+    /// cancellation of this future leaves [`Self::cancel`] and [`Self::finish`]
+    /// available for obtaining the partial owned report.
+    /// Return the newest available event/terminal checkpoint without waiting.
+    /// This drains stale progress messages so callers never act on an older
+    /// non-terminal update after the terminal update was already delivered.
+    pub fn checkpoint(&mut self) -> Option<ObservationCheckpoint> {
+        let mut latest = self.latest_progress;
+        loop {
+            match self.progress.try_recv() {
+                Ok(progress) => latest = Some(progress),
+                Err(
+                    broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed,
+                ) => break,
+                Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+            }
+        }
+        self.latest_progress = latest;
+        latest.map(|progress| ObservationCheckpoint {
+            last_event_offset_micros: progress.last_event_offset_micros,
+            termination:              progress.termination,
+        })
+    }
+
+    pub async fn wait_for_quiet(
+        &mut self,
+        quiet: Duration,
+        maximum_in_flight: usize,
+        deadline: Instant,
+    ) -> StdResult<QuietSettlementProof, QuietWaitError> {
+        if quiet.is_zero() {
+            return Err(QuietWaitError::InvalidQuietDuration);
+        }
+        if !self.collects_network {
+            return Err(QuietWaitError::NetworkAccountingUnavailable);
+        }
+        let initial = self.latest_progress.take();
+        let result = wait_for_quiet_progress(
+            &mut self.progress,
+            initial,
+            quiet,
+            maximum_in_flight,
+            deadline,
+        )
+        .await;
+        if let Ok(proof) = &result {
+            let last_event_at = self
+                .armed_at
+                .checked_add(Duration::from_micros(proof.quiet_since_offset_micros))
+                .unwrap_or(self.armed_at);
+            self.latest_progress = Some(ObservationProgress {
+                armed_at: self.armed_at,
+                last_event_offset_micros: proof.quiet_since_offset_micros,
+                last_event_at,
+                relevant_in_flight: usize::try_from(proof.relevant_in_flight).unwrap_or(usize::MAX),
+                has_admitted_event: true,
+                termination: None,
+            });
+        }
+        result
     }
 
     /// Stop normally and return every event retained before the stop won.
@@ -348,11 +468,11 @@ impl ObservationScope {
     }
 
     async fn join_worker(&mut self) -> Result<ObservationReport> {
-        let worker = self
-            .worker
-            .take()
-            .ok_or_else(|| VoidCrawlError::Other("observation scope already consumed".into()))?;
-        worker
+        // Keep the handle in `self` across the await: if this outer future is
+        // cancelled, `Drop` still owns and aborts the coordinator.
+        self.worker
+            .as_mut()
+            .ok_or_else(|| VoidCrawlError::Other("observation scope already consumed".into()))?
             .await
             .map_err(|error| VoidCrawlError::Other(format!("observation worker failed: {error}")))
     }
@@ -367,15 +487,36 @@ impl ObservationReport {
             BrowserLimitScope::RetentionAfterProviderMaterialization,
             BrowserBudgetScope::CaptureAggregate,
         );
-        BrowserByteReport::from_known_extent(
+        let observed = BrowserByteCount::try_from_usize(
+            self.diagnostic_bytes_retained
+                .checked_add(self.diagnostic_bytes_dropped)
+                .ok_or(crate::BrowserByteAccountingError::Overflow)?,
+        )?;
+        let retained = BrowserByteCount::try_from_usize(self.diagnostic_bytes_retained)?;
+        let discarded = BrowserByteCount::try_from_usize(self.diagnostic_bytes_dropped)?;
+        let accounting = BrowserByteAccounting::new(
+            observed,
+            retained,
+            MeasuredBrowserBytes::Known { value: discarded },
+        )?;
+        if self.termination == ObservationTermination::Finished {
+            return BrowserByteReport::from_known_extent(
+                BrowserByteDomain::RuntimeDiagnosticUtf8,
+                Some(spec),
+                observed,
+                retained,
+            );
+        }
+
+        let unknown_loss = MeasuredBrowserBytes::Unavailable {
+            reason: BrowserByteMeasurementUnavailableReason::CaptureEndedEarly,
+        };
+        BrowserByteReport::truncated(
             BrowserByteDomain::RuntimeDiagnosticUtf8,
             Some(spec),
-            BrowserByteCount::try_from_usize(
-                self.diagnostic_bytes_retained
-                    .checked_add(self.diagnostic_bytes_dropped)
-                    .ok_or(crate::BrowserByteAccountingError::Overflow)?,
-            )?,
-            BrowserByteCount::try_from_usize(self.diagnostic_bytes_retained)?,
+            accounting,
+            unknown_loss,
+            unknown_loss,
         )
     }
 }
@@ -509,6 +650,75 @@ enum RetainOutcome {
     StreamClosed,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ObservationProgress {
+    armed_at:                 Instant,
+    last_event_offset_micros: u64,
+    last_event_at:            Instant,
+    relevant_in_flight:       usize,
+    has_admitted_event:       bool,
+    termination:              Option<ObservationTermination>,
+}
+
+async fn wait_for_quiet_progress(
+    progress: &mut broadcast::Receiver<ObservationProgress>,
+    initial: Option<ObservationProgress>,
+    quiet: Duration,
+    maximum_in_flight: usize,
+    deadline: Instant,
+) -> StdResult<QuietSettlementProof, QuietWaitError> {
+    let mut current = match initial {
+        Some(progress) => progress,
+        None => progress.recv().await.map_err(|_| QuietWaitError::ProgressLost)?,
+    };
+    let settlement_started = Instant::now();
+    if current.last_event_at < settlement_started {
+        current.last_event_at = settlement_started;
+        current.last_event_offset_micros =
+            duration_micros(settlement_started.saturating_duration_since(current.armed_at));
+    }
+    loop {
+        if let Some(termination) = current.termination {
+            return Err(QuietWaitError::ObservationTerminated(termination));
+        }
+        let quiet_since = current.last_event_offset_micros;
+        let quiet_at =
+            current.last_event_at.checked_add(quiet).ok_or(QuietWaitError::DeadlineReached)?;
+        tokio::select! {
+            biased;
+            () = time::sleep_until(deadline) => return Err(QuietWaitError::DeadlineReached),
+            update = progress.recv() => {
+                current = match update {
+                    Ok(update) => update,
+                    Err(
+                        broadcast::error::RecvError::Lagged(_)
+                        | broadcast::error::RecvError::Closed,
+                    ) => {
+                        return Err(QuietWaitError::ProgressLost);
+                    }
+                };
+            }
+            () = time::sleep_until(quiet_at), if current.has_admitted_event && current.relevant_in_flight <= maximum_in_flight => {
+                let satisfied = duration_micros(
+                    Instant::now().saturating_duration_since(current.armed_at),
+                );
+                let zero = MeasuredCount::Known { value: 0 };
+                return Ok(QuietSettlementProof {
+                    quiet_since_offset_micros: quiet_since,
+                    satisfied_offset_micros: satisfied,
+                    relevant_in_flight: u64::try_from(current.relevant_in_flight)
+                        .map_err(|_| QuietWaitError::ProgressLost)?,
+                    event_accounting: ObservationCountAccounting {
+                        admitted: zero,
+                        retained: zero,
+                        dropped: zero,
+                    },
+                });
+            }
+        }
+    }
+}
+
 #[expect(clippy::too_many_arguments, reason = "bounded collector accounting is kept explicit")]
 fn retain_signal(
     signal: RawSignal,
@@ -540,8 +750,7 @@ fn retain_signal(
     };
     events.push(ObservationEvent { sequence, offset_micros, kind });
     if let Some(diagnostic) = diagnostic {
-        let bytes = diagnostic.text.into_bytes();
-        let complete_bytes = bytes.len();
+        let complete_bytes = diagnostic.text.len();
         let Ok(complete_count) = u64::try_from(complete_bytes) else {
             return RetainOutcome::EventLimitReached;
         };
@@ -549,19 +758,33 @@ fn retain_signal(
         else {
             return RetainOutcome::EventLimitReached;
         };
-        let Ok(retained_bytes) = usize::try_from(admission.retain_prefix.get()) else {
+        let Ok(admitted_prefix_bytes) = usize::try_from(admission.retain_prefix.get()) else {
             return RetainOutcome::EventLimitReached;
         };
-        *diagnostic_bytes_retained = diagnostic_bytes_retained.saturating_add(retained_bytes);
-        *diagnostic_bytes_dropped =
-            diagnostic_bytes_dropped.saturating_add(complete_bytes.saturating_sub(retained_bytes));
+        // A byte budget can split a Unicode scalar. Retain only a valid UTF-8
+        // prefix; the boundary backoff is loss and must be included below.
+        let retained_bytes = utf8_prefix_boundary(&diagnostic.text, admitted_prefix_bytes);
+        let Some(dropped_bytes) = complete_bytes.checked_sub(retained_bytes) else {
+            return RetainOutcome::EventLimitReached;
+        };
+        let Some(new_retained) = diagnostic_bytes_retained.checked_add(retained_bytes) else {
+            return RetainOutcome::EventLimitReached;
+        };
+        let Some(new_dropped) = diagnostic_bytes_dropped.checked_add(dropped_bytes) else {
+            return RetainOutcome::EventLimitReached;
+        };
+        let Some(retained_text) = diagnostic.text.get(..retained_bytes) else {
+            return RetainOutcome::EventLimitReached;
+        };
+        *diagnostic_bytes_retained = new_retained;
+        *diagnostic_bytes_dropped = new_dropped;
         diagnostics.push(RuntimeDiagnostic {
             event_sequence: sequence,
             kind: diagnostic.kind,
             retained_bytes,
             complete_bytes,
             truncated: retained_bytes < complete_bytes,
-            text: ProtectedDiagnosticText(Arc::from(bytes[..retained_bytes].to_vec())),
+            text: ProtectedDiagnosticText(Arc::from(retained_text.as_bytes())),
         });
     }
     if events.len() >= max_events {
@@ -571,6 +794,14 @@ fn retain_signal(
     }
 }
 
+fn utf8_prefix_boundary(text: &str, maximum_bytes: usize) -> usize {
+    let mut boundary = maximum_bytes.min(text.len());
+    while boundary > 0 && !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    boundary
+}
+
 async fn run_scope(
     mut events_rx: mpsc::Receiver<RawSignal>,
     mut stop_rx: oneshot::Receiver<StopRequest>,
@@ -578,8 +809,9 @@ async fn run_scope(
     options: ObservationOptions,
     started: Instant,
     started_at_unix_ms: Option<u64>,
+    progress: broadcast::Sender<ObservationProgress>,
 ) -> ObservationReport {
-    let deadline = time::sleep(options.max_duration);
+    let deadline = time::sleep_until(time::Instant::now() + options.max_duration);
     tokio::pin!(deadline);
     let mut events = Vec::with_capacity(options.max_events.min(1_024));
     let mut diagnostics = Vec::new();
@@ -593,6 +825,14 @@ async fn run_scope(
     );
     let mut diagnostic_budget = BrowserByteBudget::new(diagnostic_spec);
     let mut in_flight = HashSet::new();
+    let _ = progress.send(ObservationProgress {
+        armed_at:                 started,
+        last_event_offset_micros: 0,
+        last_event_at:            started,
+        relevant_in_flight:       0,
+        has_admitted_event:       false,
+        termination:              None,
+    });
 
     let mut termination = loop {
         tokio::select! {
@@ -619,7 +859,19 @@ async fn run_scope(
                         options.max_diagnostic_bytes,
                         &mut diagnostic_budget,
                     ) {
-                        RetainOutcome::Continue => {}
+                        RetainOutcome::Continue => {
+                            let last_event_offset_micros =
+                                events.last().map_or(0, |event| event.offset_micros);
+                            let last_event_at = instant_at_offset(started, last_event_offset_micros);
+                            let _ = progress.send(ObservationProgress {
+                                armed_at: started,
+                                last_event_offset_micros,
+                                last_event_at,
+                                relevant_in_flight: in_flight.len(),
+                                has_admitted_event: true,
+                                termination: None,
+                            });
+                        }
                         RetainOutcome::EventLimitReached => {
                             break ObservationTermination::EventLimitReached;
                         }
@@ -633,6 +885,16 @@ async fn run_scope(
         }
     };
 
+    let last_event_offset_micros = events.last().map_or(0, |event| event.offset_micros);
+    let last_event_at = instant_at_offset(started, last_event_offset_micros);
+    let _ = progress.send(ObservationProgress {
+        armed_at: started,
+        last_event_offset_micros,
+        last_event_at,
+        relevant_in_flight: in_flight.len(),
+        has_admitted_event: !events.is_empty(),
+        termination: Some(termination),
+    });
     collectors.shutdown().await;
     while events.len() < options.max_events {
         let Ok(signal) = events_rx.try_recv() else { break };
@@ -657,35 +919,50 @@ async fn run_scope(
             }
         }
     }
-    let event_count = u64::try_from(events.len()).unwrap_or(u64::MAX);
+    let event_count = u64::try_from(events.len()).ok();
+    let runtime_event_count = u64::try_from(diagnostics.len()).ok();
+    let retained_byte_count = u64::try_from(diagnostic_bytes_retained).ok();
+    let dropped_byte_count = u64::try_from(diagnostic_bytes_dropped).ok();
+    let observed_byte_count = diagnostic_bytes_retained
+        .checked_add(diagnostic_bytes_dropped)
+        .and_then(|value| u64::try_from(value).ok());
+    let known = |value: Option<u64>| {
+        value.map_or(
+            MeasuredCount::Unavailable {
+                reason: MeasurementUnavailableReason::ProviderDidNotReport,
+            },
+            |value| MeasuredCount::Known { value },
+        )
+    };
     let dropped =
         MeasuredCount::Unavailable { reason: MeasurementUnavailableReason::ProviderDidNotReport };
+    let runtime_events_dropped = if termination == ObservationTermination::Finished {
+        MeasuredCount::Known { value: 0 }
+    } else {
+        dropped
+    };
     ObservationReport {
         started_at_unix_ms,
         elapsed_micros: duration_micros(started.elapsed()),
         termination,
         accounting: ObservationAccounting {
             events:             ObservationCountAccounting {
-                admitted: MeasuredCount::Known { value: event_count },
-                retained: MeasuredCount::Known { value: event_count },
+                admitted: known(event_count),
+                retained: known(event_count),
                 dropped,
             },
-            bytes:              ObservationCountAccounting {
-                admitted: MeasuredCount::Known {
-                    value: u64::try_from(
-                        diagnostic_bytes_retained.saturating_add(diagnostic_bytes_dropped),
-                    )
-                    .unwrap_or(u64::MAX),
-                },
-                retained: MeasuredCount::Known {
-                    value: u64::try_from(diagnostic_bytes_retained).unwrap_or(u64::MAX),
-                },
-                dropped:  MeasuredCount::Known {
-                    value: u64::try_from(diagnostic_bytes_dropped).unwrap_or(u64::MAX),
-                },
+            runtime_events:     ObservationCountAccounting {
+                admitted: known(runtime_event_count),
+                retained: known(runtime_event_count),
+                dropped:  runtime_events_dropped,
+            },
+            runtime_bytes:      ObservationCountAccounting {
+                admitted: known(observed_byte_count),
+                retained: known(retained_byte_count),
+                dropped:  known(dropped_byte_count),
             },
             in_flight_requests: if options.collect_network {
-                MeasuredCount::Known { value: u64::try_from(in_flight.len()).unwrap_or(u64::MAX) }
+                known(u64::try_from(in_flight.len()).ok())
             } else {
                 MeasuredCount::Unavailable { reason: MeasurementUnavailableReason::NotCollected }
             },
@@ -813,6 +1090,13 @@ fn spawn_exceptions(
     })
 }
 
+fn instant_at_offset(started: Instant, offset_micros: u64) -> Instant {
+    match started.checked_add(Duration::from_micros(offset_micros)) {
+        Some(instant) => instant,
+        None => Instant::now(),
+    }
+}
+
 fn unix_millis(now: SystemTime) -> Option<u64> {
     now.duration_since(UNIX_EPOCH)
         .ok()
@@ -826,6 +1110,8 @@ fn duration_micros(duration: Duration) -> u64 {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
+    use std::future;
+
     use super::*;
 
     #[test]
@@ -854,6 +1140,209 @@ mod tests {
             ObservationOptions { max_duration: Duration::ZERO, ..ObservationOptions::default() }
                 .validate()
                 .is_err()
+        );
+    }
+
+    struct AbortSignal(Option<oneshot::Sender<()>>);
+
+    impl Drop for AbortSignal {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    fn pending_scope() -> (ObservationScope, oneshot::Receiver<()>, oneshot::Receiver<()>) {
+        let (stop, _) = oneshot::channel();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (aborted_tx, aborted_rx) = oneshot::channel();
+        let worker = tokio::spawn(async move {
+            let _signal = AbortSignal(Some(aborted_tx));
+            let _ = started_tx.send(());
+            future::pending::<ObservationReport>().await
+        });
+        let (_progress_tx, progress) = broadcast::channel(1);
+        (
+            ObservationScope {
+                stop: Some(stop),
+                worker: Some(worker),
+                progress,
+                latest_progress: None,
+                armed_at: Instant::now(),
+                collects_network: true,
+            },
+            started_rx,
+            aborted_rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn cancelling_terminal_joins_aborts_the_owned_worker() {
+        macro_rules! assert_terminal_join_aborts_worker {
+            ($method:ident) => {{
+                let (scope, started, aborted) = pending_scope();
+                started.await.expect("worker started");
+                let terminal = tokio::spawn(async move { scope.$method().await });
+                tokio::task::yield_now().await;
+                terminal.abort();
+                let _ = terminal.await;
+                tokio::time::timeout(Duration::from_secs(1), aborted)
+                    .await
+                    .expect("scope drop did not abort worker")
+                    .expect("worker abort signal dropped");
+            }};
+        }
+
+        assert_terminal_join_aborts_worker!(wait);
+        assert_terminal_join_aborts_worker!(finish);
+        assert_terminal_join_aborts_worker!(cancel);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quiet_progress_resets_on_event_and_returns_zero_interval_accounting() {
+        let started = Instant::now();
+        let (sender, mut receiver) = broadcast::channel(4);
+        sender
+            .send(ObservationProgress {
+                armed_at:                 started,
+                last_event_offset_micros: 0,
+                last_event_at:            started,
+                relevant_in_flight:       0,
+                has_admitted_event:       false,
+                termination:              None,
+            })
+            .expect("receiver remains live");
+        let waiter = tokio::spawn(async move {
+            wait_for_quiet_progress(
+                &mut receiver,
+                None,
+                Duration::from_millis(10),
+                0,
+                started + Duration::from_secs(1),
+            )
+            .await
+        });
+        time::advance(Duration::from_millis(5)).await;
+        sender
+            .send(ObservationProgress {
+                armed_at:                 started,
+                last_event_offset_micros: 5_000,
+                last_event_at:            started + Duration::from_millis(5),
+                relevant_in_flight:       0,
+                has_admitted_event:       true,
+                termination:              None,
+            })
+            .expect("waiter remains live");
+        time::advance(Duration::from_millis(10)).await;
+        let proof = waiter.await.expect("wait task").expect("quiet proof");
+        assert_eq!(proof.quiet_since_offset_micros, 5_000);
+        assert!(proof.satisfied_offset_micros >= 15_000);
+        let zero = MeasuredCount::Known { value: 0 };
+        assert_eq!(
+            proof.event_accounting,
+            ObservationCountAccounting { admitted: zero, retained: zero, dropped: zero }
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quiet_progress_deadline_does_not_succeed_with_excess_in_flight() {
+        let started = Instant::now();
+        let (sender, mut receiver) = broadcast::channel(2);
+        sender
+            .send(ObservationProgress {
+                armed_at:                 started,
+                last_event_offset_micros: 0,
+                last_event_at:            started,
+                relevant_in_flight:       1,
+                has_admitted_event:       true,
+                termination:              None,
+            })
+            .expect("receiver remains live");
+        let deadline = started + Duration::from_millis(20);
+        let waiter = tokio::spawn(async move {
+            wait_for_quiet_progress(&mut receiver, None, Duration::from_millis(5), 0, deadline)
+                .await
+        });
+        time::advance(Duration::from_millis(20)).await;
+        assert_eq!(waiter.await.expect("wait task"), Err(QuietWaitError::DeadlineReached));
+        drop(sender);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cached_checkpoint_can_start_a_later_quiet_wait() {
+        let started = Instant::now();
+        let (_sender, mut receiver) = broadcast::channel(1);
+        let initial = ObservationProgress {
+            armed_at:                 started,
+            last_event_offset_micros: 1,
+            last_event_at:            started,
+            relevant_in_flight:       0,
+            has_admitted_event:       true,
+            termination:              None,
+        };
+        let waiter = tokio::spawn(async move {
+            wait_for_quiet_progress(
+                &mut receiver,
+                Some(initial),
+                Duration::from_millis(5),
+                0,
+                started + Duration::from_secs(1),
+            )
+            .await
+        });
+        time::advance(Duration::from_millis(5)).await;
+        assert!(waiter.await.expect("wait task").is_ok());
+    }
+
+    #[tokio::test]
+    async fn lagged_progress_and_terminal_progress_cannot_claim_quiet() {
+        let started = Instant::now();
+        let (sender, mut receiver) = broadcast::channel(1);
+        for offset in [1_u64, 2] {
+            sender
+                .send(ObservationProgress {
+                    armed_at:                 started,
+                    last_event_offset_micros: offset,
+                    last_event_at:            started,
+                    relevant_in_flight:       0,
+                    has_admitted_event:       true,
+                    termination:              None,
+                })
+                .expect("receiver remains live");
+        }
+        assert_eq!(
+            wait_for_quiet_progress(
+                &mut receiver,
+                None,
+                Duration::from_millis(1),
+                0,
+                started + Duration::from_secs(1),
+            )
+            .await,
+            Err(QuietWaitError::ProgressLost)
+        );
+
+        let (_sender, mut receiver) = broadcast::channel(1);
+        assert_eq!(
+            wait_for_quiet_progress(
+                &mut receiver,
+                Some(ObservationProgress {
+                    armed_at:                 started,
+                    last_event_offset_micros: 1,
+                    last_event_at:            started,
+                    relevant_in_flight:       0,
+                    has_admitted_event:       true,
+                    termination:              Some(ObservationTermination::ProviderDisconnected),
+                }),
+                Duration::from_millis(1),
+                0,
+                started + Duration::from_secs(1),
+            )
+            .await,
+            Err(QuietWaitError::ObservationTerminated(
+                ObservationTermination::ProviderDisconnected
+            ))
         );
     }
 
@@ -887,16 +1376,15 @@ mod tests {
                         reason: MeasurementUnavailableReason::ProviderDidNotReport,
                     },
                 },
-                bytes:              ObservationCountAccounting {
-                    admitted: MeasuredCount::Unavailable {
-                        reason: MeasurementUnavailableReason::NotCollected,
-                    },
-                    retained: MeasuredCount::Unavailable {
-                        reason: MeasurementUnavailableReason::NotCollected,
-                    },
-                    dropped:  MeasuredCount::Unavailable {
-                        reason: MeasurementUnavailableReason::NotCollected,
-                    },
+                runtime_events:     ObservationCountAccounting {
+                    admitted: MeasuredCount::Known { value: 1 },
+                    retained: MeasuredCount::Known { value: 1 },
+                    dropped:  MeasuredCount::Known { value: 0 },
+                },
+                runtime_bytes:      ObservationCountAccounting {
+                    admitted: MeasuredCount::Known { value: 6 },
+                    retained: MeasuredCount::Known { value: 6 },
+                    dropped:  MeasuredCount::Known { value: 0 },
                 },
                 in_flight_requests: MeasuredCount::Known { value: 0 },
             },

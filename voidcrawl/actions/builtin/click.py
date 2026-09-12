@@ -121,6 +121,9 @@ class CdpClickAndHold(ActionNode):
         await tab.dispatch_mouse_event(
             "mousePressed", self.x, self.y, button=self.button, click_count=1
         )
+        # EVENT_DRIVEN_SLEEP_APPROVED:
+        # Click-and-hold duration is the requested input behavior separating
+        # mouse press from release.
         await asyncio.sleep(self.duration_ms / 1000.0)
         await tab.dispatch_mouse_event(
             "mouseReleased", self.x, self.y, button=self.button, click_count=1

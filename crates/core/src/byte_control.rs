@@ -180,6 +180,8 @@ pub enum BrowserByteAccountingError {
     Overflow,
     #[error("browser byte specification domain does not match the reported payload")]
     SpecDomainMismatch,
+    #[error("retained bytes exceed the configured browser byte limit")]
+    RetainedExceedsLimit,
 }
 
 /// Bytes delivered to VoidCrawl, retained, and discarded after observation.
@@ -325,7 +327,7 @@ impl<'de> Deserialize<'de> for BrowserByteReport {
 }
 
 impl BrowserByteReport {
-    fn new(
+    pub fn new(
         domain: BrowserByteDomain,
         spec: Option<BrowserByteSpec>,
         accounting: BrowserByteAccounting,
@@ -335,27 +337,47 @@ impl BrowserByteReport {
         if spec.is_some_and(|spec| spec.domain() != domain) {
             return Err(BrowserByteAccountingError::SpecDomainMismatch.into());
         }
-        let known_discarded = matches!(
+        if spec.is_some_and(|spec| accounting.retained().get() > spec.limit().get()) {
+            return Err(BrowserByteAccountingError::RetainedExceedsLimit.into());
+        }
+        let discarded_is_zero = matches!(
             accounting.discarded(),
-            MeasuredBrowserBytes::Known { value } if value.get() > 0
+            MeasuredBrowserBytes::Known { value } if value.get() == 0
+        );
+        let additional_loss_is_zero = matches!(
+            additional_loss,
+            MeasuredBrowserBytes::Known { value } if value.get() == 0
         );
         match extent {
-            BrowserPayloadExtent::Complete if known_discarded => {
+            BrowserPayloadExtent::Complete if !discarded_is_zero || !additional_loss_is_zero => {
                 return Err(BrowserByteReportError::ExtentMismatch);
             }
-            BrowserPayloadExtent::Truncated { complete_bytes }
-                if !known_discarded
-                    || complete_bytes
-                        != MeasuredBrowserBytes::Known { value: accounting.observed() } =>
-            {
-                return Err(BrowserByteReportError::ExtentMismatch);
+            BrowserPayloadExtent::Truncated { complete_bytes } => {
+                if discarded_is_zero && additional_loss_is_zero {
+                    return Err(BrowserByteReportError::ExtentMismatch);
+                }
+                if let MeasuredBrowserBytes::Known { value: complete } = complete_bytes {
+                    if complete < accounting.observed() {
+                        return Err(BrowserByteReportError::ExtentMismatch);
+                    }
+                    if let MeasuredBrowserBytes::Known { value: additional } = additional_loss {
+                        let expected = accounting
+                            .observed()
+                            .get()
+                            .checked_add(additional.get())
+                            .ok_or(BrowserByteAccountingError::Overflow)?;
+                        if complete.get() != expected {
+                            return Err(BrowserByteReportError::ExtentMismatch);
+                        }
+                    }
+                }
             }
             BrowserPayloadExtent::Discarded { observed_bytes }
                 if accounting.retained().get() != 0 || observed_bytes != accounting.discarded() =>
             {
                 return Err(BrowserByteReportError::ExtentMismatch);
             }
-            BrowserPayloadExtent::Unavailable { .. } | BrowserPayloadExtent::Failed { .. }
+            BrowserPayloadExtent::Unavailable { .. }
                 if accounting.observed().get() != 0 || accounting.retained().get() != 0 =>
             {
                 return Err(BrowserByteReportError::ExtentMismatch);
@@ -419,6 +441,24 @@ impl BrowserByteReport {
         )
     }
 
+    /// Reports a truncated payload, including loss before it was observed
+    /// locally.
+    pub fn truncated(
+        domain: BrowserByteDomain,
+        spec: Option<BrowserByteSpec>,
+        accounting: BrowserByteAccounting,
+        complete_bytes: MeasuredBrowserBytes,
+        additional_loss: MeasuredBrowserBytes,
+    ) -> Result<Self, BrowserByteReportError> {
+        Self::new(
+            domain,
+            spec,
+            accounting,
+            BrowserPayloadExtent::Truncated { complete_bytes },
+            additional_loss,
+        )
+    }
+
     /// Reports a failed payload without presenting it as a complete capture.
     pub fn failed(
         domain: BrowserByteDomain,
@@ -430,7 +470,24 @@ impl BrowserByteReport {
             reason: BrowserByteMeasurementUnavailableReason::CaptureEndedEarly,
         };
         let accounting = BrowserByteAccounting::new(zero, zero, unavailable)?;
-        Self::new(domain, spec, accounting, BrowserPayloadExtent::Failed { reason }, unavailable)
+        Self::failed_with_accounting(domain, spec, accounting, reason, unavailable)
+    }
+
+    /// Reports a failed payload while preserving any valid partial accounting.
+    pub fn failed_with_accounting(
+        domain: BrowserByteDomain,
+        spec: Option<BrowserByteSpec>,
+        accounting: BrowserByteAccounting,
+        reason: BrowserPayloadFailureReason,
+        additional_loss: MeasuredBrowserBytes,
+    ) -> Result<Self, BrowserByteReportError> {
+        Self::new(
+            domain,
+            spec,
+            accounting,
+            BrowserPayloadExtent::Failed { reason },
+            additional_loss,
+        )
     }
 
     pub fn unavailable(domain: BrowserByteDomain, reason: BrowserPayloadUnavailableReason) -> Self {
@@ -450,6 +507,32 @@ impl BrowserByteReport {
                 reason: BrowserByteMeasurementUnavailableReason::ProviderDidNotReport,
             },
         }
+    }
+
+    /// Reports an unavailable payload while retaining a requested collection
+    /// spec.
+    pub fn unavailable_with_spec(
+        domain: BrowserByteDomain,
+        spec: Option<BrowserByteSpec>,
+        reason: BrowserPayloadUnavailableReason,
+    ) -> Result<Self, BrowserByteReportError> {
+        let zero = BrowserByteCount::new(0);
+        let accounting = BrowserByteAccounting::new(
+            zero,
+            zero,
+            MeasuredBrowserBytes::Unavailable {
+                reason: BrowserByteMeasurementUnavailableReason::NotApplicable,
+            },
+        )?;
+        Self::new(
+            domain,
+            spec,
+            accounting,
+            BrowserPayloadExtent::Unavailable { reason },
+            MeasuredBrowserBytes::Unavailable {
+                reason: BrowserByteMeasurementUnavailableReason::ProviderDidNotReport,
+            },
+        )
     }
 
     #[must_use]

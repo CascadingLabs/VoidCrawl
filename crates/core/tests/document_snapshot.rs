@@ -2,6 +2,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use void_crawl_core::{
+    AccessibilityCaptureMode, AccessibilityIgnoredNodePolicy, AccessibilityPayloadSchema,
     AccessibilitySnapshotOptions, BrowserSession, DocumentEpoch, DocumentFrameScope, SnapshotState,
 };
 
@@ -45,9 +46,28 @@ async fn rendered_dom_is_bounded_and_tracks_document_epochs() {
     assert_eq!(spa.scope.epoch, DocumentEpoch::Known(first_epoch));
     assert!(String::from_utf8_lossy(spa.bytes()).contains("spa-update"));
 
-    page.navigate(&data_url("<main>second-document</main>")).await.expect("second navigation");
+    let second_url = data_url("<main>second-document</main>");
+    page.navigate(&second_url).await.expect("second navigation");
     let second = page.rendered_dom_snapshot(1024).await.expect("second DOM snapshot");
     assert_eq!(second.scope.epoch, DocumentEpoch::Known(first_epoch + 1));
+
+    page.navigate(&second_url).await.expect("same-URL reload");
+    let reloaded = page.rendered_dom_snapshot(1024).await.expect("reloaded DOM snapshot");
+    assert_eq!(
+        reloaded.scope.epoch,
+        DocumentEpoch::Known(first_epoch + 2),
+        "a new loader at the same URL must advance the epoch",
+    );
+
+    page.evaluate_js("location.hash = 'same-document'").await.expect("hash navigation");
+    let hashed = page.rendered_dom_snapshot(1024).await.expect("hash DOM snapshot");
+    assert_eq!(hashed.scope.epoch, reloaded.scope.epoch);
+
+    page.evaluate_js("history.pushState({}, '', '#history-state')")
+        .await
+        .expect("history navigation");
+    let history = page.rendered_dom_snapshot(1024).await.expect("history DOM snapshot");
+    assert_eq!(history.scope.epoch, reloaded.scope.epoch);
 
     let truncated = page.rendered_dom_snapshot(8).await.expect("truncated DOM snapshot");
     assert_eq!(truncated.state, SnapshotState::Truncated);
@@ -79,6 +99,10 @@ async fn accessibility_snapshot_preserves_raw_payload_and_explicit_limits() {
         .await
         .expect("repeated AX snapshot");
     assert_eq!(complete.state, SnapshotState::Complete);
+    assert_eq!(complete.payload_schema, AccessibilityPayloadSchema::ChromiumCdpAxNodeJson);
+    assert_eq!(complete.payload_version, 1);
+    assert_eq!(complete.capture_mode, AccessibilityCaptureMode::FullTree);
+    assert_eq!(complete.ignored_node_policy, AccessibilityIgnoredNodePolicy::Included);
     assert!(complete.nodes_observed > 0);
     assert_eq!(complete.nodes_retained, complete.nodes_observed);
     let payload: serde_json::Value =
@@ -99,6 +123,16 @@ async fn accessibility_snapshot_preserves_raw_payload_and_explicit_limits() {
     assert_eq!(node_limited.state, SnapshotState::Truncated);
     assert_eq!(node_limited.nodes_retained, 1);
     assert!(node_limited.nodes_observed > 1);
+
+    let depth_limited = page
+        .accessibility_snapshot(AccessibilitySnapshotOptions {
+            depth: Some(2),
+            ..AccessibilitySnapshotOptions::default()
+        })
+        .await
+        .expect("depth-limited AX snapshot");
+    assert_eq!(depth_limited.capture_mode, AccessibilityCaptureMode::DepthLimited);
+    assert_eq!(depth_limited.requested_depth, Some(2));
 
     let byte_limited = page
         .accessibility_snapshot(AccessibilitySnapshotOptions {

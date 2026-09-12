@@ -81,6 +81,15 @@ async def main():
 asyncio.run(main())
 ```
 
+### GPU sandbox policy
+
+VoidCrawl keeps Chromium's GPU-process sandbox enabled by default, including
+when GPU acceleration uses ANGLE/Vulkan. If a specific host has a confirmed
+GPU-driver incompatibility, opt in explicitly with
+`BrowserConfig(extra_args=["--disable-gpu-sandbox"])` and document the host
+reason. Chromium warns that this switch reduces security and stability; it is
+not a general performance or compatibility setting.
+
 ## MCP server for Claude Code
 
 `voidcrawl-mcp` is a stdio MCP server that exposes the full pool + session API as tools any MCP-speaking agent can call. Point Claude Code at it and the agent can fetch, screenshot, click, type, eval JS, detect captchas, and drive multi-step sessions — all via the same stealth-patched Chrome pool.

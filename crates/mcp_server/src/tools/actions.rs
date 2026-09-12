@@ -647,6 +647,7 @@ pub async fn solve_captcha(
     )
     .await
     .map_err(map_err)?;
+    // EVENT_DRIVEN_SLEEP_APPROVED: Captcha pointer pacing intentionally creates a human-observable dwell before the press event.
     sleep(Duration::from_millis(60)).await;
     page.dispatch_mouse_event(
         DispatchMouseEventType::MousePressed,
@@ -660,6 +661,7 @@ pub async fn solve_captcha(
     )
     .await
     .map_err(map_err)?;
+    // EVENT_DRIVEN_SLEEP_APPROVED: Captcha click hold duration is deliberate human input behavior between press and release events.
     sleep(Duration::from_millis(50)).await;
     page.dispatch_mouse_event(
         DispatchMouseEventType::MouseReleased,
@@ -708,6 +710,7 @@ pub async fn solve_captcha(
             solved = true;
             break;
         }
+        // EVENT_DRIVEN_SLEEP_APPROVED: Third-party captcha widgets expose no reliable CDP completion event; the configured deadline bounds token polling.
         sleep(Duration::from_millis(500)).await;
     }
 

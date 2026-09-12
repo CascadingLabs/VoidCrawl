@@ -16,7 +16,10 @@ categories = ["web-programming", "api-bindings"]
 workspace = true
 
 [features]
-default = []
+default = ["scanner"]
+# Content-safety scanning is separate from browser acquisition. Consumers that
+# disable defaults avoid the YARA/Wasmtime dependency tree entirely.
+scanner = ["dep:yara-x", "dep:infer"]
 # Encode a recording to an animated GIF in-process. Pure Rust, no external
 # binary; `image`'s GIF encoder handles quantization.
 encode-gif = ["image/gif"]
@@ -25,7 +28,8 @@ encode-gif = ["image/gif"]
 encode-ffmpeg = []
 
 [dependencies]
-chromiumoxide = { version = "0.9", default-features = false }
+# A workspace-root patch is not inherited by path/Git consumers.
+chromiumoxide = { version = "0.9", path = "../../vendor/chromiumoxide", default-features = false }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 thiserror = "2"
@@ -51,9 +55,10 @@ uuid = { version = "1", features = ["v4"] }
 # default-features off drops the binary-format modules (pe/macho/dotnet/…) we
 # don't use — and with them the `rsa`/`dsa` crypto crates (RUSTSEC-flagged) and
 # other heavy transitive deps. Our ruleset is string-only, so the core suffices.
-yara-x = { version = "1.7", default-features = false }
-infer = "0.16"
+yara-x = { version = "1.7", default-features = false, optional = true }
+infer = { version = "0.16", optional = true }
 
 [dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 flate2 = "1"
 tempfile = "3"

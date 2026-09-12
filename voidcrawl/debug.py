@@ -343,6 +343,9 @@ class DebugSession:
             self._pos += 1
 
             if not should_pause:
+                # EVENT_DRIVEN_SLEEP_APPROVED:
+                # Debug replay delay is explicitly configured human-visible
+                # action pacing behavior.
                 await asyncio.sleep(self._step_delay)
 
         self._print_footer()
@@ -381,6 +384,9 @@ class DebugSession:
             f"[dim](replaying {target} action{'s' if target != 1 else ''})[/]"
         )
         await self._tab.evaluate_js(f"window.location.href = {self._start_url!r}")
+        # EVENT_DRIVEN_SLEEP_APPROVED:
+        # Generic debug Tab protocol exposes no navigation event; configured
+        # delay bounds legacy replay settlement.
         await asyncio.sleep(self._nav_settle_secs)
 
         self._history.clear()

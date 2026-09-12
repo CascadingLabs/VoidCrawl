@@ -6,12 +6,13 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt,
+    io::Read,
     result::Result as StdResult,
     sync::Arc,
     time::Duration,
 };
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use base64::{engine::general_purpose::STANDARD as BASE64, read::DecoderReader};
 use chromiumoxide::{
     Page as CdpPage,
     cdp::browser_protocol::network::{
@@ -25,8 +26,10 @@ use globset::{Glob, GlobMatcher};
 use tokio::{sync::oneshot, task::JoinHandle, time};
 
 use crate::{
-    BrowserBudgetScope, BrowserByteCount, BrowserByteDomain, BrowserByteLimit, BrowserByteReport,
+    BrowserBudgetScope, BrowserByteAccounting, BrowserByteCount, BrowserByteDomain,
+    BrowserByteLimit, BrowserByteMeasurementUnavailableReason, BrowserByteReport,
     BrowserByteReportError, BrowserByteSpec, BrowserLimitScope, BrowserPayloadUnavailableReason,
+    MeasuredBrowserBytes,
     error::{Result, VoidCrawlError},
 };
 
@@ -86,7 +89,7 @@ pub struct CapturedResponse {
     pub body_state:          ResponseBodyState,
     pub body_error:          Option<String>,
     body:                    Arc<[u8]>,
-    limits:                  ResponseCaptureLimits,
+    byte_spec:               BrowserByteSpec,
     complete_bytes:          Option<usize>,
 }
 
@@ -98,20 +101,15 @@ impl CapturedResponse {
 
     pub fn byte_report(&self) -> StdResult<BrowserByteReport, BrowserByteReportError> {
         if self.body_state == ResponseBodyState::Unavailable {
-            return Ok(BrowserByteReport::unavailable(
+            return BrowserByteReport::unavailable_with_spec(
                 BrowserByteDomain::CdpDecodedBody,
+                Some(self.byte_spec),
                 BrowserPayloadUnavailableReason::ProviderDidNotReport,
-            ));
+            );
         }
-        let spec = BrowserByteSpec::new(
-            BrowserByteDomain::CdpDecodedBody,
-            self.limits.per_response(),
-            BrowserLimitScope::RetentionAfterProviderMaterialization,
-            BrowserBudgetScope::PerPayload,
-        );
         BrowserByteReport::from_known_extent(
             BrowserByteDomain::CdpDecodedBody,
-            Some(spec),
+            Some(self.byte_spec),
             BrowserByteCount::try_from_usize(self.complete_bytes.unwrap_or(self.body.len()))?,
             BrowserByteCount::try_from_usize(self.body.len())?,
         )
@@ -181,11 +179,31 @@ struct PendingResponse {
     from_service_worker: bool,
 }
 
+/// Why a response capture stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseCaptureTermination {
+    Complete,
+    DeadlineReached,
+    Cancelled,
+    ProviderDisconnected,
+}
+
+/// Owned terminal response-capture result, including partial matches and the
+/// shared aggregate-budget accounting.
+#[derive(Debug, Clone)]
+pub struct ResponseCaptureReport {
+    pub responses:       HashMap<String, CapturedResponse>,
+    pub termination:     ResponseCaptureTermination,
+    pub aggregate_bytes: BrowserByteReport,
+}
+
 /// An armed capture. Dropping it aborts its event worker and unregisters its
 /// listeners as their streams are dropped.
 pub struct ResponseCapture {
-    receiver: Option<oneshot::Receiver<Result<HashMap<String, CapturedResponse>>>>,
-    worker:   JoinHandle<()>,
+    cancel:   Option<oneshot::Sender<()>>,
+    worker:   Option<JoinHandle<Result<ResponseCaptureReport>>>,
+    patterns: Vec<String>,
+    timeout:  Duration,
 }
 
 impl fmt::Debug for ResponseCapture {
@@ -242,30 +260,82 @@ impl ResponseCapture {
             .await
             .map_err(|e| VoidCrawlError::PageError(e.to_string()))?;
 
-        let (sender, receiver) = oneshot::channel();
-        let worker = tokio::spawn(async move {
-            let result =
-                run_capture(page, matchers, requests, responses, finished, failed, timeout, limits)
-                    .await;
-            let _ = sender.send(result);
-        });
-        Ok(Self { receiver: Some(receiver), worker })
+        let pattern_names = matchers
+            .iter()
+            .map(|matcher| format!("{}={}", matcher.name, matcher.pattern))
+            .collect();
+        let (cancel, cancel_rx) = oneshot::channel();
+        let worker = tokio::spawn(run_capture(
+            page, matchers, requests, responses, finished, failed, cancel_rx, timeout, limits,
+        ));
+        Ok(Self { cancel: Some(cancel), worker: Some(worker), patterns: pattern_names, timeout })
     }
 
-    pub async fn wait(mut self) -> Result<HashMap<String, CapturedResponse>> {
-        let Some(receiver) = self.receiver.take() else {
-            return Err(VoidCrawlError::Other("response capture already consumed".into()));
-        };
-        match receiver.await {
-            Ok(result) => result,
-            Err(_) => Err(VoidCrawlError::BrowserClosed),
+    /// Wait for an owned report. Deadlines and provider disconnects are
+    /// terminal report states rather than errors, preserving partial matches.
+    pub async fn wait_report(mut self) -> Result<ResponseCaptureReport> {
+        self.join_worker().await
+    }
+
+    /// Wait no longer than `budget`, then cooperatively stop the collector and
+    /// return its partial report as `DeadlineReached`. Unlike wrapping
+    /// [`Self::wait_report`] in `tokio::time::timeout`, this keeps ownership of
+    /// the worker long enough to preserve already captured responses.
+    pub async fn wait_report_for(mut self, budget: Duration) -> Result<ResponseCaptureReport> {
+        if let Ok(result) = time::timeout(budget, self.join_worker()).await {
+            result
+        } else {
+            if let Some(cancel) = self.cancel.take() {
+                let _ = cancel.send(());
+            }
+            let mut report = self.join_worker().await?;
+            report.termination = ResponseCaptureTermination::DeadlineReached;
+            Ok(report)
         }
+    }
+
+    /// Cooperatively cancel and return all response/accounting facts captured
+    /// before cancellation.
+    pub async fn cancel_report(mut self) -> Result<ResponseCaptureReport> {
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+        self.join_worker().await
+    }
+
+    /// Compatibility API: only a complete report is returned; terminal report
+    /// states map back to the historical errors.
+    pub async fn wait(mut self) -> Result<HashMap<String, CapturedResponse>> {
+        let report = self.join_worker().await?;
+        match report.termination {
+            ResponseCaptureTermination::Complete => Ok(report.responses),
+            ResponseCaptureTermination::DeadlineReached => Err(VoidCrawlError::ResponseTimeout {
+                patterns:     self.patterns.clone(),
+                timeout_secs: self.timeout.as_secs_f64(),
+            }),
+            ResponseCaptureTermination::Cancelled => {
+                Err(VoidCrawlError::Other("response capture cancelled".into()))
+            }
+            ResponseCaptureTermination::ProviderDisconnected => Err(VoidCrawlError::BrowserClosed),
+        }
+    }
+
+    async fn join_worker(&mut self) -> Result<ResponseCaptureReport> {
+        self.worker
+            .as_mut()
+            .ok_or_else(|| VoidCrawlError::Other("response capture already consumed".into()))?
+            .await
+            .map_err(|error| {
+                VoidCrawlError::Other(format!("response capture worker failed: {error}"))
+            })?
     }
 }
 
 impl Drop for ResponseCapture {
     fn drop(&mut self) {
-        self.worker.abort();
+        if let Some(worker) = &self.worker {
+            worker.abort();
+        }
     }
 }
 
@@ -277,29 +347,35 @@ async fn run_capture(
     mut responses: EventStream<EventResponseReceived>,
     mut finished: EventStream<EventLoadingFinished>,
     mut failed: EventStream<EventLoadingFailed>,
+    mut cancel: oneshot::Receiver<()>,
     timeout: Duration,
     limits: ResponseCaptureLimits,
-) -> Result<HashMap<String, CapturedResponse>> {
+) -> Result<ResponseCaptureReport> {
     let wanted = matchers.len();
-    let pattern_names =
-        matchers.iter().map(|m| format!("{}={}", m.name, m.pattern)).collect::<Vec<_>>();
     let mut pending: HashMap<String, PendingResponse> = HashMap::new();
     let mut captured: HashMap<String, CapturedResponse> = HashMap::new();
     // Request headers arrive on their own events, before the response they
     // belong to, so they are accumulated by request id and attached later.
     let mut sent_headers: HashMap<String, HashMap<String, String>> = HashMap::new();
     let mut retained = 0usize;
-    let deadline = time::sleep(timeout);
+    let mut observed = 0usize;
+    let deadline = time::sleep_until(time::Instant::now() + timeout);
     tokio::pin!(deadline);
 
     loop {
         if captured.len() == wanted {
-            return Ok(captured);
+            return capture_report(
+                captured,
+                observed,
+                retained,
+                limits,
+                ResponseCaptureTermination::Complete,
+            );
         }
         tokio::select! {
             maybe_request = requests.next() => {
                 let Some(event) = maybe_request else {
-                    return Err(VoidCrawlError::BrowserClosed);
+                    return capture_report(captured, observed, retained, limits, ResponseCaptureTermination::ProviderDisconnected);
                 };
                 // Author-level headers (what the page asked to send). Recorded
                 // for every request, not just matching ones — the glob is
@@ -339,6 +415,7 @@ async fn run_capture(
                 let response = unavailable_response(
                     meta.clone(),
                     "redirect response bodies are unavailable through CDP".into(),
+                    limits,
                 );
                 for name in meta.names {
                     captured.entry(name).or_insert_with(|| response.clone());
@@ -346,7 +423,7 @@ async fn run_capture(
             }
             maybe_response = responses.next() => {
                 let Some(event) = maybe_response else {
-                    return Err(VoidCrawlError::BrowserClosed);
+                    return capture_report(captured, observed, retained, limits, ResponseCaptureTermination::ProviderDisconnected);
                 };
                 let names = matchers.iter()
                     .filter(|m| !captured.contains_key(&m.name) && m.glob.is_match(&event.response.url))
@@ -381,24 +458,25 @@ async fn run_capture(
             }
             maybe_finished = finished.next() => {
                 let Some(event) = maybe_finished else {
-                    return Err(VoidCrawlError::BrowserClosed);
+                    return capture_report(captured, observed, retained, limits, ResponseCaptureTermination::ProviderDisconnected);
                 };
                 let request_id = event.request_id.inner().clone();
                 let Some(mut meta) = pending.remove(&request_id) else { continue };
                 meta.request_headers = take_sent_headers(&mut sent_headers, &request_id);
                 let body_result = page.execute(GetResponseBodyParams::new(event.request_id.clone())).await;
                 let response = match body_result {
-                    Ok(result) => {
-                        let decoded = if result.base64_encoded {
-                            BASE64.decode(result.body.as_bytes()).map_err(|e| {
-                                VoidCrawlError::ResponseBody(format!("invalid base64 response body: {e}"))
-                            })?
-                        } else {
-                            result.body.as_bytes().to_vec()
-                        };
-                        bounded_response(meta.clone(), decoded, &mut retained, limits)?
-                    }
-                    Err(error) => unavailable_response(meta.clone(), error.to_string()),
+                    Ok(result) => match bounded_response(
+                        meta.clone(),
+                        result.result.body,
+                        result.result.base64_encoded,
+                        &mut observed,
+                        &mut retained,
+                        limits,
+                    ) {
+                        Ok(response) => response,
+                        Err(error) => unavailable_response(meta.clone(), error.to_string(), limits),
+                    },
+                    Err(error) => unavailable_response(meta.clone(), error.to_string(), limits),
                 };
                 for name in meta.names {
                     captured.entry(name).or_insert_with(|| response.clone());
@@ -406,21 +484,21 @@ async fn run_capture(
             }
             maybe_failed = failed.next() => {
                 let Some(event) = maybe_failed else {
-                    return Err(VoidCrawlError::BrowserClosed);
+                    return capture_report(captured, observed, retained, limits, ResponseCaptureTermination::ProviderDisconnected);
                 };
                 let request_id = event.request_id.inner().clone();
                 let Some(mut meta) = pending.remove(&request_id) else { continue };
                 meta.request_headers = take_sent_headers(&mut sent_headers, &request_id);
-                let response = unavailable_response(meta.clone(), event.error_text.clone());
+                let response = unavailable_response(meta.clone(), event.error_text.clone(), limits);
                 for name in meta.names {
                     captured.entry(name).or_insert_with(|| response.clone());
                 }
             }
+            _ = &mut cancel => {
+                return capture_report(captured, observed, retained, limits, ResponseCaptureTermination::Cancelled);
+            }
             () = &mut deadline => {
-                return Err(VoidCrawlError::ResponseTimeout {
-                    patterns: pattern_names,
-                    timeout_secs: timeout.as_secs_f64(),
-                });
+                return capture_report(captured, observed, retained, limits, ResponseCaptureTermination::DeadlineReached);
             }
         }
     }
@@ -428,22 +506,67 @@ async fn run_capture(
 
 fn bounded_response(
     meta: PendingResponse,
-    mut body: Vec<u8>,
-    retained: &mut usize,
+    body: String,
+    base64_encoded: bool,
+    observed_total: &mut usize,
+    retained_total: &mut usize,
     limits: ResponseCaptureLimits,
 ) -> Result<CapturedResponse> {
-    let complete_bytes = body.len();
     let aggregate =
         limits.aggregate().as_usize().map_err(|error| VoidCrawlError::Other(error.to_string()))?;
     let per_response = limits
         .per_response()
         .as_usize()
         .map_err(|error| VoidCrawlError::Other(error.to_string()))?;
-    let remaining = aggregate.saturating_sub(*retained);
-    let keep = body.len().min(per_response).min(remaining);
-    let truncated = keep < body.len();
-    body.truncate(keep);
-    *retained += keep;
+    let remaining = aggregate.saturating_sub(*retained_total);
+    let retention_limit = per_response.min(remaining);
+
+    // Chromium has already materialized `body` as a String. For plain bodies,
+    // `into_bytes` reuses that allocation. Base64 is decoded incrementally so
+    // only the effective retained prefix plus a small decode buffer is held.
+    let (retained_body, complete_bytes) = if base64_encoded {
+        let mut decoder = DecoderReader::new(body.as_bytes(), &BASE64);
+        let mut retained_body = Vec::with_capacity(retention_limit.min(8192));
+        let mut decoded = 0usize;
+        let mut chunk = [0_u8; 8192];
+        loop {
+            let read = decoder.read(&mut chunk).map_err(|error| {
+                VoidCrawlError::ResponseBody(format!("invalid base64 response body: {error}"))
+            })?;
+            if read == 0 {
+                break;
+            }
+            decoded = decoded.checked_add(read).ok_or_else(|| {
+                VoidCrawlError::Other("decoded response byte count overflowed".into())
+            })?;
+            let admit = retention_limit.saturating_sub(retained_body.len()).min(read);
+            retained_body.extend_from_slice(&chunk[..admit]);
+        }
+        (retained_body, decoded)
+    } else {
+        let mut bytes = body.into_bytes();
+        let complete = bytes.len();
+        bytes.truncate(retention_limit);
+        (bytes, complete)
+    };
+    *observed_total = observed_total.checked_add(complete_bytes).ok_or_else(|| {
+        VoidCrawlError::Other("response observation byte count overflowed".into())
+    })?;
+    *retained_total = retained_total
+        .checked_add(retained_body.len())
+        .ok_or_else(|| VoidCrawlError::Other("response retained byte count overflowed".into()))?;
+
+    let aggregate_bound = remaining < per_response && retained_body.len() < complete_bytes;
+    let byte_spec = BrowserByteSpec::new(
+        BrowserByteDomain::CdpDecodedBody,
+        if aggregate_bound { limits.aggregate() } else { limits.per_response() },
+        BrowserLimitScope::RetentionAfterProviderMaterialization,
+        if aggregate_bound {
+            BrowserBudgetScope::CaptureAggregate
+        } else {
+            BrowserBudgetScope::PerPayload
+        },
+    );
     Ok(CapturedResponse {
         url: meta.url,
         status: meta.status,
@@ -453,19 +576,23 @@ fn bounded_response(
         resource_type: meta.resource_type,
         from_cache: meta.from_cache,
         from_service_worker: meta.from_service_worker,
-        body_state: if truncated {
+        body_state: if retained_body.len() < complete_bytes {
             ResponseBodyState::Truncated
         } else {
             ResponseBodyState::Available
         },
         body_error: None,
-        body: Arc::from(body),
-        limits,
+        body: Arc::from(retained_body),
+        byte_spec,
         complete_bytes: Some(complete_bytes),
     })
 }
 
-fn unavailable_response(meta: PendingResponse, error: String) -> CapturedResponse {
+fn unavailable_response(
+    meta: PendingResponse,
+    error: String,
+    limits: ResponseCaptureLimits,
+) -> CapturedResponse {
     CapturedResponse {
         url:                 meta.url,
         status:              meta.status,
@@ -478,9 +605,71 @@ fn unavailable_response(meta: PendingResponse, error: String) -> CapturedRespons
         body_state:          ResponseBodyState::Unavailable,
         body_error:          Some(error),
         body:                Arc::from([]),
-        limits:              ResponseCaptureLimits::default(),
+        byte_spec:           BrowserByteSpec::new(
+            BrowserByteDomain::CdpDecodedBody,
+            limits.per_response(),
+            BrowserLimitScope::RetentionAfterProviderMaterialization,
+            BrowserBudgetScope::PerPayload,
+        ),
         complete_bytes:      None,
     }
+}
+
+fn capture_report(
+    responses: HashMap<String, CapturedResponse>,
+    observed: usize,
+    retained: usize,
+    limits: ResponseCaptureLimits,
+    termination: ResponseCaptureTermination,
+) -> Result<ResponseCaptureReport> {
+    let spec = BrowserByteSpec::new(
+        BrowserByteDomain::CdpDecodedBody,
+        limits.aggregate(),
+        BrowserLimitScope::RetentionAfterProviderMaterialization,
+        BrowserBudgetScope::CaptureAggregate,
+    );
+    // `termination` describes collection completeness independently. This
+    // report accounts exactly for response bodies that did become observable.
+    let count = |value| {
+        BrowserByteCount::try_from_usize(value)
+            .map_err(|error| VoidCrawlError::Other(error.to_string()))
+    };
+    let observed = count(observed)?;
+    let retained = count(retained)?;
+    let discarded = observed
+        .get()
+        .checked_sub(retained.get())
+        .ok_or_else(|| VoidCrawlError::Other("response byte accounting underflowed".into()))?;
+    let has_unavailable_body =
+        responses.values().any(|response| response.body_state == ResponseBodyState::Unavailable);
+    let aggregate_bytes =
+        if termination == ResponseCaptureTermination::Complete && !has_unavailable_body {
+            BrowserByteReport::from_known_extent(
+                BrowserByteDomain::CdpDecodedBody,
+                Some(spec),
+                observed,
+                retained,
+            )
+        } else {
+            let accounting = BrowserByteAccounting::new(
+                observed,
+                retained,
+                MeasuredBrowserBytes::Known { value: BrowserByteCount::new(discarded) },
+            )
+            .map_err(|error| VoidCrawlError::Other(error.to_string()))?;
+            let unknown_loss = MeasuredBrowserBytes::Unavailable {
+                reason: BrowserByteMeasurementUnavailableReason::CaptureEndedEarly,
+            };
+            BrowserByteReport::truncated(
+                BrowserByteDomain::CdpDecodedBody,
+                Some(spec),
+                accounting,
+                unknown_loss,
+                unknown_loss,
+            )
+        }
+        .map_err(|error| VoidCrawlError::Other(error.to_string()))?;
+    Ok(ResponseCaptureReport { responses, termination, aggregate_bytes })
 }
 
 /// Upper bound on in-flight request ids whose headers are held. A page can
@@ -567,12 +756,43 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn caller_wait_budget_preserves_a_deadline_report() {
+        let limits = ResponseCaptureLimits::default();
+        let (cancel, cancel_rx) = oneshot::channel();
+        let worker = tokio::spawn(async move {
+            let _ = cancel_rx.await;
+            capture_report(
+                HashMap::new(),
+                0,
+                0,
+                limits,
+                ResponseCaptureTermination::Cancelled,
+            )
+        });
+        let capture = ResponseCapture {
+            cancel: Some(cancel),
+            worker: Some(worker),
+            patterns: vec!["test".into()],
+            timeout: Duration::from_secs(1),
+        };
+        let report = capture.wait_report_for(Duration::ZERO).await.expect("deadline report");
+        assert_eq!(report.termination, ResponseCaptureTermination::DeadlineReached);
+        assert!(matches!(
+            report.aggregate_bytes.additional_loss(),
+            MeasuredBrowserBytes::Unavailable { .. }
+        ));
+    }
+
     #[test]
     fn per_response_limit_is_explicit() {
+        let mut observed = 0;
         let mut retained = 0;
         let response = bounded_response(
             pending(),
-            vec![1, 2, 3, 4],
+            "\x01\x02\x03\x04".into(),
+            false,
+            &mut observed,
             &mut retained,
             ResponseCaptureLimits::new(
                 BrowserByteLimit::try_from(2_u64).expect("positive"),
@@ -606,10 +826,17 @@ mod tests {
 
         let mut meta = pending();
         meta.request_headers = flattened;
+        let mut observed = 0;
         let mut retained = 0;
-        let captured =
-            bounded_response(meta, vec![], &mut retained, ResponseCaptureLimits::default())
-                .expect("default limits are representable");
+        let captured = bounded_response(
+            meta,
+            String::new(),
+            false,
+            &mut observed,
+            &mut retained,
+            ResponseCaptureLimits::default(),
+        )
+        .expect("default limits are representable");
         assert!(
             captured
                 .request_headers
@@ -688,10 +915,13 @@ mod tests {
 
     #[test]
     fn total_limit_is_shared() {
+        let mut observed = 0;
         let mut retained = 3;
         let response = bounded_response(
             pending(),
-            vec![1, 2, 3, 4],
+            "\x01\x02\x03\x04".into(),
+            false,
+            &mut observed,
             &mut retained,
             ResponseCaptureLimits::new(
                 BrowserByteLimit::try_from(8_u64).expect("positive"),
@@ -701,5 +931,116 @@ mod tests {
         .expect("limits originate from usize values");
         assert_eq!(response.body(), &[1, 2]);
         assert_eq!(retained, 5);
+        assert_eq!(observed, 4);
+        assert_eq!(
+            response
+                .byte_report()
+                .expect("valid report")
+                .spec()
+                .expect("configured spec")
+                .budget_scope(),
+            BrowserBudgetScope::CaptureAggregate
+        );
+    }
+
+    #[test]
+    fn base64_counts_full_decoded_extent_but_keeps_only_prefix() {
+        let mut observed = 0;
+        let mut retained = 0;
+        let response = bounded_response(
+            pending(),
+            "AAECAwQFBgcICQ==".into(),
+            true,
+            &mut observed,
+            &mut retained,
+            ResponseCaptureLimits::new(
+                BrowserByteLimit::try_from(3_u64).expect("positive"),
+                BrowserByteLimit::try_from(20_u64).expect("positive"),
+            ),
+        )
+        .expect("valid base64");
+        assert_eq!(response.body(), &[0, 1, 2]);
+        assert_eq!(observed, 10);
+        assert_eq!(retained, 3);
+    }
+
+    #[test]
+    fn unavailable_response_preserves_caller_limit_spec() {
+        let limits = ResponseCaptureLimits::new(
+            BrowserByteLimit::try_from(17_u64).expect("positive"),
+            BrowserByteLimit::try_from(31_u64).expect("positive"),
+        );
+        let response = unavailable_response(pending(), "not reported".into(), limits);
+        let spec = response.byte_report().expect("valid report").spec().expect("configured spec");
+        assert_eq!(spec.limit(), limits.per_response());
+        assert_eq!(spec.budget_scope(), BrowserBudgetScope::PerPayload);
+    }
+
+    #[test]
+    fn unavailable_body_prevents_complete_aggregate_byte_report() {
+        let limits = ResponseCaptureLimits::new(
+            BrowserByteLimit::try_from(8_u64).expect("positive"),
+            BrowserByteLimit::try_from(8_u64).expect("positive"),
+        );
+        let response = unavailable_response(pending(), "not reported".into(), limits);
+        let report = capture_report(
+            HashMap::from([("response".into(), response)]),
+            0,
+            0,
+            limits,
+            ResponseCaptureTermination::Complete,
+        )
+        .expect("report");
+        assert!(matches!(
+            report.aggregate_bytes.extent(),
+            crate::BrowserPayloadExtent::Truncated {
+                complete_bytes: MeasuredBrowserBytes::Unavailable { .. },
+            }
+        ));
+        assert!(matches!(
+            report.aggregate_bytes.additional_loss(),
+            MeasuredBrowserBytes::Unavailable { .. }
+        ));
+    }
+
+    #[test]
+    fn partial_terminal_report_preserves_responses_and_aggregate_facts() {
+        let limits = ResponseCaptureLimits::new(
+            BrowserByteLimit::try_from(8_u64).expect("positive"),
+            BrowserByteLimit::try_from(8_u64).expect("positive"),
+        );
+        let mut observed = 0;
+        let mut retained = 0;
+        let response = bounded_response(
+            pending(),
+            "first".into(),
+            false,
+            &mut observed,
+            &mut retained,
+            limits,
+        )
+        .expect("bounded response");
+        let report = capture_report(
+            HashMap::from([("response".into(), response)]),
+            observed,
+            retained,
+            limits,
+            ResponseCaptureTermination::DeadlineReached,
+        )
+        .expect("report");
+        assert_eq!(report.termination, ResponseCaptureTermination::DeadlineReached);
+        assert_eq!(report.responses["response"].body(), b"first");
+        assert_eq!(report.aggregate_bytes.accounting().observed().get(), 5);
+        assert_eq!(report.aggregate_bytes.accounting().retained().get(), 5);
+        assert!(matches!(
+            report.aggregate_bytes.extent(),
+            crate::BrowserPayloadExtent::Truncated {
+                complete_bytes: MeasuredBrowserBytes::Unavailable { .. },
+            }
+        ));
+        assert!(matches!(
+            report.aggregate_bytes.additional_loss(),
+            MeasuredBrowserBytes::Unavailable { .. }
+        ));
     }
 }

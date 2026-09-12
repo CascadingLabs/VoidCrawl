@@ -377,9 +377,9 @@ async fn foreground_is_auto_detected_from_window_placement() {
 #[cfg(feature = "encode-gif")]
 #[tokio::test]
 async fn encodes_regions_to_gif() {
-    use std::fs;
+    use std::{fs, io::Write as _};
 
-    use void_crawl_core::Encoding;
+    use void_crawl_core::{BrowserByteDomain, Encoding};
 
     let session = headless_session().await;
     let page = animated_page(&session).await;
@@ -404,6 +404,28 @@ async fn encodes_regions_to_gif() {
         assert!(meta.len() > 0, "empty gif at {}", path.display());
         let header = fs::read(path).expect("read gif");
         assert_eq!(&header[..6], b"GIF89a", "not a GIF at {}", path.display());
+
+        let reports = region.output_byte_reports().expect("encoded output byte reports");
+        assert_eq!(reports.len(), 1, "one report per artifact");
+        assert_eq!(reports[0].domain(), BrowserByteDomain::EncodedRecording);
+        assert_eq!(reports[0].accounting().retained().get(), meta.len());
+
+        // Facts describe the artifact when encoding completed, not a mutable
+        // path reread after the recording was returned.
+        fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .expect("open gif for mutation")
+            .write_all(b"later mutation")
+            .expect("mutate gif");
+        assert_eq!(
+            region.output_byte_reports().expect("stored output report")[0]
+                .accounting()
+                .retained()
+                .get(),
+            meta.len(),
+            "report must retain the capture-time file size"
+        );
     }
 }
 

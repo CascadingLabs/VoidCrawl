@@ -71,6 +71,38 @@ async fn raw_headers_opt_in_is_refused_when_the_gate_is_closed() {
 }
 
 #[tokio::test]
+async fn raw_url_opt_in_is_refused_when_the_gate_is_closed() {
+    if !gate_is_closed() {
+        return;
+    }
+    let args = NetworkCaptureArmArgs {
+        session_id: "nope".into(),
+        patterns: vec![NetworkPatternArg { name: "api".into(), url_glob: "**/api/**".into() }],
+        include_raw_urls: true,
+        ..Default::default()
+    };
+    let message = format!("{:?}", network::arm(&server(), args).await.expect_err("raw URL gate"));
+    assert!(message.contains(ENABLE_ENV));
+    assert!(!message.contains("no such session"));
+}
+
+#[tokio::test]
+async fn response_body_opt_in_is_refused_when_the_gate_is_closed() {
+    if !gate_is_closed() {
+        return;
+    }
+    let args = NetworkCaptureArmArgs {
+        session_id: "nope".into(),
+        patterns: vec![NetworkPatternArg { name: "api".into(), url_glob: "**/api/**".into() }],
+        capture_body: true,
+        ..Default::default()
+    };
+    let message = format!("{:?}", network::arm(&server(), args).await.expect_err("raw body gate"));
+    assert!(message.contains(ENABLE_ENV));
+    assert!(!message.contains("no such session"));
+}
+
+#[tokio::test]
 async fn arming_without_raw_access_still_validates_its_patterns() {
     // The default (redacted) path must remain usable with the gate closed —
     // the gate protects raw values, it does not disable capture. With no

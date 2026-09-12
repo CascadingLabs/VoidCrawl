@@ -17,9 +17,13 @@ use std::{
     time::Duration,
 };
 
-use tokio::time::{sleep, timeout};
+use tokio::{
+    task::yield_now,
+    time::{Instant, sleep, timeout},
+};
 use void_crawl_core::{
-    BrowserPool, BrowserSession, MeasuredCount, MeasurementUnavailableReason, ObservationEventKind,
+    BrowserByteMeasurementUnavailableReason, BrowserPayloadExtent, BrowserPool, BrowserSession,
+    MeasuredBrowserBytes, MeasuredCount, MeasurementUnavailableReason, ObservationEventKind,
     ObservationOptions, ObservationReport, ObservationTermination, PoolConfig,
     RuntimeDiagnosticKind,
 };
@@ -91,6 +95,16 @@ fn console_only(max_events: usize, max_duration: Duration) -> ObservationOptions
     }
 }
 
+fn assert_early_terminal_byte_report(report: &ObservationReport) {
+    assert_eq!(report.diagnostic_bytes_dropped, 0, "test requires zero local truncation");
+    let report = report.byte_report().expect("canonical byte report");
+    let unknown = MeasuredBrowserBytes::Unavailable {
+        reason: BrowserByteMeasurementUnavailableReason::CaptureEndedEarly,
+    };
+    assert_eq!(report.extent(), BrowserPayloadExtent::Truncated { complete_bytes: unknown });
+    assert_eq!(report.additional_loss(), unknown);
+}
+
 fn assert_event_accounting(report: &ObservationReport, limit: usize) {
     let count = u64::try_from(report.events.len()).expect("small fixture event count");
     assert_eq!(report.accounting.events.admitted, MeasuredCount::Known { value: count });
@@ -153,6 +167,46 @@ async fn observers_are_armed_before_navigation_and_capture_initial_signals() {
 }
 
 #[tokio::test]
+async fn live_quiet_settlement_resets_for_activity_and_preserves_owned_report() {
+    let fixture = LocalFixture::start();
+    let browser = session().await;
+    let page = browser.new_blank_page().await.expect("new blank page");
+    let options = ObservationOptions {
+        max_events: 64,
+        max_duration: Duration::from_secs(5),
+        ..ObservationOptions::default()
+    };
+    let mut scope = page.arm_observation(options).await.expect("arm before navigation");
+    page.navigate(&fixture.url()).await.expect("navigate to fixture");
+    let delayed_url = serde_json::to_string(&fixture.url()).expect("encode fixture URL");
+    page.evaluate_js(&format!("setTimeout(() => fetch({delayed_url}), 30)"))
+        .await
+        .expect("schedule delayed network activity");
+
+    let quiet = Duration::from_millis(75);
+    let proof = scope
+        .wait_for_quiet(quiet, 0, Instant::now() + Duration::from_secs(2))
+        .await
+        .expect("provider quiet proof");
+    assert!(proof.quiet_since_offset_micros >= 20_000, "delayed activity did not reset quiet");
+    assert!(
+        proof.satisfied_offset_micros.saturating_sub(proof.quiet_since_offset_micros)
+            >= u64::try_from(quiet.as_micros()).expect("small quiet duration")
+    );
+    assert_eq!(proof.relevant_in_flight, 0);
+    let zero = MeasuredCount::Known { value: 0 };
+    assert_eq!(proof.event_accounting.admitted, zero);
+    assert_eq!(proof.event_accounting.retained, zero);
+    assert_eq!(proof.event_accounting.dropped, zero);
+
+    let report = scope.finish().await.expect("finish after borrowed quiet wait");
+    assert_eq!(report.termination, ObservationTermination::Finished);
+    assert!(report.cleanup_complete);
+    page.close().await.expect("close page");
+    browser.close().await.expect("close browser");
+}
+
+#[tokio::test]
 async fn diagnostic_payload_limit_is_explicit_and_safe_by_default() {
     let browser = session().await;
     let page = browser.new_blank_page().await.expect("new blank page");
@@ -177,7 +231,31 @@ async fn diagnostic_payload_limit_is_explicit_and_safe_by_default() {
 }
 
 #[tokio::test]
-async fn event_limit_deadline_and_interrupt_are_explicit() {
+async fn utf8_diagnostic_prefix_backs_off_to_a_scalar_boundary_and_counts_loss() {
+    let browser = session().await;
+    let page = browser.new_blank_page().await.expect("new blank page");
+    let options =
+        ObservationOptions { max_diagnostic_bytes: 1, ..console_only(8, Duration::from_secs(5)) };
+    let scope = page.arm_observation(options).await.expect("arm diagnostic scope");
+    page.evaluate_js("console.log('é')").await.expect("emit unicode diagnostic");
+    sleep(Duration::from_millis(10)).await;
+    let report = scope.finish().await.expect("finish diagnostic scope");
+    let diagnostic = report.diagnostics.first().expect("captured diagnostic");
+
+    assert_eq!(diagnostic.complete_bytes, "é".len());
+    assert_eq!(diagnostic.retained_bytes, 0);
+    assert!(diagnostic.truncated);
+    assert_eq!(diagnostic.text().bytes(), b"");
+    assert!(diagnostic.text().text().is_some());
+    assert_eq!(report.diagnostic_bytes_retained, 0);
+    assert_eq!(report.diagnostic_bytes_dropped, "é".len());
+
+    page.close().await.expect("close page");
+    browser.close().await.expect("close browser");
+}
+
+#[tokio::test]
+async fn every_early_terminal_reports_unknown_upstream_byte_loss() {
     let browser = session().await;
     let page = browser.new_blank_page().await.expect("new blank page");
 
@@ -189,12 +267,14 @@ async fn event_limit_deadline_and_interrupt_are_explicit() {
     let limited = limited.wait().await.expect("wait for event limit");
     assert_eq!(limited.termination, ObservationTermination::EventLimitReached);
     assert_event_accounting(&limited, limited_options.max_events);
+    assert_early_terminal_byte_report(&limited);
 
     let deadline_options = console_only(8, Duration::from_millis(30));
     let deadline = page.arm_observation(deadline_options).await.expect("arm deadline scope");
     let deadline = deadline.wait().await.expect("wait for deadline");
     assert_eq!(deadline.termination, ObservationTermination::DeadlineReached);
     assert_event_accounting(&deadline, deadline_options.max_events);
+    assert_early_terminal_byte_report(&deadline);
 
     let interrupt_options = console_only(8, Duration::from_secs(5));
     let interrupted =
@@ -202,12 +282,14 @@ async fn event_limit_deadline_and_interrupt_are_explicit() {
     let interrupted = interrupted.interrupt().await.expect("interrupt scope");
     assert_eq!(interrupted.termination, ObservationTermination::Interrupted);
     assert_event_accounting(&interrupted, interrupt_options.max_events);
+    assert_early_terminal_byte_report(&interrupted);
 
     let cancel_options = console_only(8, Duration::from_secs(5));
     let cancelled = page.arm_observation(cancel_options).await.expect("arm cancellable scope");
     let cancelled = cancelled.cancel().await.expect("cancel scope");
     assert_eq!(cancelled.termination, ObservationTermination::Cancelled);
     assert_event_accounting(&cancelled, cancel_options.max_events);
+    assert_early_terminal_byte_report(&cancelled);
 
     page.close().await.expect("close page");
     browser.close().await.expect("close browser");
@@ -226,6 +308,7 @@ async fn page_close_reports_provider_disconnect_and_cleans_up() {
     assert_eq!(report.termination, ObservationTermination::ProviderDisconnected);
     assert!(report.cleanup_complete);
     assert_event_accounting(&report, options.max_events);
+    assert_early_terminal_byte_report(&report);
     browser.close().await.expect("close browser");
 }
 
@@ -256,6 +339,53 @@ async fn dropped_scope_does_not_leak_a_pool_permit() {
         .expect("pool slot remained available");
     pool.release(tab).await;
     pool.close().await.expect("close pool");
+}
+
+#[tokio::test]
+async fn cancelled_terminal_joins_abort_collectors_before_later_observation() {
+    let browser = session().await;
+    let page = browser.new_blank_page().await.expect("new blank page");
+
+    let waiting = page
+        .arm_observation(console_only(8, Duration::from_secs(5)))
+        .await
+        .expect("arm waiting scope");
+    let waiting = tokio::spawn(async move { waiting.wait().await });
+    yield_now().await;
+    waiting.abort();
+    let _ = waiting.await;
+
+    let finishing = page
+        .arm_observation(console_only(8, Duration::from_secs(5)))
+        .await
+        .expect("arm finishing scope");
+    let finishing = tokio::spawn(async move { finishing.finish().await });
+    yield_now().await;
+    finishing.abort();
+    let _ = finishing.await;
+
+    let cancelling = page
+        .arm_observation(console_only(8, Duration::from_secs(5)))
+        .await
+        .expect("arm cancelling scope");
+    let cancelling = tokio::spawn(async move { cancelling.cancel().await });
+    yield_now().await;
+    cancelling.abort();
+    let _ = cancelling.await;
+
+    let next = page
+        .arm_observation(console_only(8, Duration::from_secs(5)))
+        .await
+        .expect("arm scope after cancelled terminal joins");
+    page.evaluate_js("console.log('after-cancelled-join')")
+        .await
+        .expect("emit subsequent console event");
+    sleep(Duration::from_millis(10)).await;
+    let report = next.finish().await.expect("finish subsequent scope");
+    assert!(report.events.iter().any(|event| event.kind == ObservationEventKind::ConsoleApiCalled));
+
+    page.close().await.expect("page remains closable");
+    browser.close().await.expect("browser remains closable");
 }
 
 #[tokio::test]

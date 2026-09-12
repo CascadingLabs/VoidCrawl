@@ -37,15 +37,15 @@ async fn server_with_page() -> VoidCrawlServer {
         .await
         .expect("navigate fixture");
     let handle = Arc::new(DedicatedSession {
-        session:                 Arc::new(session),
-        page:                    Mutex::new(page),
-        profile_lease:           None,
-        last_navigation:         Mutex::new(None),
-        challenge:               Mutex::new(None),
-        pending_download:        Mutex::new(None),
+        session: Arc::new(session),
+        page: Mutex::new(page),
+        profile_lease: None,
+        last_navigation: Mutex::new(None),
+        challenge: Mutex::new(None),
+        pending_download: Mutex::new(None),
         pending_network_capture: Mutex::new(None),
-        pending_recording:       Mutex::new(None),
-        cookie_leases:           Mutex::new(HashMap::new()),
+        pending_recording: Mutex::new(None),
+        cookie_leases: Mutex::new(HashMap::new()),
     });
     let sessions = Arc::new(SessionRegistry::default());
     sessions.insert(SID.to_string(), handle).await;
@@ -62,9 +62,9 @@ async fn interrupted_mcp_session_blocks_mutation_but_allows_inspection_and_resum
     let interrupted = interrupt::begin(
         &server,
         SessionInterruptArgs {
-            session_id:  SID.to_string(),
-            code:        "policy.operator_review".into(),
-            summary:     "fixture review".into(),
+            session_id: SID.to_string(),
+            code: "policy.operator_review".into(),
+            summary: "fixture review".into(),
             ttl_seconds: 30,
         },
     )
@@ -98,7 +98,8 @@ async fn interrupted_mcp_session_blocks_mutation_but_allows_inspection_and_resum
     )
     .await
     .expect_err("mutating eval must be blocked while interrupted");
-    assert!(err.message.contains(&interrupted.interrupt_id));
+    assert_eq!(err.message, "session is interrupted");
+    assert!(!err.message.contains(&interrupted.interrupt_id));
     let wire = serde_json::to_value(&err).expect("serialize MCP error");
     assert_eq!(wire["data"]["exception"], "SessionInterrupted");
     assert_eq!(wire["data"]["interrupt_id"], interrupted.interrupt_id);
@@ -131,9 +132,9 @@ async fn expired_mcp_interrupt_closes_and_removes_its_dedicated_session() {
     interrupt::begin(
         &server,
         SessionInterruptArgs {
-            session_id:  SID.to_string(),
-            code:        "policy.operator_review".into(),
-            summary:     "fixture expiry".into(),
+            session_id: SID.to_string(),
+            code: "policy.operator_review".into(),
+            summary: "fixture expiry".into(),
             ttl_seconds: 1,
         },
     )

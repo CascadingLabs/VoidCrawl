@@ -62,3 +62,8 @@ output/
 # Screenshot output from the examples.
 examples/screenshots/
 .voidcrawl/browser/profile/
+
+benchmarks-results/
+voidcrawl-benchmarks/results/
+.pi/evidence/
+vgcore.*
